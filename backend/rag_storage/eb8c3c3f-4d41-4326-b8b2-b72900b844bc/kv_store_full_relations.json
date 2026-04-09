@@ -1,0 +1,66 @@
+{
+  "de5abead-baae-43d3-bdaa-c102ab301912": {
+    "relation_pairs": [
+      [
+        "255.255.255.0",
+        "CIDR /24"
+      ],
+      [
+        "Congestion Control",
+        "TCP Slow Start"
+      ]
+    ],
+    "count": 2,
+    "create_time": 1775714826,
+    "update_time": 1775714826,
+    "_id": "de5abead-baae-43d3-bdaa-c102ab301912"
+  },
+  "8e193fe9-293b-49c6-a7aa-a7d6306233c4": {
+    "relation_pairs": [
+      [
+        "255.255.255.0",
+        "CIDR /24"
+      ],
+      [
+        "Congestion Control",
+        "TCP Slow Start"
+      ]
+    ],
+    "count": 2,
+    "create_time": 1775714828,
+    "update_time": 1775714828,
+    "_id": "8e193fe9-293b-49c6-a7aa-a7d6306233c4"
+  },
+  "80d54244-0f85-4e49-9c2e-a9545ff03efd": {
+    "relation_pairs": [
+      [
+        "255.255.255.0",
+        "CIDR /24"
+      ],
+      [
+        "Congestion Control",
+        "TCP Slow Start"
+      ]
+    ],
+    "count": 2,
+    "create_time": 1775714829,
+    "update_time": 1775714829,
+    "_id": "80d54244-0f85-4e49-9c2e-a9545ff03efd"
+  },
+  "45d31e62-17d9-4a9f-b133-a3b430f13dde": {
+    "relation_pairs": [
+      [
+        "255.255.255.0",
+        "CIDR /24"
+      ],
+      [
+        "Congestion Control",
+        "TCP Slow Start"
+      ]
+    ],
+    "count": 2,
+    "create_time": 1775714830,
+    "update_time": 1775714830,
+    "_id": "45d31e62-17d9-4a9f-b133-a3b430f13dde"
+  }
+}

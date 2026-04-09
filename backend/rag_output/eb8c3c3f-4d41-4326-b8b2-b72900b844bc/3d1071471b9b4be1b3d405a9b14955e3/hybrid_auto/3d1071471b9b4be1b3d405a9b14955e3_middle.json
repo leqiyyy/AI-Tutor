@@ -1,0 +1,52 @@
+{
+    "pdf_info": [
+        {
+            "para_blocks": [
+                {
+                    "bbox": [
+                        76,
+                        77,
+                        458,
+                        90
+                    ],
+                    "type": "text",
+                    "angle": 0,
+                    "index": 0,
+                    "lines": [
+                        {
+                            "bbox": [
+                                76,
+                                76,
+                                459,
+                                91
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        76,
+                                        76,
+                                        459,
+                                        91
+                                    ],
+                                    "type": "text",
+                                    "content": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0.",
+                                    "score": 1.0
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "discarded_blocks": [],
+            "page_size": [
+                595,
+                841
+            ],
+            "page_idx": 0
+        }
+    ],
+    "_backend": "hybrid",
+    "_ocr_enable": false,
+    "_vlm_ocr_enable": false,
+    "_version_name": "3.0.8"
+}

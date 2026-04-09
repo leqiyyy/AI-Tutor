@@ -1,0 +1,106 @@
+{
+  "4a20c124c40a57741f41b334647d7365": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0. ",
+        "bbox": [
+          127,
+          91,
+          769,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-5d9b6678256fdb0e6d346d41fc2f3aa5",
+    "mtime": 1775705520.133206,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1775706386.3278148,
+    "cache_version": "1.0",
+    "create_time": 1775706386,
+    "update_time": 1775706386,
+    "_id": "4a20c124c40a57741f41b334647d7365"
+  },
+  "5bbdd7fafe8259ae8016cf299d305f45": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0. ",
+        "bbox": [
+          127,
+          91,
+          769,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-5d9b6678256fdb0e6d346d41fc2f3aa5",
+    "mtime": 1775707013.9194853,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1775707416.1945512,
+    "cache_version": "1.0",
+    "create_time": 1775707416,
+    "update_time": 1775707416,
+    "_id": "5bbdd7fafe8259ae8016cf299d305f45"
+  },
+  "bdf1a105d3383bcebb2bdf1f30c98ab2": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0. ",
+        "bbox": [
+          127,
+          91,
+          769,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-5d9b6678256fdb0e6d346d41fc2f3aa5",
+    "mtime": 1775712010.6166286,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1775712604.8497422,
+    "cache_version": "1.0",
+    "create_time": 1775712604,
+    "update_time": 1775712604,
+    "_id": "bdf1a105d3383bcebb2bdf1f30c98ab2"
+  },
+  "82bd8c6048d7412b9b527dcb8fa519de": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0. ",
+        "bbox": [
+          127,
+          91,
+          769,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-5d9b6678256fdb0e6d346d41fc2f3aa5",
+    "mtime": 1775714317.9432602,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1775714822.2590213,
+    "cache_version": "1.0",
+    "create_time": 1775714822,
+    "update_time": 1775714822,
+    "_id": "82bd8c6048d7412b9b527dcb8fa519de"
+  }
+}

@@ -1,0 +1,70 @@
+<?xml version='1.0' encoding='utf-8'?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd"><key id="d13" for="edge" attr.name="truncate" attr.type="string"/>
+<key id="d12" for="edge" attr.name="created_at" attr.type="long"/>
+<key id="d11" for="edge" attr.name="file_path" attr.type="string"/>
+<key id="d10" for="edge" attr.name="source_id" attr.type="string"/>
+<key id="d9" for="edge" attr.name="keywords" attr.type="string"/>
+<key id="d8" for="edge" attr.name="description" attr.type="string"/>
+<key id="d7" for="edge" attr.name="weight" attr.type="double"/>
+<key id="d6" for="node" attr.name="truncate" attr.type="string"/>
+<key id="d5" for="node" attr.name="created_at" attr.type="long"/>
+<key id="d4" for="node" attr.name="file_path" attr.type="string"/>
+<key id="d3" for="node" attr.name="source_id" attr.type="string"/>
+<key id="d2" for="node" attr.name="description" attr.type="string"/>
+<key id="d1" for="node" attr.name="entity_type" attr.type="string"/>
+<key id="d0" for="node" attr.name="entity_id" attr.type="string"/>
+<graph edgedefault="undirected"><node id="TCP Slow Start">
+  <data key="d0">TCP Slow Start</data>
+  <data key="d1">method</data>
+  <data key="d2">TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.</data>
+  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
+  <data key="d4">rag_test.txt</data>
+  <data key="d5">1775714829</data>
+  <data key="d6"></data>
+</node>
+<node id="Congestion Control">
+  <data key="d0">Congestion Control</data>
+  <data key="d1">concept</data>
+  <data key="d2">Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.</data>
+  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
+  <data key="d4">rag_test.txt</data>
+  <data key="d5">1775714829</data>
+  <data key="d6"></data>
+</node>
+<node id="CIDR /24">
+  <data key="d0">CIDR /24</data>
+  <data key="d1">concept</data>
+  <data key="d2">CIDR /24 is a CIDR notation that means 255.255.255.0.&lt;SEP&gt;CIDR /24 is a CIDR notation that means 255.255.255.0.&lt;SEP&gt;CIDR /24 is a CIDR notation that means 255.255.255.0.&lt;SEP&gt;CIDR /24 is a CIDR notation that means 255.255.255.0.</data>
+  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
+  <data key="d4">rag_test.txt</data>
+  <data key="d5">1775714829</data>
+  <data key="d6"></data>
+</node>
+<node id="255.255.255.0">
+  <data key="d0">255.255.255.0</data>
+  <data key="d1">data</data>
+  <data key="d2">255.255.255.0 is the subnet mask represented by CIDR /24.&lt;SEP&gt;255.255.255.0 is the subnet mask represented by CIDR /24.&lt;SEP&gt;255.255.255.0 is the subnet mask represented by CIDR /24.&lt;SEP&gt;255.255.255.0 is the subnet mask represented by CIDR /24.</data>
+  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
+  <data key="d4">rag_test.txt</data>
+  <data key="d5">1775714830</data>
+  <data key="d6"></data>
+</node>
+<edge source="TCP Slow Start" target="Congestion Control">
+  <data key="d7">4.0</data>
+  <data key="d8">TCP Slow Start is identified as the initial phase of congestion control.&lt;SEP&gt;TCP Slow Start is identified as the initial phase of congestion control.&lt;SEP&gt;TCP Slow Start is identified as the initial phase of congestion control.&lt;SEP&gt;TCP Slow Start is identified as the initial phase of congestion control.</data>
+  <data key="d9">control mechanism,networking,phase</data>
+  <data key="d10">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
+  <data key="d11">rag_test.txt</data>
+  <data key="d12">1775714830</data>
+  <data key="d13"></data>
+</edge>
+<edge source="CIDR /24" target="255.255.255.0">
+  <data key="d7">4.0</data>
+  <data key="d8">CIDR /24 means the subnet mask 255.255.255.0.&lt;SEP&gt;CIDR /24 means the subnet mask 255.255.255.0.&lt;SEP&gt;CIDR /24 means the subnet mask 255.255.255.0.&lt;SEP&gt;CIDR /24 means the subnet mask 255.255.255.0.</data>
+  <data key="d9">equivalence,networking,notation</data>
+  <data key="d10">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
+  <data key="d11">rag_test.txt</data>
+  <data key="d12">1775714830</data>
+  <data key="d13"></data>
+</edge>
+</graph></graphml>

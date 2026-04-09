@@ -1,0 +1,21 @@
+[
+    [
+        {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {
+                        "type": "text",
+                        "content": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0. "
+                    }
+                ]
+            },
+            "bbox": [
+                127,
+                91,
+                769,
+                107
+            ]
+        }
+    ]
+]

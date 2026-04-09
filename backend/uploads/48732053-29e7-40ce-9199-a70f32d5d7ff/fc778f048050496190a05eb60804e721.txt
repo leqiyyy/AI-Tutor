@@ -1,0 +1,1 @@
+TCP congestion control includes slow start and congestion avoidance. Slow start increases the congestion window quickly.

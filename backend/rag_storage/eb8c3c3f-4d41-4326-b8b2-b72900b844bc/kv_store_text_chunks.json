@@ -1,0 +1,16 @@
+{
+  "chunk-5d9b6678256fdb0e6d346d41fc2f3aa5": {
+    "tokens": 24,
+    "content": "TCP slow start is the initial congestion control phase. CIDR /24 means 255.255.255.0.",
+    "chunk_order_index": 0,
+    "full_doc_id": "45d31e62-17d9-4a9f-b133-a3b430f13dde",
+    "file_path": "rag_test.txt",
+    "llm_cache_list": [
+      "default:extract:7f003c20977184e95ac49803d5f08fcd",
+      "default:extract:0bf0c8dc501a9540e1ec120abe699b43"
+    ],
+    "update_time": 1775714829,
+    "_id": "chunk-5d9b6678256fdb0e6d346d41fc2f3aa5",
+    "create_time": 0
+  }
+}
