@@ -1,4 +1,5 @@
 from typing import Any
+from uuid import uuid4
 
 from app.core.config import settings
 
@@ -12,15 +13,34 @@ class DummyCeleryApp:
     """Fallback Celery-like object so imports do not fail in dev."""
 
     conf: dict[str, Any] = {}
+    enabled: bool = False
 
     def task(self, *args, **kwargs):
         def decorator(func):
+            task_name = kwargs.get("name", getattr(func, "__name__", "dummy_task"))
+
+            def _enqueue(*_args, **_kwargs):
+                _ = (_args, _kwargs, task_name)
+                return DummyAsyncResult(uuid4().hex)
+
+            func.delay = _enqueue
+            func.apply_async = lambda args=None, kwargs=None, **opts: _enqueue(*(args or ()), **(kwargs or {}))
             return func
 
         return decorator
 
     def autodiscover_tasks(self, *_args, **_kwargs):
         return []
+
+
+class DummyAsyncResult:
+    def __init__(self, task_id: str):
+        self.id = task_id
+        self.status = "PENDING"
+
+    def get(self, timeout: float | None = None):  # pragma: no cover - convenience for parity
+        _ = timeout
+        return None
 
 
 def _create_celery_app():
@@ -37,7 +57,8 @@ def _create_celery_app():
         timezone="UTC",
         enable_utc=True,
     )
-    app.autodiscover_tasks(["app.workers.tasks"])
+    app.enabled = True
+    app.autodiscover_tasks(["app.workers"])
     return app
 
 

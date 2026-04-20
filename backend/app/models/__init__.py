@@ -4,7 +4,7 @@ from app.models.course import Course, Class, ClassMember, Material, Task, Submis
 from app.models.chat import ChatCitation, ChatSession, ChatMessage, ReviewItem, ReviewSyncRecord
 from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, KnowledgeRelation, Flashcard, FlashcardRecord
 from app.models.notification import Notification, VerifyCode
-from app.models.analytics import LearningRecord, QuestionAnalytics, StudentProfile, StudyMistake
+from app.models.analytics import LearningRecord, QuestionAnalytics, StudentProfile, StudyMistake, RAGQueryEvent
 from app.models.admin import AdminSetting
 
 __all__ = [
@@ -13,6 +13,6 @@ __all__ = [
     "ChatSession", "ChatMessage", "ReviewItem", "ChatCitation", "ReviewSyncRecord",
     "KnowledgeEntity", "KnowledgeRelation", "Flashcard", "FlashcardRecord", "KBSpace", "FileParseTask",
     "Notification", "VerifyCode",
-    "LearningRecord", "QuestionAnalytics", "StudentProfile", "StudyMistake",
+    "LearningRecord", "QuestionAnalytics", "StudentProfile", "StudyMistake", "RAGQueryEvent",
     "AdminSetting",
 ]

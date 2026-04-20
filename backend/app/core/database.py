@@ -53,6 +53,52 @@ def initialize_database() -> None:
     import app.models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_runtime_schema_compatibility()
+
+
+def _ensure_runtime_schema_compatibility() -> None:
+    """Best-effort additive schema upgrades for local SQLite development."""
+    if not settings.DATABASE_IS_SQLITE:
+        return
+
+    alter_plan = {
+        "knowledge_entities": {
+            "confidence": "ALTER TABLE knowledge_entities ADD COLUMN confidence FLOAT",
+            "source_span": "ALTER TABLE knowledge_entities ADD COLUMN source_span JSON",
+            "provenance": "ALTER TABLE knowledge_entities ADD COLUMN provenance JSON",
+            "updated_at": "ALTER TABLE knowledge_entities ADD COLUMN updated_at DATETIME",
+        },
+        "knowledge_relations": {
+            "confidence": "ALTER TABLE knowledge_relations ADD COLUMN confidence FLOAT",
+            "source_span": "ALTER TABLE knowledge_relations ADD COLUMN source_span JSON",
+            "provenance": "ALTER TABLE knowledge_relations ADD COLUMN provenance JSON",
+            "updated_at": "ALTER TABLE knowledge_relations ADD COLUMN updated_at DATETIME",
+        },
+    }
+
+    with engine.begin() as connection:
+        for table_name, columns in alter_plan.items():
+            existing_columns = _sqlite_columns(connection, table_name)
+            for column_name, ddl in columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(text(ddl))
+
+        connection.execute(text(
+            "UPDATE knowledge_entities "
+            "SET confidence = COALESCE(confidence, 0.6), "
+            "updated_at = COALESCE(updated_at, created_at)"
+        ))
+        connection.execute(text(
+            "UPDATE knowledge_relations "
+            "SET confidence = COALESCE(confidence, 0.55), "
+            "updated_at = COALESCE(updated_at, created_at)"
+        ))
+
+
+def _sqlite_columns(connection, table_name: str) -> set[str]:
+    result = connection.execute(text(f"PRAGMA table_info({table_name})"))
+    return {row[1] for row in result.fetchall()}
 
 
 def check_database_connection() -> tuple[bool, str]:

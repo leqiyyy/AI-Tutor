@@ -25,6 +25,9 @@ def test_teacher_notifications_and_student_reports(client, teacher_headers, stud
     assert monthly.status_code == 200
     assert exported.status_code == 200
     assert "summary" in weekly.json()["data"]
+    assert "experiment_context" in weekly.json()["data"]
+    assert "model_routing" in weekly.json()["data"]["experiment_context"]
+    assert "recommendation_context" in weekly.json()["data"]["highlights"]
     assert exported.headers["content-type"].startswith("text/csv")
 
     mistake = client.post("/api/v1/students/me/mistakes", headers=student_headers, json={

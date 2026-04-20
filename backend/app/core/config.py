@@ -60,17 +60,23 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_API_BASE: str = ""
     LLM_WIRE_API: str = "responses"
+    LLM_BACKEND: str = "auto"  # auto | api | local | mock
+    LLM_LOCAL_API_BASE: str = ""
     EXTRACT_MODEL: str = ""
     EXTRACT_API_KEY: str = ""
     EXTRACT_API_BASE: str = ""
     EXTRACT_WIRE_API: str = "chat_completions"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIM: int = 1536
+    EMBEDDING_BACKEND: str = "auto"  # auto | api | local | mock
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_API_BASE: str = ""
+    EMBEDDING_LOCAL_API_BASE: str = ""
     VLM_MODEL: str = ""
+    VLM_BACKEND: str = "auto"  # auto | api | local | mock
     VLM_API_KEY: str = ""
     VLM_API_BASE: str = ""
+    VLM_LOCAL_API_BASE: str = ""
     VLM_WIRE_API: str = "chat_completions"
     RAG_ENGINE: str = "mock"
     LIBREOFFICE_PATH: str = ""
@@ -80,6 +86,25 @@ class Settings(BaseSettings):
     RAGANYTHING_PARSE_METHOD: str = "auto"
     RAGANYTHING_QUERY_MODE: str = "mix"
     RAGANYTHING_MAX_CONCURRENT_FILES: int = 1
+    RAG_RETRIEVAL_STRATEGY: str = "hybrid"  # lexical | hybrid | graph
+    RAG_RETRIEVAL_CANDIDATE_K: int = 12
+    RAG_ANSWER_TOP_K: int = 3
+    RAG_QUERY_REWRITE_ENABLED: bool = False
+    RAG_QUERY_REWRITE_MODE: str = "simple"  # none | simple | compact | keywords
+    RAG_QUERY_REWRITE_MAX_VARIANTS: int = 3
+    RERANKER_PROVIDER: str = "mock"  # mock | none | api | local
+    RERANKER_MODEL: str = "mock-reranker-v1"
+    RERANKER_API_BASE: str = ""
+    RERANKER_API_KEY: str = ""
+    RERANKER_API_PATH: str = "/rerank"
+    RERANKER_API_TIMEOUT_SECONDS: float = 20.0
+    RERANKER_LOCAL_MODEL: str = "local-heuristic-v1"
+    KB_PARSE_MAX_RETRIES: int = 2
+    KB_QUEUE_RETRY_COOLDOWN_SECONDS: int = 30
+    KB_QUEUE_AUTO_RETRY_ENABLED: bool = True
+    KB_QUEUE_AUTO_RETRY_MAX_ROUNDS: int = 2
+    KB_INDEX_BATCH_RETRY_LIMIT: int = 50
+    KB_INDEX_ALERT_NOTIFY_ADMIN: bool = True
 
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
@@ -99,6 +124,9 @@ class Settings(BaseSettings):
         "REDIS_AVAILABLE",
         "MINIO_SECURE",
         "EMAIL_DEV_MODE",
+        "KB_QUEUE_AUTO_RETRY_ENABLED",
+        "KB_INDEX_ALERT_NOTIFY_ADMIN",
+        "RAG_QUERY_REWRITE_ENABLED",
         mode="before",
     )
     @classmethod

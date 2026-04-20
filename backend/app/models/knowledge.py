@@ -19,6 +19,9 @@ class KnowledgeEntity(Base):
     entity_type = Column(String(100), nullable=True)  # concept, person, formula, etc.
     description = Column(Text, nullable=True)
     source_material_id = Column(String(36), ForeignKey("materials.id"), nullable=True)
+    confidence = Column(Float, default=0.6)
+    source_span = Column(JSON, nullable=True)
+    provenance = Column(JSON, nullable=True)
     status = Column(
         Enum("pending", "approved", "rejected", name="entity_status"),
         default="pending"
@@ -26,6 +29,11 @@ class KnowledgeEntity(Base):
     reviewed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class KnowledgeRelation(Base):
@@ -38,7 +46,15 @@ class KnowledgeRelation(Base):
     target_id = Column(String(36), ForeignKey("knowledge_entities.id"), nullable=False)
     relation_type = Column(String(100), nullable=True)  # prerequisite, related, etc.
     weight = Column(Float, default=1.0)
+    confidence = Column(Float, default=0.55)
+    source_span = Column(JSON, nullable=True)
+    provenance = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class Flashcard(Base):

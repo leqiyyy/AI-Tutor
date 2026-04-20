@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import BadRequestException
 from app.core.deps import get_current_teacher, get_current_user
+from app.core.error_codes import ErrorCode
+from app.core.openapi_examples import responses_with_success
 from app.core.response import ok
 from app.db.base import get_db
 from app.models.user import User
@@ -56,7 +58,38 @@ async def send_message(
     return ok(data=result)
 
 
-@router.post("/query", response_model=None)
+@router.post(
+    "/query",
+    response_model=None,
+    responses=responses_with_success(
+        example_data={
+            "session_id": "a7f6f0c4-16a7-4ad5-8d76-0eb4e9e614b1",
+            "message_id": "89f7c67b-0f2a-4da6-9275-70fc4d715989",
+            "content": "TCP slow start increases the congestion window exponentially until loss.",
+            "sources": [
+                {
+                    "name": "network_notes.pdf",
+                    "page": 12,
+                    "type": "pdf",
+                    "score": 0.91,
+                    "chunk_id": "network_notes-p12-c3",
+                }
+            ],
+            "suggestions": [
+                "Explain how slow start differs from congestion avoidance.",
+            ],
+            "confidence": 0.87,
+            "needs_review": False,
+        },
+        include_errors=(
+            ErrorCode.BAD_REQUEST.value,
+            ErrorCode.UNAUTHORIZED.value,
+            ErrorCode.FORBIDDEN.value,
+            ErrorCode.VALIDATION_ERROR.value,
+            ErrorCode.INTERNAL_ERROR.value,
+        ),
+    ),
+)
 async def query_chat(
     body: ChatQueryRequest,
     db: Session = Depends(get_db),
@@ -99,7 +132,26 @@ async def query_with_image(
     return await query_chat(body=body, db=db, current_user=current_user)
 
 
-@router.post("/messages/{message_id}/feedback", response_model=None)
+@router.post(
+    "/messages/{message_id}/feedback",
+    response_model=None,
+    responses=responses_with_success(
+        example_data={
+            "message_id": "89f7c67b-0f2a-4da6-9275-70fc4d715989",
+            "feedback": "dislike",
+            "reason": "The answer misses congestion control details.",
+            "recorded_at": "2026-04-17T01:22:00Z",
+        },
+        include_errors=(
+            ErrorCode.BAD_REQUEST.value,
+            ErrorCode.UNAUTHORIZED.value,
+            ErrorCode.FORBIDDEN.value,
+            ErrorCode.NOT_FOUND.value,
+            ErrorCode.VALIDATION_ERROR.value,
+            ErrorCode.INTERNAL_ERROR.value,
+        ),
+    ),
+)
 def submit_feedback(
     message_id: str,
     body: FeedbackRequest,

@@ -1,289 +1,174 @@
-# API Contract
+# API Contract锛堝悗绔厛琛岀増锛?
+鏇存柊鏃堕棿锛?026-04-17
 
-## Response Envelope
+---
 
-All API responses use:
+## 1. 閫氱敤绾﹀畾
+
+### 1.1 Base URL
+
+- 寮�鍙戠幆澧冿細`/api/v1`
+
+### 1.2 缁熶竴鍝嶅簲缁撴瀯
 
 ```json
 {
   "code": 200,
   "message": "success",
-  "data": {}
+  "data": {},
+  "meta": {
+    "request_id": "uuid",
+    "version": "0.1.0"
+  }
 }
 ```
 
-Error shape:
-
+閿欒鍝嶅簲锛?
 ```json
 {
   "code": 400,
   "message": "Bad request",
-  "data": null
+  "data": null,
+  "meta": {
+    "request_id": "uuid",
+    "version": "0.1.0"
+  }
 }
 ```
 
-Authentication uses:
+### 1.3 璁よ瘉
 
 ```http
 Authorization: Bearer <access_token>
 ```
 
-## Authentication
+### 1.4 瀛楁鍏煎绛栫暐
 
-### POST `/api/v1/auth/login`
+- 鐧诲綍锛氬吋瀹?`account` 涓?`email`
+- 娉ㄥ唽锛氬吋瀹?camelCase 涓?snake_case
+- 鑱婂ぉ璇锋眰锛氬吋瀹?`message` 涓?`content`
 
-Request:
+---
 
-```json
-{
-  "account": "teacher@aitutor.local",
-  "password": "Teacher123!",
-  "role": "teacher"
-}
-```
+## 2. 宸插疄鐜版牳蹇冩帴鍙ｏ紙褰撳墠鍙敤锛?
+### 2.1 璁よ瘉
 
-Notes:
+- `POST /auth/send-verify-code`
+- `POST /auth/register`
+- `POST /auth/login`
+- `GET /auth/me`
 
-- `account` also accepts student ID and teacher ID.
+### 2.2 璇剧▼涓庣彮绾?
+- `GET /courses`
+- `GET /courses/{course_id}`
+- `POST /courses`
+- `GET /courses/{course_id}/analytics`
+- `GET /classes`
+- `GET /classes/{class_id}`
+- `POST /classes`
+- `PUT /classes/{class_id}`
+- `POST /classes/join`
+- `POST /classes/{class_id}/invite`
+- `GET /classes/{class_id}/members`
 
-Response:
+### 2.3 鏂囦欢涓庣煡璇嗗簱
 
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "access_token": "token",
-    "token_type": "bearer",
-    "role": "teacher",
-    "user_id": "uuid",
-    "real_name": "Wang Teacher"
-  }
-}
-```
+- `POST /courses/{course_id}/files/upload`
+- `GET /courses/{course_id}/files`
+- `GET /courses/{course_id}/files/{file_id}/preview`
+- `GET /courses/{course_id}/files/{file_id}/download`
+- `GET /courses/{course_id}/files/{file_id}/analysis`
+- `GET /courses/{course_id}/kb/status`
+- `POST /courses/{course_id}/kb/rebuild`
+- `GET /courses/{course_id}/graph`
+- `GET /courses/{course_id}/search`
 
-### POST `/api/v1/auth/register`
+### 2.4 鑱婂ぉ涓庡鏍?
+- `GET /chat/sessions`
+- `GET /chat/sessions/{session_id}/messages`
+- `POST /chat/query`
+- `POST /chat/query-with-image`
+- `POST /chat/messages/{message_id}/feedback`
+- `GET /reviews/pending`
+- `POST /reviews/{review_id}/submit`
+- `POST /reviews/escalate`
 
-Student request example:
+### 2.5 浠诲姟銆侀�氱煡銆侀棯鍗°�佸鐢熺敾鍍?
+- `GET /tasks`
+- `GET /tasks/{task_id}`
+- `POST /tasks`
+- `POST /tasks/{task_id}/submit`
+- `GET /tasks/{task_id}/submissions`
+- `GET /notifications`
+- `POST /notifications`
+- `POST /notifications/mark-read`
+- `GET /flashcards`
+- `POST /flashcards/{flashcard_id}/review`
+- `GET /students/me/profile`
+- `GET /students/me/reports/weekly`
+- `GET /students/me/reports/monthly`
+- `GET /students/me/export`
+- `GET /students/me/mistakes`
+- `POST /students/me/mistakes`
+- `PUT /students/me/mistakes/{mistake_id}/mastered`
+- `POST /students/me/mistakes/{mistake_id}/practice`
 
-```json
-{
-  "role": "student",
-  "realName": "Li Student",
-  "studentId": "2024301001",
-  "email": "student@aitutor.local",
-  "password": "Student123!",
-  "confirmPassword": "Student123!",
-  "verifyCode": "123456"
-}
-```
+### 2.6 绠＄悊绔?
+- `GET /admin/overview`
+- `GET /admin/users`
+- `GET /admin/classes`
+- `GET /admin/courses`
+- `GET /admin/reviews`
+- `GET /admin/settings`
+- `GET /admin/model-config`
+- `PUT /admin/model-config`
 
-Teacher request example:
+---
 
-```json
-{
-  "role": "teacher",
-  "realName": "Wang Teacher",
-  "teacherId": "T2024001",
-  "email": "teacher@aitutor.local",
-  "password": "Teacher123!",
-  "confirmPassword": "Teacher123!",
-  "verifyCode": "123456"
-}
-```
+## 3. 璁″垝琛ラ綈鎺ュ彛锛堝悗绔笅涓�闃舵锛?
+### 3.1 鍙嶉鍒嗘瀽
 
-### GET `/api/v1/auth/me`
+- `GET /analytics/feedback/overview`
+- `GET /analytics/feedback/reasons`
+- `GET /analytics/feedback/keywords`
+- `GET /analytics/feedback/knowledge-gaps`
+- `GET /analytics/feedback/suggestions`
+- `POST /analytics/feedback/export`
 
-Returns current user profile.
+### 3.2 鏅鸿兘鎺ㄨ崘
 
-## Courses and Classes
+- `GET /recommendations/materials`
+- `GET /recommendations/learning-path`
+- `POST /recommendations/feedback`
 
-### GET `/api/v1/courses`
+### 3.3 澶氭ā鎬佺粨鏋滄煡璇?
+- `GET /files/{file_id}/preview`
+- `GET /files/{file_id}/transcript`
+- `GET /files/{file_id}/keyframes`
+- `GET /files/{file_id}/ocr`
 
-Returns course cards available to current user.
+### 3.4 绠＄悊绔�ц兘涓庡疄楠?
+- `GET /admin/rag-performance`
+- `GET /admin/experiment-results`
 
-Response item shape:
+---
 
-```json
-{
-  "id": "course_uuid",
-  "class_id": "class_uuid",
-  "name": "Computer Networks",
-  "code": "CS301",
-  "teacher_name": "Wang Teacher",
-  "student_count": 1,
-  "invite_code": "CS301A1",
-  "unread": 0
-}
-```
+## 4. 鑱婂ぉ闂瓟绀轰緥
 
-### GET `/api/v1/courses/{course_id}`
+### 4.1 璇锋眰
 
-Returns course detail with associated accessible classes.
-
-### POST `/api/v1/courses`
-
-Request:
-
-```json
-{
-  "name": "Computer Networks",
-  "code": "CS301",
-  "description": "Core networking course",
-  "cover_color": "#0f766e"
-}
-```
-
-### GET `/api/v1/classes`
-
-Returns teacher-owned or student-joined classes.
-
-### GET `/api/v1/classes/{class_id}`
-
-Returns class detail with teacher/course names and member counts.
-
-### POST `/api/v1/classes`
-
-Request:
-
-```json
-{
-  "name": "CS301 Spring Demo",
-  "course_id": "optional_course_uuid",
-  "semester": "2026 Spring"
-}
-```
-
-### POST `/api/v1/classes/join`
-
-Request:
-
-```json
-{
-  "invite_code": "CS301A1"
-}
-```
-
-### POST `/api/v1/classes/{class_id}/invite`
-
-Returns existing invite code for teacher-owned class.
-
-## Files and Knowledge Base
-
-### POST `/api/v1/courses/{course_id}/files/upload`
-
-Multipart form fields:
-
-- `file`
-- `class_id` optional
-- `title` optional
-- `description` optional
-
-Response:
-
-```json
-{
-  "code": 200,
-  "message": "File uploaded and indexed",
-  "data": {
-    "id": "material_uuid",
-    "course_id": "course_uuid",
-    "class_id": "class_uuid",
-    "file_name": "tcp_notes.txt",
-    "kb_status": "indexed",
-    "parse_task_id": "parse_task_uuid",
-    "storage_key": "storage_key"
-  }
-}
-```
-
-### GET `/api/v1/courses/{course_id}/files`
-
-Returns uploaded course files.
-
-### GET `/api/v1/courses/{course_id}/files/{file_id}/preview`
-
-Returns file preview metadata and extracted preview text.
-
-### GET `/api/v1/courses/{course_id}/files/{file_id}/download`
-
-Downloads the stored file.
-
-### GET `/api/v1/courses/{course_id}/files/{file_id}/analysis`
-
-Returns parse summary, keywords, and top chunks for the file.
-
-### GET `/api/v1/courses/{course_id}/kb/status`
-
-Response:
+`POST /chat/query`
 
 ```json
 {
   "course_id": "course_uuid",
-  "status": "ready",
-  "document_count": 1,
-  "chunk_count": 1,
-  "task_summary": {
-    "completed": 1
-  },
-  "latest_task_id": "parse_task_uuid"
-}
-```
-
-### POST `/api/v1/courses/{course_id}/kb/rebuild`
-
-Triggers simplified re-indexing for current course.
-
-### GET `/api/v1/courses/{course_id}/graph`
-
-Returns:
-
-```json
-{
-  "nodes": [],
-  "edges": []
-}
-```
-
-### GET `/api/v1/courses/{course_id}/search?q=...`
-
-Searches parsed course content and returns scored snippets.
-
-### GET `/api/v1/tasks/{task_id}`
-
-Dual use:
-
-- returns task detail when `task_id` is a task
-- returns parse task detail when `task_id` is a file parse task
-
-Parse task response example:
-
-```json
-{
-  "id": "parse_task_uuid",
-  "kind": "file_parse",
-  "status": "completed",
-  "parser_name": "simple",
-  "summary": "..."
-}
-```
-
-## Chat
-
-### POST `/api/v1/chat/query`
-
-Request:
-
-```json
-{
-  "course_id": "course_uuid",
-  "message": "What is slow start in TCP?",
+  "message": "What is TCP slow start?",
   "session_id": null,
   "attachments": []
 }
 ```
 
-Response:
+### 4.2 鍝嶅簲
 
 ```json
 {
@@ -311,279 +196,556 @@ Response:
 }
 ```
 
-### POST `/api/v1/chat/query-with-image`
+---
 
-Same contract as `/chat/query`, but `attachments` may include image metadata.
+## 5. 閿欒鐮佸缓璁紙涓嬩竴闃舵鍐荤粨锛?
+| code | 鍚箟 |
+|---|---|
+| 400 | 鍙傛暟閿欒 |
+| 401 | 鏈璇佹垨 token 鏃犳晥 |
+| 403 | 鏃犳潈闄?|
+| 404 | 璧勬簮涓嶅瓨鍦?|
+| 409 | 璧勬簮鍐茬獊 |
+| 422 | 鏍￠獙澶辫触 |
+| 500 | 鏈嶅姟鍐呴儴閿欒 |
+| 503 | 渚濊禆鏈嶅姟涓嶅彲鐢?|
 
-### GET `/api/v1/chat/sessions`
+---
+
+## 6. 鐗堟湰绛栫暐
+
+1. 褰撳墠涓荤増鏈細`v1`銆? 
+2. 鐮村潖鎬у彉鏇翠粎鍏佽閫氳繃鏂扮増鏈矾寰勫彂甯冦�? 
+3. 淇濇寔鐧诲綍/娉ㄥ唽瀛楁鍒悕鍏煎锛屽噺灏戝墠绔仈璋冭繑宸ャ�? 
+## 7. 2026-04-17 鍗忚澧為噺锛圫0瀹炵幇锛?
+### 7.1 Meta 瑙勮寖锛堟柊澧?`trace_id`锛?
+鎵�鏈夊搷搴旓紙鎴愬姛/澶辫触锛夌粺涓�杩斿洖锛?
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {},
+  "meta": {
+    "request_id": "uuid",
+    "trace_id": "trace_id_or_request_id",
+    "version": "0.1.0"
+  }
+}
+```
+
+璇存槑锛?- `X-Request-ID`锛氱敱鍚庣姣忔璇锋眰鐢熸垚銆?- `X-Trace-ID`锛氫紭鍏堥�忎紶璇锋眰澶达紱鑻ユ湭浼犲垯鍥為��涓烘湰娆?`request_id`銆?
+### 7.2 閿欒缁撴瀯锛堟柊澧炵ǔ瀹?`error.key`锛?
+閿欒鍝嶅簲绀轰緥锛?
+```json
+{
+  "code": 401,
+  "message": "Authentication required",
+  "data": null,
+  "error": {
+    "key": "auth_required"
+  },
+  "meta": {
+    "request_id": "uuid",
+    "trace_id": "trace_id_or_request_id",
+    "version": "0.1.0"
+  }
+}
+```
+
+### 7.3 鍐荤粨閿欒鐩綍锛堢涓�鐗堬級
+
+| HTTP/Code | error.key | 鍚箟 |
+|---|---|---|
+| 400 | `bad_request` | 璇锋眰鍙傛暟鎴栦笟鍔″墠缃潯浠朵笉婊¤冻 |
+| 401 | `auth_required` | 鏈璇佹垨璁よ瘉澶辨晥 |
+| 403 | `forbidden` | 閴存潈閫氳繃浣嗘棤鏉冮檺 |
+| 404 | `resource_not_found` | 璧勬簮涓嶅瓨鍦?|
+| 409 | `resource_conflict` | 璧勬簮鍐茬獊 |
+| 422 | `validation_error` | 璇锋眰浣撻獙璇佸け璐?|
+| 500 | `internal_error` | 鏈嶅姟鍐呴儴寮傚父 |
+| 503 | `upstream_unavailable` | 渚濊禆鏈嶅姟涓嶅彲鐢?|
+
+### 7.4 OpenAPI 绀轰緥瑕嗙洊锛堝綋鍓嶏級
+
+鏈疆宸茶ˉ鍏呭搷搴旂ず渚嬬殑鎺ュ彛锛?- `POST /auth/login`
+- `GET /auth/me`
+- `POST /chat/query`
+- `POST /chat/messages/{message_id}/feedback`
+- `POST /courses/{course_id}/files/upload`
+- `GET /courses/{course_id}/kb/status`
+
+鍏朵綑鎺ュ彛灏嗘寜 S0 鍓╀綑浠诲姟缁х画琛ラ綈銆?
+## 8. 2026-04-17 管理端RAG性能接口（已实现）
+
+- 新增：GET /admin/rag-performance
+- 参数：
+  - days（1-90，默认7）
+  - class_id（可选）
+- 返回核心字段：
+  - 	otals.queries/success/fallback/main_chain_success
+  - ates.success_rate/fallback_rate/main_chain_success_rate
+  - latency_ms.avg/p50/p95/max
+  - quality.avg_confidence/avg_source_count
+  - distributions.query_mode/engine/fallback_reason
+
+该接口用于管理端观测 RAG 主链生效程度与回退健康度，作为后续实验评测和模型调优依据。
+
+## 9. 2026-04-17 管理端实验结果接口（已实现）
+
+- 新增：GET /admin/experiment-results
+- 参数：
+  - days（1-90，默认7）
+  - class_id（可选）
+- 返回：
+  - summary（query_total/main_chain_success_rate/fallback_rate/avg_confidence/p95_latency_ms）
+  - model_snapshot（llm_provider/llm_model/rag_engine）
+  - ag_performance（完整聚合明细）
+
+该接口用于科研实验阶段的周期性结果对照与归档。
+
+## 10. 2026-04-17 索引任务管理接口（S2 第一阶段）
+
+新增接口：
+- `GET /courses/{course_id}/kb/tasks`
+  - 参数：`class_id?`、`status?`、`page`、`page_size`
+  - 返回：课程下文件解析任务列表（含重试与错误分类字段）
+- `POST /courses/{course_id}/files/{file_id}/kb/retry`
+  - 参数：`force`（默认 `true`）
+  - 返回：重试动作结果与最新任务快照
+- `GET /admin/index-tasks`
+  - 参数：`course_id?`、`class_id?`、`status?`、`page`、`page_size`
+  - 返回：全局索引任务监控列表
+
+上传幂等补充：
+- `POST /courses/{course_id}/files/upload` 在响应中新增：
+  - `deduplicated`（是否复用已有材料）
+  - `action`（如 `indexed/reindexed/reuse_existing/failed/already_processing`）
+
+解析任务返回补充：
+- `attempt_count`
+- `max_attempts`
+- `retry_available`
+- `last_error_category`
+
+## 11. 2026-04-17 索引异步入队能力（S2 第二阶段）
+
+新增/扩展：
+- `POST /courses/{course_id}/files/upload`
+  - 新增 query 参数：`async_index`（默认 `false`）
+  - `true` 时：仅入队索引任务并立即返回，不在请求内执行索引
+  - 返回新增：`queue_task_id`
+- `POST /courses/{course_id}/files/{file_id}/kb/retry`
+  - 新增 query 参数：`async_retry`（默认 `false`）
+  - `true` 时：仅入队重试任务并立即返回
+  - 返回新增：`queue_task_id`
+
+任务详情新增字段：
+- `queue_task_id`
+- `queue_status`
+
+说明：
+- 当前已实现“入队与任务可查”；生产建议结合 Celery worker 与 broker 运行。
+- 在未安装 Celery 的开发环境下，系统保留兼容返回，不阻断主流程。
+
+## 12. 2026-04-17 索引队列状态查询（S2 第三阶段-1）
+
+新增接口：
+- `GET /admin/index-queue/{queue_task_id}`
+
+返回：
+- `queue_task_id`
+- `queue_backend`（celery/dummy）
+- `queue_status`
+- `queue_result`（若后端支持并已完成）
+- `parse_task`（关联的索引任务快照）
+
+说明：
+- 该接口用于排查“已入队任务”执行状态与关联索引任务是否完成。
+
+## 13. 2026-04-17 Index Batch Retry + Queue Metrics (S2 Stage 3-2)
+
+New endpoints:
+- `POST /admin/index-tasks/retry-failed`
+  - query: `course_id`, `class_id`, `limit`, `force`, `ignore_cooldown`
+  - returns: `candidate_total`, `processed_count`, `effective_limit`, `queued_count`, `skipped_count`, `queued[]`, `skipped[]`
+- `GET /admin/index-queue-metrics`
+  - query: `course_id`, `class_id`
+  - returns: `totals`, `queue`, `retry`, `latency_ms`
+
+Task fields added in parse-task payloads:
+- `auto_retry_round`
+- `next_retry_after`
+- `cooldown_remaining_seconds`
+
+## 14. 2026-04-17 Failure Limit Alerting (S2 Closure)
+
+New capability:
+- When a parse/index task reaches retry limit (`max_attempts`) or auto-retry rounds are exhausted, backend emits admin alerts through `Notification`.
+
+Alert payload (`Notification.extra_data`):
+- `alert_kind`: `kb_index_failure_limit`
+- `reason`: `max_attempts_reached` or `auto_retry_exhausted`
+- `task_id`, `course_id`, `class_id`, `material_id`, `material_name`
+- `attempt_count`, `max_attempts`, `last_error_category`
+- `queue_task_id`, `queue_status`, `triggered_at`
+
+Dedup strategy:
+- Same `reason + attempt_count` for one parse task is emitted once to avoid alert spam.
+
+Parse-task fields expanded:
+- `alert_count`
+- `last_alert_reason`
+- `last_alert_at`
+
+## 15. 2026-04-17 Content Items Schema v1 (S3 Stage 1)
+
+Enhancement:
+- `GET /courses/{course_id}/files/{file_id}/analysis` now returns `content_items_schema`.
+- Normalized schema is `v1`.
+
+`content_items` v1 fields:
+- `item_id`
+- `modality`
+- `text`
+- `source_name`
+- `source_type`
+- `page`
+- `score`
+- `meta`
+
+Notes:
+- Backend normalizes parser outputs into this structure after successful ingest.
+- This is the base contract for future multimodal retrieval, graph ingestion, and reranking.
+
+## 16. 2026-04-17 Multimodal Field Mapping for content_items v1 (S3 Stage 2)
+
+Enhancement:
+- Backend now maps multimodal parser payloads into stable `content_items v1` keys with modality alias normalization.
+
+New normalized keys (in addition to previous base keys):
+- `raw_type`
+- `bbox`
+- `layout_type`
+- `doc_id`
+- `chunk_id`
+- `table_html`
+- `table_markdown`
+- `formula_latex`
+- `image_path`
+- `ocr_text`
+- `timestamp_start`
+- `timestamp_end`
+
+Modality aliases:
+- `equation/math/latex` -> `formula`
+- `figure/diagram/chart/photo/screenshot` -> `image`
+- `dataframe/csv/spreadsheet` -> `table`
+
+Notes:
+- Unknown modality values are safely downgraded to `text`.
+- Bounding box supports both list and dict formats (`x1/y1/x2/y2` or `left/top/width/height`).
+
+## 17. 2026-04-17 RAG-Anything Processing Quality Metadata (S3 Stage 3)
+
+Enhancement:
+- `raganything_adapter.ingest_material` now computes and stores processing quality metadata.
+
+Stored fields:
+- `extra_data.raganything_quality`
+  - `quality_level` (`complete/partial/text_only/multimodal_only/failed`)
+  - `text_processed`
+  - `multimodal_processed`
+  - `fully_processed`
+  - `warnings[]`
+  - `raw_status_keys[]`
+
+Analysis API enhancement:
+- `GET /courses/{course_id}/files/{file_id}/analysis` now includes:
+  - `raganything_status`
+  - `raganything_quality`
+
+Purpose:
+- Enables quality-aware filtering and experiment slicing for multimodal ingestion quality.
+
+## 18. 2026-04-17 Knowledge Graph Confidence & Provenance Fields (S3 Stage 4)
+
+Enhancement:
+- Knowledge graph nodes/edges now carry confidence and provenance metadata.
+
+Node (`/courses/{course_id}/graph -> nodes[]`) new fields:
+- `confidence`
+- `source_material_id`
+- `source_span`
+- `provenance`
+
+Edge (`/courses/{course_id}/graph -> edges[]`) new fields:
+- `confidence`
+- `source_span`
+- `provenance`
+
+Ingest behavior:
+- Entity/relation confidence is updated incrementally on repeated ingestion.
+- Provenance tracks source material ids and occurrence timestamps/counts.
+
+Schema compatibility:
+- Local SQLite bootstrap now performs additive runtime upgrades for required graph columns.
+
+## 19. 2026-04-17 Multimodal Regression Fixture Suite (S3 Closure)
+
+Fixture set:
+- `backend/tests/fixtures/multimodal/fixture_manifest.json`
+- `backend/tests/fixtures/multimodal/fixture_notes.txt`
+- `backend/tests/fixtures/multimodal/fixture_table_formula.md`
+- image sample stored as base64 in manifest (`fixture_diagram.png`)
+
+Regression test:
+- `backend/tests/test_multimodal_regression_e2e.py`
+
+Coverage:
+- upload -> analysis -> graph
+- validates `content_items_schema=v1`
+- validates multimodal modality coverage (`text/table/formula/image`)
+- validates graph confidence/provenance/source-span visibility
+
+Parser behavior update:
+- simple parser now emits table/formula/image content items when detectable.
+
+## 20. 2026-04-17 Retrieval Strategy Switch + Reranker Abstraction (S4 Stage 1)
+
+New config options:
+- `RAG_RETRIEVAL_STRATEGY` (`lexical|hybrid|graph`)
+- `RAG_RETRIEVAL_CANDIDATE_K`
+- `RAG_ANSWER_TOP_K`
+- `RAG_QUERY_REWRITE_ENABLED`
+- `RERANKER_PROVIDER` (`mock|none`)
+- `RERANKER_MODEL`
+
+Runtime behavior:
+- Added retrieval-strategy-aware candidate scoring in RAG query fallback path.
+- Added pluggable reranker abstraction (`app.integrations.reranker`).
+- Current built-in providers:
+  - `mock` reranker (deterministic heuristic rerank)
+  - `none` reranker (no-op pass-through)
+
+Observability fields added (rag query event `extra_data`):
+- `retrieval_strategy`
+- `reranker_provider`
+- `reranker_model`
+- `candidate_count`
+- `selected_count`
+- `graph_term_count`
+- `query_rewrite_enabled`
+
+Admin performance aggregations now include distributions:
+- `retrieval_strategy`
+- `reranker`
+- `query_rewrite`
+
+## 21. 2026-04-17 Query Rewrite + Multi-Query Retrieval Merge (S4 Stage 2)
+
+New config options:
+- RAG_QUERY_REWRITE_MODE (
+one|simple|compact|keywords)
+- RAG_QUERY_REWRITE_MAX_VARIANTS
+
+Runtime behavior:
+- Added shared query rewrite utility:
+  - ackend/app/integrations/rag/query_rewrite.py
+- RAGAnythingAdapter now performs multi-query local retrieval merge for fallback:
+  - generate query variants from original question
+  - retrieve per-variant candidates
+  - merge duplicate chunks and track query-hit coverage
+- SimpleRAGEngine now supports the same query-variant retrieval logic.
+
+New retrieval scoring signals (candidate-level):
+- matched_query_count
+- query_coverage
+- query_coverage_boost
+
+Observability fields added (rag query event extra_data):
+- query_rewrite_mode
+- query_variant_count
+
+Admin performance aggregations now include distributions:
+- query_rewrite_mode
+- query_variant_bucket (|1|2|3|4+|unknown)
+## 22. 2026-04-17 S4 Stage 2 Contract Addendum (Encoding-safe copy)
+
+Config additions:
+- RAG_QUERY_REWRITE_MODE: none | simple | compact | keywords
+- RAG_QUERY_REWRITE_MAX_VARIANTS
+
+Event extra_data additions:
+- query_rewrite_mode
+- query_variant_count
+
+Admin distribution additions:
+- query_rewrite_mode
+- query_variant_bucket
+## 23. 2026-04-17 External Reranker Providers (S4 Stage 3)
+
+New config options:
+- RERANKER_PROVIDER: mock | none | api | local
+- RERANKER_API_BASE
+- RERANKER_API_KEY
+- RERANKER_API_PATH
+- RERANKER_API_TIMEOUT_SECONDS
+- RERANKER_LOCAL_MODEL
+
+Runtime behavior:
+- Added API reranker provider with robust response parsing and fallback to base-score ranking on remote errors.
+- Added local reranker provider:
+  - optional CrossEncoder runtime loading when dependency and model are available
+  - deterministic heuristic fallback when model runtime is unavailable
+- Reranker factory now supports provider cache reset and explicit provider selection logic.
+
+Stability behavior:
+- api provider without RERANKER_API_BASE falls back to mock provider at selection stage.
+- api runtime exceptions do not break query flow; candidates are returned with fallback metadata.
+## 24. 2026-04-17 Query Rewrite Ablation Export (S4 Stage 4)
+
+New admin endpoint:
+- GET /api/v1/admin/rag-ablation
 
 Query params:
+- days: 1..90 (default 7)
+- class_id: optional
 
-- `course_id` optional
-- `class_id` optional
+Response outline:
+- window metadata: window_days/window_start/window_end/filters
+- totals: query count
+- groups:
+  - rewrite_enabled: enabled vs disabled
+  - rewrite_mode: per mode segment metrics
+  - query_variant_bucket: per bucket segment metrics
 
-### GET `/api/v1/chat/sessions/{session_id}/messages`
+Segment metrics:
+- queries
+- success_rate
+- fallback_rate
+- avg_confidence
+- avg_source_count
+- latency_ms (avg/p50/p95/max)
 
-Returns full message history for the session.
+Use case:
+- Supports direct ablation comparison for rewrite on/off and rewrite mode variants.
+## 25. 2026-04-18 Model Routing Layer (S5 Stage 1)
 
-### POST `/api/v1/chat/messages/{message_id}/feedback`
+Purpose:
+- Add a unified backend routing control plane for generation / embedding / vlm / reranker.
+- Support api/local/mock style deployment switching with explicit fallback reasons.
 
-Request:
+Config additions:
+- LLM_BACKEND: auto | api | local | mock
+- LLM_LOCAL_API_BASE
+- EMBEDDING_BACKEND: auto | api | local | mock
+- EMBEDDING_LOCAL_API_BASE
+- VLM_BACKEND: auto | api | local | mock
+- VLM_LOCAL_API_BASE
 
-```json
-{
-  "feedback": "dislike",
-  "reason": "Need a clearer explanation"
-}
-```
+Model-config persistence additions:
+- llm_backend
+- llm_local_api_base
+- embedding_backend
+- embedding_model
+- embedding_local_api_base
+- vlm_backend
+- vlm_model
+- vlm_local_api_base
+- reranker_provider
+- reranker_model
+- reranker_local_model
 
-## Reviews
+New admin endpoint:
+- GET /api/v1/admin/model-routing
 
-### GET `/api/v1/reviews/pending`
+Routing snapshot schema (per capability):
+- requested_backend
+- effective_backend
+- provider
+- model
+- api_base
+- api_key_configured
+- fallback_reason
+
+Experiment export enhancement:
+- GET /api/v1/admin/experiment-results now includes model_routing snapshot.
+
+Metrics event enrichment:
+- llm_backend
+- embedding_backend
+- vlm_backend
+- reranker_backend
+## 26. 2026-04-18 Runtime Routing Parity (S5 Stage 2)
+
+Enhancements:
+- Runtime now reads persisted admin model-config values to build effective routing snapshot.
+- Chat query path uses persisted `rag_engine` to select runtime RAG engine.
+- RAGAnything adapter now uses routing snapshot during runtime model invocation.
+
+RAGAnything runtime parity details:
+- generation/embedding/vlm backend decisions are bound into:
+  - llm function setup
+  - embedding function setup
+  - vision function setup
+  - fallback answer generation path
+- Adapter instance cache now includes routing signature; route changes can trigger instance refresh.
+
+Observability parity details:
+- RAG query event backend fields (`llm_backend/embedding_backend/vlm_backend/reranker_backend`) now reflect persisted routing config path.
+
+New/updated tests:
+- backend/tests/test_chat_engine_selection.py
+- backend/tests/test_rag_engine_factory.py
+- backend/tests/test_raganything_adapter_query.py (routing-aware fallback case)
+## 27. 2026-04-18 Personalization Routing Slice Context (S5 Stage 3)
+
+Student report enhancement:
+- Weekly/monthly student reports now include routing slice context for experiment segmentation.
+
+Added fields in report payload:
+- highlights.recommendation_context:
+  - routing_slice_key
+  - llm_backend
+  - embedding_backend
+  - vlm_backend
+  - reranker_backend
+- experiment_context:
+  - routing_slice_key
+  - model_routing (full routing snapshot)
+
+Purpose:
+- Allows recommendation/personalization outcomes to be sliced by runtime model-routing strategy during experiments.
+
+## 28. 2026-04-18 Personalization Routing Comparison View (S5 Stage 4)
+
+New admin endpoint:
+- GET /api/v1/admin/personalization-routing-metrics
 
 Query params:
+- days: 1..180 (default 30)
+- class_id: optional
+- top_n: 1..50 (default 12)
+
+Response outline:
+- window metadata: window_days/window_start/window_end/filters
+- summary:
+  - total_queries
+  - total_slices
+  - total_users
+  - best_confidence_slice
+  - lowest_fallback_slice
+- slices[] (sorted by queries desc, top_n applied):
+  - routing_slice_key
+  - llm_backend / embedding_backend / vlm_backend / reranker_backend
+  - queries / users
+  - success_rate / fallback_rate
+  - avg_confidence / avg_source_count / avg_latency_ms
+  - avg_activity_score / avg_task_completion_rate / avg_dislike_count
+  - learning_events_per_user
+
+Purpose:
+- Provide admin-side comparative analytics for personalization quality across model-routing slices.
+- Support experiment decisions by connecting routing strategy and learner behavior outcomes.
 
-- `course_id` optional
-- `class_id` optional
 
-Returns pending teacher review items.
-
-### POST `/api/v1/reviews/{review_id}/submit`
-
-Request:
-
-```json
-{
-  "teacher_answer": "Teacher-corrected answer",
-  "add_to_kb": true
-}
-```
-
-### POST `/api/v1/reviews/escalate`
-
-Manual student escalation request.
-
-Request:
-
-```json
-{
-  "course_id": "course_uuid",
-  "question_content": "I still do not understand slow start",
-  "ai_answer": "previous AI answer",
-  "reason": "Need teacher help"
-}
-```
-
-Response:
-
-```json
-{
-  "review_id": "review_uuid",
-  "status": "resolved",
-  "sync_status": "synced",
-  "sync_note": "Teacher answer synced to fallback knowledge base"
-}
-```
-
-## Tasks
-
-### GET `/api/v1/tasks`
-
-Optional query:
-
-- `class_id`
-
-### POST `/api/v1/tasks/{task_id}/submit`
-
-Request:
-
-```json
-{
-  "content": "My answer",
-  "file_path": null
-}
-```
-
-### GET `/api/v1/tasks/{task_id}/submissions`
-
-- teacher sees class submissions
-- student sees own submission only
-
-### POST `/api/v1/tasks`
-
-Request:
-
-```json
-{
-  "class_id": "class_uuid",
-  "title": "Week 2 Homework",
-  "description": "Task description",
-  "task_type": "homework",
-  "max_score": 100,
-  "is_published": true
-}
-```
-
-## Notifications
-
-### GET `/api/v1/notifications`
-
-Optional query:
-
-- `unread_only`
-
-### POST `/api/v1/notifications/mark-read`
-
-Request:
-
-```json
-["notification_id_1", "notification_id_2"]
-```
-
-### POST `/api/v1/notifications`
-
-Teacher broadcast notification request:
-
-```json
-{
-  "class_id": "class_uuid",
-  "title": "Homework reminder",
-  "content": "Please finish Week 2 homework before Friday.",
-  "type": "deadline",
-  "scope": "students"
-}
-```
-
-## Flashcards
-
-### GET `/api/v1/flashcards`
-
-Optional query:
-
-- `course_id`
-- `class_id`
-- `due_only`
-
-### POST `/api/v1/flashcards/{flashcard_id}/review`
-
-Request:
-
-```json
-{
-  "rating": 4,
-  "response": "good"
-}
-```
-
-Response:
-
-```json
-{
-  "flashcard_id": "flashcard_uuid",
-  "rating": 4,
-  "response": "good",
-  "interval_days": 3,
-  "next_review_at": "datetime",
-  "review_count": 1
-}
-```
-
-## Analytics and Student Profile
-
-### GET `/api/v1/courses/{course_id}/analytics`
-
-Response fields include:
-
-- `question_count`
-- `high_frequency_keywords`
-- `disliked_question_count`
-- `active_student_count`
-- `task_completion_rate`
-- `hot_topics`
-- `pending_review_count`
-
-### GET `/api/v1/students/me/profile`
-
-Response fields include:
-
-- `preferred_courses`
-- `strong_topics`
-- `weak_topics`
-- `total_questions`
-- `dislike_count`
-- `task_completion_rate`
-- `activity_score`
-- `last_active_at`
-
-### GET `/api/v1/students/me/reports/weekly`
-
-Returns a weekly student study report snapshot.
-
-### GET `/api/v1/students/me/reports/monthly`
-
-Returns a monthly student study report snapshot.
-
-### GET `/api/v1/students/me/export?format=csv`
-
-Exports a CSV summary for weekly and monthly metrics.
-
-### GET `/api/v1/students/me/mistakes`
-
-Returns the student mistake book.
-
-### POST `/api/v1/students/me/mistakes`
-
-Request:
-
-```json
-{
-  "chapter": "Transport Layer",
-  "question": "What is slow start?",
-  "my_answer": "I am not sure",
-  "correct_answer": "It is TCP's initial congestion control phase",
-  "analysis": "Review congestion window growth."
-}
-```
-
-### PUT `/api/v1/students/me/mistakes/{mistake_id}/mastered`
-
-Marks a mistake as mastered.
-
-### POST `/api/v1/students/me/mistakes/{mistake_id}/practice`
-
-Updates practice count and last practice time.
-
-## Admin
-
-### GET `/api/v1/admin/overview`
-
-System-level counts for users, classes, and pending reviews.
-
-### GET `/api/v1/admin/users`
-
-Paginated user list.
-
-### GET `/api/v1/admin/courses`
-
-Paginated course list for admin course management.
-
-### GET `/api/v1/admin/model-config`
-
-Returns current lightweight model/runtime config snapshot.
-
-### PUT `/api/v1/admin/model-config`
-
-Request:
-
-```json
-{
-  "llm_provider": "mock",
-  "rag_engine": "mock",
-  "storage_backend": "local",
-  "email_dev_mode": true
-}
-```
-
-### GET `/api/v1/admin/settings`
-
-Returns current lightweight runtime settings snapshot.

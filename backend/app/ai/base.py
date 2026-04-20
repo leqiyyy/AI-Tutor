@@ -10,6 +10,7 @@ class RAGResult:
     sources: List[dict] = field(default_factory=list)
     confidence: float = 1.0
     suggestions: List[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -1,190 +1,122 @@
-# Backend Architecture
+# AI助教系统后端架构说明（当前实现 + 目标演进）
 
-## Overview
+更新时间：2026-04-17
 
-The backend is implemented as a **modular monolith**. It keeps business capabilities in one deployable FastAPI service while separating responsibilities by layer so the MVP can run now and evolve later.
+---
 
-Core business line:
+## 1. 架构模式
 
-1. teacher uploads course material
-2. system ingests material into a class/course knowledge base
-3. student or teacher asks AI assistant
-4. system answers with grounded citations
-5. low-confidence or disliked answers enter review queue
-6. teacher correction is synced back to the fallback knowledge store
-7. analytics and flashcards improve the learning loop
+采用 **模块化单体（Modular Monolith）**：
 
-## Layers
+- 单仓库、单服务主进程，降低复杂度
+- 模块边界清晰，便于后续拆分
+- 先保证毕设阶段可运行、可验证
 
-### Access Layer
+---
 
-Main files:
+## 2. 分层架构
 
-- [main.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/main.py)
-- [api.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/api/v1/api.py)
-- [exceptions.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/exceptions.py)
-- [responses.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/responses.py)
+### 2.1 接入层
 
-Responsibilities:
+- FastAPI 入口：`backend/app/main.py`
+- 路由聚合：`backend/app/api/v1/api.py`
+- 统一鉴权依赖：`backend/app/core/deps.py`
+- 统一响应：`backend/app/core/response.py`、`responses.py`
+- 健康检查：`backend/app/core/health.py`
+- 全局异常：`backend/app/core/exceptions.py`
 
-- FastAPI application bootstrap
-- router aggregation
-- CORS
-- request logging
-- health endpoints
-- unified exception and response structure
+### 2.2 业务服务层
 
-### Core Infrastructure Layer
+核心服务位于 `backend/app/services/`：
 
-Main files:
+- `auth_service.py`
+- `course_service.py`
+- `kb_service.py`
+- `chat_service.py`
+- `task_service.py`
+- `flashcard_service.py`
+- `analytics_service.py`
+- `mistake_service.py`
+- `admin_service.py`
 
-- [config.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/config.py)
-- [database.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/database.py)
-- [redis.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/redis.py)
-- [celery_app.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/celery_app.py)
-- [logging.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/core/logging.py)
+### 2.3 AI 编排与知识引擎层
 
-Responsibilities:
+- RAG 引擎入口：`backend/app/integrations/rag/__init__.py`
+- 简化引擎：`simple_engine.py`
+- RAG-Anything 适配：`raganything_adapter.py`
+- 解析器：`backend/app/integrations/parser/simple.py`
 
-- configuration loading
-- database engine/session setup
-- Redis adapter
-- Celery adapter
-- structured logging
+目标演进：
 
-### Domain Model Layer
+- 增加 AI Orchestrator（问题分类、工具路由、上下文注入）
+- 增加多模态统一 content item 表示
+- 增加反馈分析与推荐策略引擎
 
-Main folders:
+### 2.4 数据与基础设施层
 
-- [models](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/models)
-- [schemas](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/schemas)
+- ORM 模型：`backend/app/models/*.py`
+- 迁移：`backend/alembic/versions/`
+- 数据库：PostgreSQL（开发可 SQLite）
+- 缓存：Redis（可关闭）
+- 异步：Celery（可降级）
+- 存储：Local/MinIO 适配
 
-Responsibilities:
+---
 
-- persistence models
-- API request/response schemas
-- enum/status definitions embedded in ORM models
+## 3. 关键业务链路
 
-Key entity groups:
+### 3.1 资料入库链路
 
-- users / auth
-- courses / classes / class members
-- materials / KB spaces / file parse tasks
-- chat sessions / chat messages / citations
-- review items / review sync records
-- flashcards / flashcard records
-- learning records / question analytics / student profiles
+教师上传文件  
+→ 保存文件元数据  
+→ 触发解析与索引  
+→ 更新 `file_parse_tasks` 与 `kb_spaces`  
+→ 课程知识库状态可查询
 
-### Service Layer
+### 3.2 AI问答链路
 
-Main files:
+接收问题  
+→ 注入课程/角色上下文  
+→ RAG 检索与证据生成  
+→ LLM 生成回答  
+→ 落库消息与 citation  
+→ 返回建议追问与置信度
 
-- [auth_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/auth_service.py)
-- [course_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/course_service.py)
-- [task_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/task_service.py)
-- [chat_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/chat_service.py)
-- [kb_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/kb_service.py)
-- [analytics_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/analytics_service.py)
-- [flashcard_service.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/services/flashcard_service.py)
+### 3.3 审核回流链路
 
-Responsibilities:
+低置信度或点踩  
+→ 进入审核队列  
+→ 教师补答  
+→ 同步回知识库（可追踪）
 
-- business rules
-- permission-sensitive orchestration
-- aggregation for API responses
-- learning event recording
+---
 
-### AI / Knowledge Layer
+## 4. 当前差距与演进重点
 
-Main files:
+1. 查询主链需切到 RAG-Anything 原生查询。  
+2. 多模态解析需从简化文本提取升级为结构化解析。  
+3. 图谱实体关系需加置信度和溯源信息。  
+4. 推荐与反馈分析模块需独立服务化。  
+5. 模型路由层需支持 API/本地双轨。  
 
-- [base.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/ai/base.py)
-- [simple_engine.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/integrations/rag/simple_engine.py)
-- [simple.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/integrations/parser/simple.py)
+---
 
-Responsibilities:
+## 5. 目录规范（目标态）
 
-- parser abstraction
-- simplified knowledge ingestion
-- fallback retrieval
-- citation generation
-- confidence estimation
-- teacher answer feedback loop
+建议保留并强化以下边界：
 
-### Worker Layer
+- `api/`：仅处理入参和响应
+- `services/`：业务编排
+- `repositories/`：数据访问（建议逐步补齐）
+- `integrations/`：外部能力适配（RAG/模型/解析/存储）
+- `workers/`：异步任务
 
-Main files:
+---
 
-- [system.py](e:/all_files/project2/AI_tutor/AI-Tutor-end5/backend/app/workers/tasks/system.py)
+## 6. 可观测与可维护要求
 
-Responsibilities:
+1. 每个请求可追踪 request_id。  
+2. 关键链路记录耗时与失败原因。  
+3. 模型调用记录 latency、错误率、token、成本。  
+4. 关键闭环具备测试覆盖和回归脚本。  
 
-- placeholder Celery task registration
-- future async ingestion / analytics jobs
-
-## API Group Mapping
-
-### Teacher-facing
-
-- `/api/v1/courses`
-- `/api/v1/classes`
-- `/api/v1/tasks`
-- `/api/v1/chat`
-- `/api/v1/reviews`
-- `/api/v1/notifications`
-
-### Student-facing
-
-- `/api/v1/courses`
-- `/api/v1/classes`
-- `/api/v1/tasks`
-- `/api/v1/chat`
-- `/api/v1/flashcards`
-- `/api/v1/students/me/profile`
-
-### Admin-facing
-
-- `/api/v1/admin`
-
-## Storage Strategy
-
-Current MVP mode:
-
-- business data: SQLite or PostgreSQL
-- file storage: local filesystem
-- task queue: Celery adapter with optional Redis
-- RAG: simplified in-process retrieval with parsed chunks stored in `file_parse_tasks`
-
-Future replacement points:
-
-- local storage -> MinIO
-- simple parser -> specialized PDF/Docx/OCR/multimodal parsers
-- simple RAG -> vector / graph / hybrid retrieval stack
-- inline ingestion -> Celery async jobs
-
-Current adapter status:
-
-- the backend now includes a real `RAGAnythingAdapter`
-- when `RAG_ENGINE=raganything`, document processing and query orchestration can run through the official RAG-Anything package
-- business metadata, citations, review queue, and analytics remain in the local service/database layer
-
-## Health and Operability
-
-Health endpoints:
-
-- `/health`
-- `/health/live`
-- `/health/ready`
-
-What they check:
-
-- database connectivity
-- Redis availability when enabled
-- storage backend health
-- Celery adapter configuration state
-
-## Current Design Tradeoffs
-
-- The service is optimized for local MVP execution first.
-- Retrieval is intentionally simple so the system stays runnable without external AI infra.
-- The same public API shape is designed to survive a later swap to stronger model and retrieval backends.

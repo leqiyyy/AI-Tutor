@@ -16,6 +16,7 @@ RESPONSE_TO_RATING = {
     "good": 4,
     "easy": 5,
 }
+MAX_INTERVAL_DAYS = 36500
 
 
 def list_flashcards(
@@ -80,6 +81,7 @@ def review_flashcard(
         flashcard.interval_days = max(4, int(round(flashcard.interval_days * (flashcard.ease_factor + 0.3))))
         flashcard.ease_factor = min(3.2, flashcard.ease_factor + 0.1)
 
+    flashcard.interval_days = min(MAX_INTERVAL_DAYS, max(1, int(flashcard.interval_days)))
     flashcard.review_count += 1
     flashcard.next_review_at = datetime.now(timezone.utc) + timedelta(days=flashcard.interval_days)
 

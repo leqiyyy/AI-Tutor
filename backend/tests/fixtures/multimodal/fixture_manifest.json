@@ -1,0 +1,28 @@
+{
+  "fixtures": [
+    {
+      "id": "notes_text",
+      "file_name": "fixture_notes.txt",
+      "mime_type": "text/plain",
+      "content_file": "fixture_notes.txt",
+      "encoding": "utf-8",
+      "expected_modalities": ["text"]
+    },
+    {
+      "id": "table_formula_markdown",
+      "file_name": "fixture_table_formula.md",
+      "mime_type": "text/markdown",
+      "content_file": "fixture_table_formula.md",
+      "encoding": "utf-8",
+      "expected_modalities": ["text", "table", "formula"]
+    },
+    {
+      "id": "image_diagram",
+      "file_name": "fixture_diagram.png",
+      "mime_type": "image/png",
+      "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7+4xkAAAAASUVORK5CYII=",
+      "encoding": "base64",
+      "expected_modalities": ["text", "image"]
+    }
+  ]
+}

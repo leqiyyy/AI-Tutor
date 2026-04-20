@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
 import app.storage as storage
-from app.ai.mock_rag import get_rag_engine
 from app.core.deps import get_current_student, get_current_teacher, get_current_user
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.response import ok
@@ -20,7 +19,7 @@ from app.schemas.course import (
     JoinClassRequest,
     UpdateClassRequest,
 )
-from app.services import course_service
+from app.services import course_service, kb_service
 
 router = APIRouter(prefix="/classes", tags=["classes"])
 
@@ -158,6 +157,7 @@ async def upload_material(
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
+    file_hash = kb_service.compute_file_hash(content)
 
     file_size = len(content)
     mime_type = file.content_type or "application/octet-stream"
@@ -195,15 +195,16 @@ async def upload_material(
     db.commit()
     db.refresh(material)
 
-    try:
-        rag = get_rag_engine()
-        file_path = storage.get_file_path(class_id, storage_key) or stored_path
-        await rag.ingest_material(class_id, material.id, file_path, mime_type)
-        material.kb_status = "indexed"
-    except Exception as exc:
-        material.kb_status = "failed"
-        material.kb_error = str(exc)
-    db.commit()
+    _task, action = await kb_service.ingest_material_with_retry(
+        db,
+        cls=cls,
+        material=material,
+        file_hash=file_hash,
+        force=False,
+    )
+    db.expire_all()
+    material_id = material.id
+    material = db.query(Material).filter(Material.id == material_id).first()
 
     return ok(
         data={
@@ -211,6 +212,7 @@ async def upload_material(
             "title": material.title,
             "file_path": material.file_path,
             "kb_status": material.kb_status,
+            "action": action,
         },
         message="Material uploaded successfully",
     )

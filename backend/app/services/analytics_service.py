@@ -6,11 +6,12 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.analytics import LearningRecord, QuestionAnalytics, StudentProfile
+from app.models.analytics import LearningRecord, QuestionAnalytics, RAGQueryEvent, StudentProfile
 from app.models.chat import ChatMessage, ChatSession, ReviewItem
 from app.models.course import Class, ClassMember, Course, Submission, Task
 from app.models.knowledge import FlashcardRecord
 from app.models.user import User
+from app.services import model_routing_service
 
 
 def record_learning(
@@ -123,6 +124,123 @@ def compute_course_analytics(db: Session, course_id: str) -> dict:
             ReviewItem.class_id.in_(class_ids),
             ReviewItem.status == "pending",
         ).count(),
+    }
+
+
+def get_personalization_routing_metrics(
+    db: Session,
+    *,
+    days: int = 30,
+    class_id: Optional[str] = None,
+    top_n: int = 12,
+) -> dict:
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=days)
+    query = db.query(RAGQueryEvent).filter(RAGQueryEvent.created_at >= window_start)
+    if class_id:
+        query = query.filter(RAGQueryEvent.class_id == class_id)
+    rows = query.order_by(RAGQueryEvent.created_at.desc()).all()
+
+    by_slice = defaultdict(lambda: {"events": [], "user_ids": set()})
+    for row in rows:
+        slice_key = _routing_slice_key_from_extra(row.extra_data or {})
+        bucket = by_slice[slice_key]
+        bucket["events"].append(row)
+        if row.user_id:
+            bucket["user_ids"].add(row.user_id)
+
+    all_user_ids = {
+        user_id
+        for group in by_slice.values()
+        for user_id in group["user_ids"]
+        if user_id
+    }
+
+    profiles_by_user: dict[str, StudentProfile] = {}
+    if all_user_ids:
+        profiles = db.query(StudentProfile).filter(StudentProfile.user_id.in_(list(all_user_ids))).all()
+        profiles_by_user = {profile.user_id: profile for profile in profiles}
+
+    learning_events_by_user: dict[str, int] = {}
+    if all_user_ids:
+        learning_query = db.query(
+            LearningRecord.user_id,
+            func.count(LearningRecord.id),
+        ).filter(
+            LearningRecord.user_id.in_(list(all_user_ids)),
+            LearningRecord.created_at >= window_start,
+        )
+        if class_id:
+            learning_query = learning_query.filter(LearningRecord.class_id == class_id)
+        for user_id, count in learning_query.group_by(LearningRecord.user_id).all():
+            learning_events_by_user[user_id] = int(count or 0)
+
+    slices: list[dict] = []
+    for slice_key, group in by_slice.items():
+        events = group["events"]
+        user_ids = group["user_ids"]
+        query_count = len(events)
+        if query_count <= 0:
+            continue
+
+        success_count = sum(1 for row in events if row.success)
+        fallback_count = sum(1 for row in events if row.used_fallback)
+        avg_confidence = _avg([float(row.confidence) for row in events if row.confidence is not None])
+        avg_source_count = _avg([float(row.source_count) for row in events if row.source_count is not None])
+        avg_latency = _avg([float(row.latency_ms) for row in events if row.latency_ms is not None])
+
+        profiles = [profiles_by_user[user_id] for user_id in user_ids if user_id in profiles_by_user]
+        avg_activity_score = _avg([float(profile.activity_score or 0.0) for profile in profiles])
+        avg_task_completion_rate = _avg([float(profile.task_completion_rate or 0.0) for profile in profiles])
+        avg_dislike_count = _avg([float(profile.dislike_count or 0) for profile in profiles])
+
+        learning_events_total = sum(learning_events_by_user.get(user_id, 0) for user_id in user_ids)
+        learning_events_per_user = round(
+            learning_events_total / max(1, len(user_ids)),
+            4,
+        ) if user_ids else 0.0
+
+        llm_backend, embedding_backend, vlm_backend, reranker_backend = _routing_slice_parts(slice_key)
+        slices.append({
+            "routing_slice_key": slice_key,
+            "llm_backend": llm_backend,
+            "embedding_backend": embedding_backend,
+            "vlm_backend": vlm_backend,
+            "reranker_backend": reranker_backend,
+            "queries": query_count,
+            "users": len(user_ids),
+            "success_rate": _ratio(success_count, query_count),
+            "fallback_rate": _ratio(fallback_count, query_count),
+            "avg_confidence": avg_confidence,
+            "avg_source_count": avg_source_count,
+            "avg_latency_ms": avg_latency,
+            "avg_activity_score": avg_activity_score,
+            "avg_task_completion_rate": avg_task_completion_rate,
+            "avg_dislike_count": avg_dislike_count,
+            "learning_events_per_user": learning_events_per_user,
+        })
+
+    slices.sort(key=lambda item: item["queries"], reverse=True)
+    limited = slices[: max(1, int(top_n))] if slices else []
+    best_confidence_slice = max(limited, key=lambda item: item["avg_confidence"])["routing_slice_key"] if limited else None
+    best_fallback_slice = min(limited, key=lambda item: item["fallback_rate"])["routing_slice_key"] if limited else None
+
+    return {
+        "window_days": days,
+        "window_start": window_start,
+        "window_end": now,
+        "filters": {
+            "class_id": class_id,
+            "top_n": top_n,
+        },
+        "summary": {
+            "total_queries": len(rows),
+            "total_slices": len(slices),
+            "total_users": len(all_user_ids),
+            "best_confidence_slice": best_confidence_slice,
+            "lowest_fallback_slice": best_fallback_slice,
+        },
+        "slices": limited,
     }
 
 
@@ -250,6 +368,14 @@ def build_student_report(
     ).count()
 
     high_frequency = profile["weak_topics"][:3] + profile["strong_topics"][:2]
+    routing_snapshot = model_routing_service.build_runtime_model_routing_snapshot()
+    routing_flat = model_routing_service.flatten_routing_snapshot(routing_snapshot)
+    routing_slice_key = "|".join([
+        str(routing_flat.get("llm_backend") or "unknown"),
+        str(routing_flat.get("embedding_backend") or "unknown"),
+        str(routing_flat.get("vlm_backend") or "unknown"),
+        str(routing_flat.get("reranker_backend") or "unknown"),
+    ])
     summary = (
         f"In the last {'7' if period == 'weekly' else '30'} days, you asked {question_count} questions, "
         f"submitted {task_submissions} tasks, and reviewed {flashcard_reviews} flashcards."
@@ -272,6 +398,17 @@ def build_student_report(
             "strong_topics": profile["strong_topics"],
             "weak_topics": profile["weak_topics"],
             "recommended_focus": high_frequency,
+            "recommendation_context": {
+                "routing_slice_key": routing_slice_key,
+                "llm_backend": routing_flat.get("llm_backend"),
+                "embedding_backend": routing_flat.get("embedding_backend"),
+                "vlm_backend": routing_flat.get("vlm_backend"),
+                "reranker_backend": routing_flat.get("reranker_backend"),
+            },
+        },
+        "experiment_context": {
+            "routing_slice_key": routing_slice_key,
+            "model_routing": routing_snapshot,
         },
     }
 
@@ -332,6 +469,33 @@ def _extract_terms(text: str) -> list[str]:
     latin = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
     cjk = re.findall(r"[\u4e00-\u9fff]{2,8}", text)
     return [*latin, *cjk]
+
+
+def _routing_slice_key_from_extra(extra_data: dict) -> str:
+    llm_backend = (extra_data.get("llm_backend") or "unknown").strip() if isinstance(extra_data, dict) else "unknown"
+    embedding_backend = (extra_data.get("embedding_backend") or "unknown").strip() if isinstance(extra_data, dict) else "unknown"
+    vlm_backend = (extra_data.get("vlm_backend") or "unknown").strip() if isinstance(extra_data, dict) else "unknown"
+    reranker_backend = (extra_data.get("reranker_backend") or "unknown").strip() if isinstance(extra_data, dict) else "unknown"
+    return "|".join([llm_backend, embedding_backend, vlm_backend, reranker_backend])
+
+
+def _routing_slice_parts(slice_key: str) -> tuple[str, str, str, str]:
+    values = (slice_key or "").split("|")
+    if len(values) != 4:
+        return ("unknown", "unknown", "unknown", "unknown")
+    return values[0], values[1], values[2], values[3]
+
+
+def _avg(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 4)
+
+
+def _ratio(part: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round(part / total, 4)
 
 
 def _class_ids_for_student(db: Session, student_id: str, course_id: Optional[str] = None) -> list[str]:

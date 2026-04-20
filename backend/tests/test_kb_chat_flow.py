@@ -22,6 +22,17 @@ def test_kb_chat_review_flow(client, teacher_headers, student_headers):
     assert graph.status_code == 200
     assert parse_task.status_code == 200
     assert parse_task.json()["data"]["kind"] == "file_parse"
+    graph_data = graph.json()["data"]
+    if graph_data.get("nodes"):
+        node = graph_data["nodes"][0]
+        assert "confidence" in node
+        assert "source_span" in node
+        assert "provenance" in node
+    if graph_data.get("edges"):
+        edge = graph_data["edges"][0]
+        assert "confidence" in edge
+        assert "source_span" in edge
+        assert "provenance" in edge
 
     query = client.post(
         "/api/v1/chat/query",

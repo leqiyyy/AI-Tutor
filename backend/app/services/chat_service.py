@@ -1,15 +1,17 @@
 """AI chat orchestration service for the AI tutor system."""
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.ai.mock_rag import get_rag_engine
+from app.core.config import settings
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
 from app.models.chat import ChatCitation, ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
 from app.models.user import User
-from app.services import analytics_service
+from app.services import admin_service, analytics_service, model_routing_service, rag_metrics_service
 
 log = get_logger(__name__)
 
@@ -140,7 +142,12 @@ async def send_message(
     ).order_by(ChatMessage.created_at.asc()).all()
     history = [{"role": message.role, "content": message.content} for message in history_msgs[-10:]]
 
-    rag = get_rag_engine()
+    persisted_model_config = admin_service.get_model_config(db)
+    rag = get_rag_engine(requested_engine=persisted_model_config.get("rag_engine"))
+    routing_snapshot = model_routing_service.build_model_routing_snapshot(persisted_model_config)
+    routing_meta = model_routing_service.flatten_routing_snapshot(routing_snapshot)
+    rag_started = perf_counter()
+    rag_latency_ms = None
     try:
         result = await rag.query(
             question=content,
@@ -149,13 +156,87 @@ async def send_message(
             attachments=attachments,
             role=role,
         )
+        rag_latency_ms = round((perf_counter() - rag_started) * 1000, 2)
+        result_meta = getattr(result, "meta", {}) or {}
+        rag_metrics_service.record_query_event(
+            db,
+            class_id=class_id,
+            user_id=user_id,
+            role=role,
+            engine=result_meta.get("engine") or settings.RAG_ENGINE or "unknown",
+            query_mode=result_meta.get("query_mode") or settings.RAGANYTHING_QUERY_MODE,
+            query_method=result_meta.get("query_method"),
+            used_multimodal=bool(result_meta.get("used_multimodal")) or any(
+                (item or {}).get("file_type") == "image" for item in (attachments or [])
+            ),
+            used_fallback=bool(result_meta.get("used_fallback")),
+            fallback_reason=result_meta.get("fallback_reason"),
+            success=True,
+            latency_ms=rag_latency_ms,
+            confidence=result.confidence,
+            source_count=len(result.sources or []),
+            extra_data={
+                "path": result_meta.get("path"),
+                "retrieval_strategy": result_meta.get("retrieval_strategy"),
+                "reranker_provider": result_meta.get("reranker_provider"),
+                "reranker_model": result_meta.get("reranker_model"),
+                "candidate_count": result_meta.get("candidate_count"),
+                "selected_count": result_meta.get("selected_count"),
+                "graph_term_count": result_meta.get("graph_term_count"),
+                "query_rewrite_enabled": bool(result_meta.get("query_rewrite_enabled", settings.RAG_QUERY_REWRITE_ENABLED)),
+                "query_rewrite_mode": result_meta.get("query_rewrite_mode") or settings.RAG_QUERY_REWRITE_MODE,
+                "query_variant_count": result_meta.get("query_variant_count"),
+                "llm_backend": routing_meta.get("llm_backend"),
+                "embedding_backend": routing_meta.get("embedding_backend"),
+                "vlm_backend": routing_meta.get("vlm_backend"),
+                "reranker_backend": routing_meta.get("reranker_backend"),
+            },
+        )
     except Exception as exc:
+        rag_latency_ms = round((perf_counter() - rag_started) * 1000, 2)
         log.error("rag_query_failed", error=str(exc))
+        rag_metrics_service.record_query_event(
+            db,
+            class_id=class_id,
+            user_id=user_id,
+            role=role,
+            engine=settings.RAG_ENGINE or "unknown",
+            query_mode=settings.RAGANYTHING_QUERY_MODE,
+            query_method=None,
+            used_multimodal=any((item or {}).get("file_type") == "image" for item in (attachments or [])),
+            used_fallback=True,
+            fallback_reason="chat_service_exception",
+            success=False,
+            latency_ms=rag_latency_ms,
+            confidence=0.0,
+            source_count=0,
+            extra_data={
+                "error": str(exc),
+                "retrieval_strategy": settings.RAG_RETRIEVAL_STRATEGY,
+                "reranker_provider": settings.RERANKER_PROVIDER,
+                "reranker_model": settings.RERANKER_MODEL,
+                "candidate_count": 0,
+                "selected_count": 0,
+                "graph_term_count": 0,
+                "query_rewrite_enabled": bool(settings.RAG_QUERY_REWRITE_ENABLED),
+                "query_rewrite_mode": settings.RAG_QUERY_REWRITE_MODE,
+                "query_variant_count": 1,
+                "llm_backend": routing_meta.get("llm_backend"),
+                "embedding_backend": routing_meta.get("embedding_backend"),
+                "vlm_backend": routing_meta.get("vlm_backend"),
+                "reranker_backend": routing_meta.get("reranker_backend"),
+            },
+        )
         result = type("R", (), {
             "answer": "The AI assistant is temporarily unavailable. Please try again later.",
             "sources": [],
             "confidence": 0.0,
             "suggestions": [],
+            "meta": {
+                "engine": settings.RAG_ENGINE,
+                "used_fallback": True,
+                "fallback_reason": "chat_service_exception",
+            },
         })()
 
     needs_review = result.confidence < CONFIDENCE_THRESHOLD

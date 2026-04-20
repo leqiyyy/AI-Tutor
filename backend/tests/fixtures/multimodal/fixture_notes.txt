@@ -1,0 +1,3 @@
+Adaptive congestion control improves queue stability and lowers packet loss.
+The system compares slow-start behavior with additive increase under burst traffic.
+Key anchors: queue delay, throughput, fairness, and retransmission efficiency.

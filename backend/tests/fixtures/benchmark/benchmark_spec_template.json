@@ -1,0 +1,22 @@
+{
+  "questions": [
+    {
+      "id": "q1",
+      "text": "Explain TCP slow start with one short example.",
+      "expected_source_names": [
+        "network_notes.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    },
+    {
+      "id": "q2",
+      "text": "What does CIDR /24 mean and why does it matter?",
+      "expected_source_names": [
+        "subnetting_handbook.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    }
+  ]
+}

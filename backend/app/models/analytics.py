@@ -74,3 +74,25 @@ class StudyMistake(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
+
+
+class RAGQueryEvent(Base):
+    """Per-query observability record for the RAG pipeline."""
+    __tablename__ = "rag_query_events"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    class_id = Column(String(36), ForeignKey("classes.id"), nullable=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    role = Column(String(20), nullable=True)
+    engine = Column(String(50), nullable=False, default="unknown")
+    query_mode = Column(String(30), nullable=True)
+    query_method = Column(String(50), nullable=True)
+    used_multimodal = Column(Integer, nullable=False, default=0)
+    used_fallback = Column(Integer, nullable=False, default=0)
+    fallback_reason = Column(String(80), nullable=True)
+    success = Column(Integer, nullable=False, default=1)
+    latency_ms = Column(Float, nullable=True)
+    confidence = Column(Float, nullable=True)
+    source_count = Column(Integer, nullable=False, default=0)
+    extra_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
