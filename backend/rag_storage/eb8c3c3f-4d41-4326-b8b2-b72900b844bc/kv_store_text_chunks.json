@@ -12,5 +12,61 @@
     "update_time": 1775714829,
     "_id": "chunk-5d9b6678256fdb0e6d346d41fc2f3aa5",
     "create_time": 0
+  },
+  "chunk-00002a3dfcc7efe2746e6448c76c6b7d": {
+    "tokens": 41,
+    "content": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "chunk_order_index": 0,
+    "full_doc_id": "a8495264-b520-4eec-a19c-dc358785f16f",
+    "file_path": "fixture_notes.txt",
+    "llm_cache_list": [
+      "default:extract:7ea02acdb52dcde0f5e7a956b243d73e",
+      "default:extract:8d6f7c39be7e2551449e08dfffb4aac4"
+    ],
+    "update_time": 1776962670,
+    "_id": "chunk-00002a3dfcc7efe2746e6448c76c6b7d",
+    "create_time": 0
+  },
+  "chunk-cbcea58946eb6b3a1a9a2eefa0fbfee9": {
+    "tokens": 28,
+    "content": "Teacher-reviewed question: What is TCP slow start?\nTeacher-verified answer: TCP slow start rapidly grows the congestion window during the initial phase.",
+    "chunk_order_index": 0,
+    "full_doc_id": "teacher-review-96ee986d34ba2c701bb3772d",
+    "file_path": "teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt",
+    "llm_cache_list": [
+      "default:extract:85728b2fdea3e345459ff6eba67ca56a",
+      "default:extract:5c59b5e7d1775b41ced42aefdb08ac0f"
+    ],
+    "create_time": 1776962675,
+    "update_time": 1776962839,
+    "_id": "chunk-cbcea58946eb6b3a1a9a2eefa0fbfee9"
+  },
+  "chunk-c19f1fd6689902f8144ee71d81d15c7f": {
+    "tokens": 32,
+    "content": "Teacher-reviewed question: What is TCP slow start?\nTeacher-verified answer: TCP slow start is the initial congestion control phase where cwnd grows quickly each RTT.",
+    "chunk_order_index": 0,
+    "full_doc_id": "teacher-review-f3060262ec200a0d1458790d",
+    "file_path": "teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt",
+    "llm_cache_list": [
+      "default:extract:70ff31a9597c921635713d2d739efe35",
+      "default:extract:72ab4f11958f9b4e529266e3cf88f137"
+    ],
+    "create_time": 1776962841,
+    "update_time": 1776962847,
+    "_id": "chunk-c19f1fd6689902f8144ee71d81d15c7f"
+  },
+  "chunk-3317d1ab02cc65a25adf9d368924d824": {
+    "tokens": 7,
+    "content": "Congestion control improves throughput stability.",
+    "chunk_order_index": 0,
+    "full_doc_id": "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1",
+    "file_path": "graph_filter_notes.txt",
+    "llm_cache_list": [
+      "default:extract:beb4e456a249d077b1c06522cb489968",
+      "default:extract:c81c3bc7db85c02653567637ae5bad29"
+    ],
+    "update_time": 1776998507,
+    "_id": "chunk-3317d1ab02cc65a25adf9d368924d824",
+    "create_time": 0
   }
 }

@@ -102,5 +102,131 @@
     "create_time": 1775714822,
     "update_time": 1775714822,
     "_id": "82bd8c6048d7412b9b527dcb8fa519de"
+  },
+  "b9f985c0af53956d4d386a9d1f942d4d": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "Adaptive congestion control improves queue stability and lowers packet loss. ",
+        "bbox": [
+          124,
+          91,
+          699,
+          107
+        ],
+        "page_idx": 0
+      },
+      {
+        "type": "text",
+        "text": "The system compares slow-start behavior with additive increase under burst traffic. ",
+        "bbox": [
+          124,
+          109,
+          746,
+          124
+        ],
+        "page_idx": 0
+      },
+      {
+        "type": "text",
+        "text": "Key anchors: queue delay, throughput, fairness, and retransmission efficiency. ",
+        "bbox": [
+          124,
+          128,
+          712,
+          142
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-106d38e956f7b340c6b470dd292bead0",
+    "mtime": 1776430087.9590797,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1776926710.2547743,
+    "cache_version": "1.0",
+    "create_time": 1776926710,
+    "update_time": 1776926710,
+    "_id": "b9f985c0af53956d4d386a9d1f942d4d"
+  },
+  "41152756b85ed01997ec010cd38f705f": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "Congestion control improves throughput stability. ",
+        "bbox": [
+          127,
+          91,
+          495,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-3317d1ab02cc65a25adf9d368924d824",
+    "mtime": 1776995883.519431,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1776996304.9215703,
+    "cache_version": "1.0",
+    "create_time": 1776996304,
+    "update_time": 1776996304,
+    "_id": "41152756b85ed01997ec010cd38f705f"
+  },
+  "cf27ffd7cdd6950f6c1be63c7d6ecc81": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "Congestion control improves throughput stability. ",
+        "bbox": [
+          127,
+          91,
+          495,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-3317d1ab02cc65a25adf9d368924d824",
+    "mtime": 1776996396.50498,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1776996890.0789492,
+    "cache_version": "1.0",
+    "create_time": 1776996890,
+    "update_time": 1776996890,
+    "_id": "cf27ffd7cdd6950f6c1be63c7d6ecc81"
+  },
+  "5fdcd4a4711a8d998fbba3168d7db48b": {
+    "content_list": [
+      {
+        "type": "text",
+        "text": "Congestion control improves throughput stability. ",
+        "bbox": [
+          127,
+          91,
+          495,
+          107
+        ],
+        "page_idx": 0
+      }
+    ],
+    "doc_id": "doc-3317d1ab02cc65a25adf9d368924d824",
+    "mtime": 1776998042.413441,
+    "parse_config": {
+      "parser": "mineru",
+      "parse_method": "auto"
+    },
+    "cached_at": 1776998505.3682253,
+    "cache_version": "1.0",
+    "create_time": 1776998505,
+    "update_time": 1776998505,
+    "_id": "5fdcd4a4711a8d998fbba3168d7db48b"
   }
 }

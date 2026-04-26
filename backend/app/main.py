@@ -27,6 +27,7 @@ from app.core.openapi_examples import DEFAULT_ERROR_RESPONSES
 from app.core.request_context import reset_request_id, reset_trace_id, set_request_id, set_trace_id
 from app.core.redis import close_redis
 from app.core.responses import ok
+from app.integrations.rag import shutdown_rag_engine
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,7 @@ async def lifespan(_: FastAPI):
         initialize_database()
         logger.info("database_initialized", auto_create_tables=True)
     yield
+    await shutdown_rag_engine()
     close_redis()
     logger.info("app_stopped")
 

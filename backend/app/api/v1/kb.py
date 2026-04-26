@@ -7,12 +7,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 import app.storage as storage
-from app.ai.mock_rag import get_rag_engine
 from app.core.deps import get_current_teacher, get_current_user
 from app.core.error_codes import ErrorCode
 from app.core.openapi_examples import responses_with_success
 from app.core.response import ok
 from app.db.base import get_db
+from app.integrations.rag import get_rag_engine
+from app.integrations.preprocessors import detect_material_file_type
 from app.models.course import Class, Material
 from app.models.knowledge import FileParseTask
 from app.models.user import User
@@ -96,19 +97,10 @@ async def upload_course_file(
     storage_key, stored_path = storage.save_upload(cls.id, file.filename or "file", tmp_path)
     os.unlink(tmp_path)
 
-    ext = suffix.lower().lstrip(".")
-    file_type_map = {
-        "pdf": "pdf",
-        "docx": "docx",
-        "doc": "docx",
-        "pptx": "ppt",
-        "ppt": "ppt",
-        "md": "md",
-        "txt": "txt",
-        "png": "image",
-        "jpg": "image",
-        "jpeg": "image",
-    }
+    detected_file_type = detect_material_file_type(
+        file.filename or "file",
+        file.content_type or "application/octet-stream",
+    )
     material = Material(
         class_id=cls.id,
         uploaded_by=current_user.id,
@@ -117,7 +109,7 @@ async def upload_course_file(
         file_path=stored_path,
         file_size=len(content),
         mime_type=file.content_type or "application/octet-stream",
-        file_type=file_type_map.get(ext, "other"),
+        file_type=detected_file_type,
         description=description,
         kb_status="pending",
     )
@@ -225,6 +217,36 @@ def file_analysis(
     return ok(data=kb_service.get_material_analysis(db, course_id, file_id, current_user))
 
 
+@router.get("/courses/{course_id}/files/{file_id}/transcript", response_model=None)
+def file_transcript(
+    course_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return ok(data=kb_service.get_material_transcript(db, course_id, file_id, current_user))
+
+
+@router.get("/courses/{course_id}/files/{file_id}/keyframes", response_model=None)
+def file_keyframes(
+    course_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return ok(data=kb_service.get_material_keyframes(db, course_id, file_id, current_user))
+
+
+@router.get("/courses/{course_id}/files/{file_id}/ocr", response_model=None)
+def file_ocr(
+    course_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return ok(data=kb_service.get_material_ocr(db, course_id, file_id, current_user))
+
+
 @router.get(
     "/courses/{course_id}/kb/status",
     response_model=None,
@@ -279,11 +301,15 @@ def kb_tasks(
 @router.post("/courses/{course_id}/kb/rebuild", response_model=None)
 async def rebuild_kb(
     course_id: str,
+    storage_migration_only: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
     kb_service.ensure_course_access(db, course_id, current_user)
-    result = await get_rag_engine().rebuild_course(course_id)
+    result = await get_rag_engine().rebuild_course(
+        course_id,
+        storage_migration_only=storage_migration_only,
+    )
     return ok(data=result, message="Knowledge base rebuilt")
 
 
@@ -334,11 +360,21 @@ async def retry_file_index(
 @router.get("/courses/{course_id}/graph", response_model=None)
 def course_graph(
     course_id: str,
+    class_id: Optional[str] = Query(None),
+    entity_type: Optional[str] = Query(None),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    limit: int = Query(300, ge=1, le=2000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     kb_service.ensure_course_access(db, course_id, current_user)
-    return ok(data=get_rag_engine().get_graph(course_id))
+    return ok(data=get_rag_engine().get_graph(
+        course_id,
+        class_id=class_id,
+        entity_type=entity_type,
+        min_confidence=min_confidence,
+        limit=limit,
+    ))
 
 
 @router.get("/courses/{course_id}/search", response_model=None)

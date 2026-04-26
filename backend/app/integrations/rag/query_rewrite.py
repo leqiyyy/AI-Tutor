@@ -83,9 +83,9 @@ def _generate_variants(question: str, mode: str) -> list[str]:
     compact_query = " ".join(filtered_terms[:12]).strip()
     keyword_query = " ".join(_keyword_terms(filtered_terms, limit=6)).strip()
 
-    if mode in {"simple", "compact"} and compact_query:
+    if mode in {"hybrid", "compact"} and compact_query:
         outputs.append(compact_query)
-    if mode in {"simple", "keywords"} and keyword_query:
+    if mode in {"hybrid", "keywords"} and keyword_query:
         outputs.append(keyword_query)
     return outputs
 
@@ -133,9 +133,11 @@ def _terms(text: str) -> list[str]:
 
 
 def _normalize_mode(mode: str | None) -> str:
-    normalized = (mode or "simple").strip().lower()
-    if normalized not in {"none", "simple", "compact", "keywords"}:
-        return "simple"
+    normalized = (mode or "hybrid").strip().lower()
+    if normalized == "simple":
+        return "hybrid"
+    if normalized not in {"none", "hybrid", "compact", "keywords"}:
+        return "hybrid"
     return normalized
 
 

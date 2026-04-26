@@ -44,6 +44,33 @@ def test_api_reranker_falls_back_on_remote_failure(monkeypatch):
     assert result[0]["rerank_fallback_reason"] == "RuntimeError"
 
 
+def test_api_reranker_parses_siliconflow_relevance_score_response():
+    reranker = APIReranker()
+
+    scores = reranker._parse_scores(
+        data={
+            "results": [
+                {"index": 1, "relevance_score": 0.91, "document": {"text": "slow start"}},
+                {"index": 0, "relevance_score": 0.12, "document": {"text": "grading policy"}},
+            ]
+        },
+        size=2,
+    )
+
+    assert scores == [0.12, 0.91]
+
+
+def test_api_reranker_prefers_embedding_key_for_siliconflow(monkeypatch):
+    monkeypatch.setattr(settings, "RERANKER_API_KEY", "")
+    monkeypatch.setattr(settings, "EMBEDDING_API_KEY", "embedding-key")
+    monkeypatch.setattr(settings, "EXTRACT_API_KEY", "extract-key")
+    monkeypatch.setattr(settings, "LLM_API_KEY", "llm-key")
+
+    reranker = APIReranker()
+
+    assert reranker._api_key == "embedding-key"
+
+
 def test_local_reranker_heuristic_sorts_by_semantic_overlap():
     reranker = LocalReranker()
     candidates = [

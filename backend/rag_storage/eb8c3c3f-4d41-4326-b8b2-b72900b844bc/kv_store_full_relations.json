@@ -62,5 +62,237 @@
     "create_time": 1775714830,
     "update_time": 1775714830,
     "_id": "45d31e62-17d9-4a9f-b133-a3b430f13dde"
+  },
+  "a9d2af5d-d9ba-4feb-a4a2-999174ad6451": {
+    "relation_pairs": [
+      [
+        "Retransmission Efficiency",
+        "System Comparison"
+      ],
+      [
+        "Queue Delay",
+        "System Comparison"
+      ],
+      [
+        "System Comparison",
+        "Throughput"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "System Comparison"
+      ],
+      [
+        "Fairness",
+        "System Comparison"
+      ]
+    ],
+    "count": 5,
+    "create_time": 1776962659,
+    "update_time": 1776962659,
+    "_id": "a9d2af5d-d9ba-4feb-a4a2-999174ad6451"
+  },
+  "d03f7c71-9055-4027-9c08-c731326be044": {
+    "relation_pairs": [
+      [
+        "Adaptive Congestion Control",
+        "Slow-Start Behavior"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Retransmission Efficiency"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Fairness"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Queue Delay"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Burst Traffic"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Throughput"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Additive Increase"
+      ]
+    ],
+    "count": 7,
+    "create_time": 1776962667,
+    "update_time": 1776962667,
+    "_id": "d03f7c71-9055-4027-9c08-c731326be044"
+  },
+  "c6aba5eb-daee-446f-8980-752e1a545463": {
+    "relation_pairs": [
+      [
+        "Adaptive Congestion Control",
+        "Slow-Start Behavior"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Retransmission Efficiency"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Fairness"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Queue Delay"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Burst Traffic"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Throughput"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Additive Increase"
+      ]
+    ],
+    "count": 7,
+    "create_time": 1776962670,
+    "update_time": 1776962670,
+    "_id": "c6aba5eb-daee-446f-8980-752e1a545463"
+  },
+  "8013197d-ac52-463e-9fd3-bf352f2b6173": {
+    "relation_pairs": [
+      [
+        "Adaptive Congestion Control",
+        "Slow-Start Behavior"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Retransmission Efficiency"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Fairness"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Queue Delay"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Burst Traffic"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Throughput"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Additive Increase"
+      ]
+    ],
+    "count": 7,
+    "create_time": 1776962675,
+    "update_time": 1776962675,
+    "_id": "8013197d-ac52-463e-9fd3-bf352f2b6173"
+  },
+  "a8495264-b520-4eec-a19c-dc358785f16f": {
+    "relation_pairs": [
+      [
+        "Adaptive Congestion Control",
+        "Slow-Start Behavior"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Retransmission Efficiency"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Fairness"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Queue Delay"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Throughput"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Burst Traffic"
+      ],
+      [
+        "Adaptive Congestion Control",
+        "Additive Increase"
+      ]
+    ],
+    "count": 7,
+    "create_time": 1776962675,
+    "update_time": 1776962675,
+    "_id": "a8495264-b520-4eec-a19c-dc358785f16f"
+  },
+  "teacher-review-96ee986d34ba2c701bb3772d": {
+    "relation_pairs": [
+      [
+        "Congestion Window",
+        "TCP Slow Start"
+      ]
+    ],
+    "count": 1,
+    "create_time": 1776962840,
+    "update_time": 1776962840,
+    "_id": "teacher-review-96ee986d34ba2c701bb3772d"
+  },
+  "teacher-review-f3060262ec200a0d1458790d": {
+    "relation_pairs": [
+      [
+        "TCP Slow Start",
+        "cwnd"
+      ]
+    ],
+    "count": 1,
+    "create_time": 1776962848,
+    "update_time": 1776962848,
+    "_id": "teacher-review-f3060262ec200a0d1458790d"
+  },
+  "8b11b4cf-6baf-480b-af50-a827e4af786f": {
+    "relation_pairs": [
+      [
+        "Congestion Control",
+        "Throughput Stability"
+      ]
+    ],
+    "count": 1,
+    "create_time": 1776996318,
+    "update_time": 1776996318,
+    "_id": "8b11b4cf-6baf-480b-af50-a827e4af786f"
+  },
+  "75da7a3f-093b-4dff-a0cf-44f0d15a52be": {
+    "relation_pairs": [
+      [
+        "Congestion Control",
+        "Throughput Stability"
+      ]
+    ],
+    "count": 1,
+    "create_time": 1776996893,
+    "update_time": 1776996893,
+    "_id": "75da7a3f-093b-4dff-a0cf-44f0d15a52be"
+  },
+  "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1": {
+    "relation_pairs": [
+      [
+        "Congestion Control",
+        "Throughput Stability"
+      ]
+    ],
+    "count": 1,
+    "create_time": 1776998508,
+    "update_time": 1776998508,
+    "_id": "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1"
   }
 }

@@ -36,6 +36,17 @@ class ModelConfigUpdateRequest(BaseModel):
     email_dev_mode: Optional[bool] = None
 
 
+class RAGStorageConfigUpdateRequest(BaseModel):
+    rag_storage_backend: Optional[str] = None
+    vector_db_provider: Optional[str] = None
+    vector_db_url: Optional[str] = None
+    vector_db_collection: Optional[str] = None
+    graph_db_provider: Optional[str] = None
+    graph_db_url: Optional[str] = None
+    graph_db_database: Optional[str] = None
+    graph_db_username: Optional[str] = None
+
+
 @router.get("/overview", response_model=None)
 def system_overview(
     db: Session = Depends(get_db),
@@ -172,6 +183,39 @@ def get_model_routing(
 ):
     model_config = admin_service.get_model_config(db)
     data = model_routing_service.build_model_routing_snapshot(model_config)
+    return ok(data=data)
+
+
+@router.get("/rag-storage-config", response_model=None)
+def get_rag_storage_config(
+    db: Session = Depends(get_db),
+    _=Depends(get_current_admin),
+):
+    return ok(data=admin_service.get_rag_storage_config(db))
+
+
+@router.put("/rag-storage-config", response_model=None)
+def update_rag_storage_config(
+    body: RAGStorageConfigUpdateRequest,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_admin),
+):
+    effective = admin_service.update_rag_storage_config(db, body.model_dump())
+    return ok(data=effective, message="RAG storage config saved")
+
+
+@router.get("/rag-system-status", response_model=None)
+def rag_system_status(
+    days: int = Query(7, ge=1, le=90),
+    class_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_admin),
+):
+    data = admin_service.get_rag_system_status(
+        db,
+        days=days,
+        class_id=class_id,
+    )
     return ok(data=data)
 
 
@@ -332,7 +376,7 @@ def rag_performance(
                     "disabled": {"queries": 59, "success_rate": 1.0, "fallback_rate": 0.29},
                 },
                 "rewrite_mode": {
-                    "simple": {"queries": 52, "success_rate": 1.0, "fallback_rate": 0.13},
+                    "hybrid": {"queries": 52, "success_rate": 1.0, "fallback_rate": 0.13},
                     "keywords": {"queries": 32, "success_rate": 1.0, "fallback_rate": 0.11},
                     "disabled": {"queries": 59, "success_rate": 1.0, "fallback_rate": 0.29},
                 },

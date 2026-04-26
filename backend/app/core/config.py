@@ -78,7 +78,10 @@ class Settings(BaseSettings):
     VLM_API_BASE: str = ""
     VLM_LOCAL_API_BASE: str = ""
     VLM_WIRE_API: str = "chat_completions"
-    RAG_ENGINE: str = "mock"
+    RAG_ENGINE: str = "raganything"
+    RAGANYTHING_STRICT_MODE: bool = True
+    RAGANYTHING_METADATA_FALLBACK_ENABLED: bool = False
+    RAGANYTHING_REQUIRE_OFFICIAL_METADATA: bool = True
     LIBREOFFICE_PATH: str = ""
     RAGANYTHING_WORKING_DIR: str = "./rag_storage"
     RAGANYTHING_OUTPUT_DIR: str = "./rag_output"
@@ -86,11 +89,53 @@ class Settings(BaseSettings):
     RAGANYTHING_PARSE_METHOD: str = "auto"
     RAGANYTHING_QUERY_MODE: str = "mix"
     RAGANYTHING_MAX_CONCURRENT_FILES: int = 1
+    RAGANYTHING_DEFAULT_LLM_TIMEOUT_SECONDS: int = 180
+    RAG_EDUCATION_PROMPTS_ENABLED: bool = True
+    RAG_EDUCATION_QUERY_PROMPT_ENABLED: bool = True
+    RAG_EDUCATION_ENTITY_TYPES_ENABLED: bool = True
+    RAG_EDUCATION_FRAMEWORK_PROMPT_OVERRIDES_ENABLED: bool = True
+    RAG_EDUCATION_LANGUAGE: str = "简体中文"
+    RAG_EDUCATION_SUBJECT: str = "课程学习"
+    RAG_EDUCATION_ENTITY_TYPES_RAW: str = (
+        "course_concept,prerequisite,learning_objective,formula,theorem,"
+        "algorithm,example,exercise,misconception,experiment_step,tool,dataset,assessment_point"
+    )
+    RAG_STORAGE_BACKEND: str = "lightrag-default"
+    VECTOR_DB_PROVIDER: str = "auto"  # auto | qdrant
+    VECTOR_DB_URL: str = ""
+    VECTOR_DB_API_KEY: str = ""
+    VECTOR_DB_COLLECTION: str = "raganything_chunks"
+    GRAPH_DB_PROVIDER: str = "auto"  # auto | neo4j
+    GRAPH_DB_URL: str = ""
+    GRAPH_DB_DATABASE: str = "neo4j"
+    GRAPH_DB_USERNAME: str = ""
+    GRAPH_DB_PASSWORD: str = ""
+    MULTIMODAL_ALLOW_METADATA_ONLY_INDEX: bool = True
+    MULTIMODAL_AUTO_PREPROCESS_ENABLED: bool = False
+    MULTIMODAL_PREPROCESS_OUTPUT_DIR: str = "./runtime_tmp/multimodal_preprocess"
+    MULTIMODAL_FFMPEG_PATH: str = "ffmpeg"
+    MULTIMODAL_FFPROBE_PATH: str = "ffprobe"
+    MULTIMODAL_VIDEO_KEYFRAME_INTERVAL_SECONDS: int = 30
+    MULTIMODAL_VIDEO_MAX_KEYFRAMES: int = 8
+    CHAT_ATTACHMENT_SCOPE_PREFIX: str = "chat-attachments"
+    CHAT_ATTACHMENT_PREVIEW_CHARS: int = 1200
+    CHAT_ATTACHMENT_TTL_HOURS: int = 24
+    ASR_PROVIDER: str = "none"  # none | faster_whisper | api
+    ASR_MODEL: str = "base"
+    ASR_LANGUAGE: str = ""
+    ASR_DEVICE: str = "cpu"
+    ASR_COMPUTE_TYPE: str = "int8"
+    ASR_API_BASE: str = ""
+    ASR_API_KEY: str = ""
+    ASR_API_PATH: str = "/audio/transcriptions"
+    ASR_API_TIMEOUT_SECONDS: float = 120.0
+    ASR_API_AUTH_HEADER: str = "Authorization"
+    ASR_API_AUTH_SCHEME: str = "Bearer"
     RAG_RETRIEVAL_STRATEGY: str = "hybrid"  # lexical | hybrid | graph
     RAG_RETRIEVAL_CANDIDATE_K: int = 12
     RAG_ANSWER_TOP_K: int = 3
     RAG_QUERY_REWRITE_ENABLED: bool = False
-    RAG_QUERY_REWRITE_MODE: str = "simple"  # none | simple | compact | keywords
+    RAG_QUERY_REWRITE_MODE: str = "hybrid"  # none | hybrid | compact | keywords; legacy simple maps to hybrid
     RAG_QUERY_REWRITE_MAX_VARIANTS: int = 3
     RERANKER_PROVIDER: str = "mock"  # mock | none | api | local
     RERANKER_MODEL: str = "mock-reranker-v1"
@@ -127,6 +172,15 @@ class Settings(BaseSettings):
         "KB_QUEUE_AUTO_RETRY_ENABLED",
         "KB_INDEX_ALERT_NOTIFY_ADMIN",
         "RAG_QUERY_REWRITE_ENABLED",
+        "RAGANYTHING_STRICT_MODE",
+        "RAGANYTHING_METADATA_FALLBACK_ENABLED",
+        "RAGANYTHING_REQUIRE_OFFICIAL_METADATA",
+        "RAG_EDUCATION_PROMPTS_ENABLED",
+        "RAG_EDUCATION_QUERY_PROMPT_ENABLED",
+        "RAG_EDUCATION_ENTITY_TYPES_ENABLED",
+        "RAG_EDUCATION_FRAMEWORK_PROMPT_OVERRIDES_ENABLED",
+        "MULTIMODAL_ALLOW_METADATA_ONLY_INDEX",
+        "MULTIMODAL_AUTO_PREPROCESS_ENABLED",
         mode="before",
     )
     @classmethod
@@ -195,6 +249,14 @@ class Settings(BaseSettings):
     @property
     def EFFECTIVE_EXTRACT_MODEL(self) -> str:
         return self.EXTRACT_MODEL or self.LLM_MODEL
+
+    @property
+    def EFFECTIVE_ASR_API_KEY(self) -> str:
+        return self.ASR_API_KEY or self.EFFECTIVE_VLM_API_KEY or self.EFFECTIVE_LLM_API_KEY
+
+    @property
+    def EFFECTIVE_ASR_API_BASE(self) -> str:
+        return self._normalize_base(self.ASR_API_BASE or self.EFFECTIVE_VLM_API_BASE or self.EFFECTIVE_LLM_API_BASE)
 
     @property
     def LOCAL_STORAGE_ROOT(self) -> Path:

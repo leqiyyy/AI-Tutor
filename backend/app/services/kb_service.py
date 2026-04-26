@@ -5,11 +5,11 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from app.ai.mock_rag import get_rag_engine
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.logging import get_logger
+from app.integrations.rag import get_rag_engine
 from app.models.course import Class, ClassMember, Course, Material
 from app.models.knowledge import FileParseTask, KBSpace
 from app.models.notification import Notification
@@ -182,6 +182,114 @@ def get_material_analysis(db: Session, course_id: str, file_id: str, user: User)
         "last_alert_reason": alert_meta.get("last_reason"),
         "last_alert_at": alert_meta.get("last_alert_at"),
     }
+
+
+def get_material_transcript(db: Session, course_id: str, file_id: str, user: User) -> dict:
+    material, parse_task, content_items = _material_parse_payload(db, course_id, file_id, user)
+    segments = []
+    for item in content_items:
+        modality = item.get("modality") or item.get("source_type") or item.get("raw_type")
+        if modality not in {"text", "audio", "video_transcript", "transcript"}:
+            continue
+        text = item.get("text") or ""
+        if not text:
+            continue
+        segments.append({
+            "text": text,
+            "page": item.get("page"),
+            "timestamp_start": item.get("timestamp_start"),
+            "timestamp_end": item.get("timestamp_end"),
+            "source_type": item.get("source_type"),
+            "chunk_id": item.get("chunk_id"),
+        })
+
+    if not segments and parse_task and parse_task.extracted_text:
+        segments.append({
+            "text": parse_task.extracted_text,
+            "page": None,
+            "timestamp_start": None,
+            "timestamp_end": None,
+            "source_type": material.file_type,
+            "chunk_id": None,
+        })
+
+    return {
+        "file_id": material.id,
+        "file_name": material.file_name,
+        "file_type": material.file_type,
+        "status": parse_task.status if parse_task else "pending",
+        "transcript_available": bool(segments),
+        "segments": segments[:50],
+    }
+
+
+def get_material_keyframes(db: Session, course_id: str, file_id: str, user: User) -> dict:
+    material, parse_task, content_items = _material_parse_payload(db, course_id, file_id, user)
+    frames = []
+    for item in content_items:
+        modality = item.get("modality") or item.get("source_type") or item.get("raw_type")
+        if modality not in {"image", "figure", "video_keyframe"}:
+            continue
+        image_path = item.get("image_path") or (item.get("meta") or {}).get("keyframe_path")
+        if not image_path:
+            continue
+        frames.append({
+            "image_path": image_path,
+            "caption": item.get("text") or item.get("ocr_text") or item.get("layout_type"),
+            "page": item.get("page"),
+            "timestamp_start": item.get("timestamp_start"),
+            "timestamp_end": item.get("timestamp_end"),
+            "ocr_text": item.get("ocr_text"),
+            "source_type": item.get("source_type"),
+        })
+
+    extra = (parse_task.extra_data or {}) if parse_task else {}
+    preprocess = (extra.get("preprocess") or {}).get("metadata") or {}
+    return {
+        "file_id": material.id,
+        "file_name": material.file_name,
+        "file_type": material.file_type,
+        "status": parse_task.status if parse_task else "pending",
+        "keyframe_count": len(frames),
+        "generated_keyframes": bool(preprocess.get("generated_keyframes")),
+        "frames": frames[:50],
+    }
+
+
+def get_material_ocr(db: Session, course_id: str, file_id: str, user: User) -> dict:
+    material, parse_task, content_items = _material_parse_payload(db, course_id, file_id, user)
+    blocks = []
+    for item in content_items:
+        ocr_text = item.get("ocr_text") or ((item.get("meta") or {}).get("ocr_text"))
+        text = ocr_text or (item.get("text") if (item.get("modality") in {"image", "figure"}) else "")
+        if not text:
+            continue
+        blocks.append({
+            "text": text,
+            "page": item.get("page"),
+            "bbox": item.get("bbox"),
+            "image_path": item.get("image_path"),
+            "layout_type": item.get("layout_type"),
+            "confidence": item.get("score"),
+            "source_type": item.get("source_type"),
+        })
+
+    return {
+        "file_id": material.id,
+        "file_name": material.file_name,
+        "file_type": material.file_type,
+        "status": parse_task.status if parse_task else "pending",
+        "ocr_available": bool(blocks),
+        "blocks": blocks[:100],
+    }
+
+
+def _material_parse_payload(db: Session, course_id: str, file_id: str, user: User) -> tuple[Material, FileParseTask | None, list[dict[str, Any]]]:
+    material = get_material_for_user(db, course_id, file_id, user)
+    parse_task = db.query(FileParseTask).filter(FileParseTask.material_id == material.id).first()
+    raw_items = ((parse_task.extra_data or {}).get("content_items") if parse_task else None) or []
+    content_items = _normalize_content_items(raw_items, material_id=material.id)
+    return material, parse_task, content_items
 
 
 def search_course_content(db: Session, course_id: str, query: str, user: User) -> list[dict]:

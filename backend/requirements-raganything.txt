@@ -1,0 +1,11 @@
+# Optional production-grade RAG stack.
+# Install this file when running the thesis/demo system with RAG_ENGINE=raganything.
+-r requirements.txt
+
+raganything
+mineru
+openai>=1.0.0
+sentence-transformers>=3.0.0
+faster-whisper>=1.0.0
+qdrant-client>=1.10.0
+neo4j>=5.20.0

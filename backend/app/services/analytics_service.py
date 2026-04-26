@@ -1,15 +1,15 @@
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.analytics import LearningRecord, QuestionAnalytics, RAGQueryEvent, StudentProfile
-from app.models.chat import ChatMessage, ChatSession, ReviewItem
-from app.models.course import Class, ClassMember, Course, Submission, Task
-from app.models.knowledge import FlashcardRecord
+from app.models.chat import ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
+from app.models.course import Class, ClassMember, Course, Material, Submission, Task
+from app.models.knowledge import FlashcardRecord, KBSpace
 from app.models.user import User
 from app.services import model_routing_service
 
@@ -367,7 +367,18 @@ def build_student_report(
         FlashcardRecord.reviewed_at >= start_at,
     ).count()
 
-    high_frequency = profile["weak_topics"][:3] + profile["strong_topics"][:2]
+    recommended_focus = _build_recommended_focus(profile["weak_topics"], profile["strong_topics"])
+    recommended_materials = _recommend_materials(
+        db,
+        student_id=student.id,
+        class_ids=class_ids,
+        weak_topics=profile["weak_topics"],
+    )
+    teacher_verified_faq = _recommend_teacher_verified_faq(
+        db,
+        class_ids=class_ids,
+        weak_topics=profile["weak_topics"],
+    )
     routing_snapshot = model_routing_service.build_runtime_model_routing_snapshot()
     routing_flat = model_routing_service.flatten_routing_snapshot(routing_snapshot)
     routing_slice_key = "|".join([
@@ -397,19 +408,144 @@ def build_student_report(
         "highlights": {
             "strong_topics": profile["strong_topics"],
             "weak_topics": profile["weak_topics"],
-            "recommended_focus": high_frequency,
+            "recommended_focus": recommended_focus,
+            "recommended_materials": recommended_materials,
+            "teacher_verified_faq": teacher_verified_faq,
             "recommendation_context": {
                 "routing_slice_key": routing_slice_key,
                 "llm_backend": routing_flat.get("llm_backend"),
                 "embedding_backend": routing_flat.get("embedding_backend"),
                 "vlm_backend": routing_flat.get("vlm_backend"),
                 "reranker_backend": routing_flat.get("reranker_backend"),
+                "recommended_material_count": len(recommended_materials),
+                "teacher_verified_faq_count": len(teacher_verified_faq),
+                "recommendation_strategy": "weighted_weak_topics+popularity+feedback+review_faq",
             },
         },
         "experiment_context": {
             "routing_slice_key": routing_slice_key,
             "model_routing": routing_snapshot,
         },
+    }
+
+
+def get_material_recommendations(
+    db: Session,
+    student: User,
+    course_id: Optional[str] = None,
+) -> dict:
+    profile = build_student_profile(db, student)
+    class_ids = _class_ids_for_student(db, student.id, course_id)
+    routing_snapshot = model_routing_service.build_runtime_model_routing_snapshot()
+    routing_flat = model_routing_service.flatten_routing_snapshot(routing_snapshot)
+    materials = _recommend_materials(db, student_id=student.id, class_ids=class_ids, weak_topics=profile["weak_topics"])
+    faq = _recommend_teacher_verified_faq(db, class_ids=class_ids, weak_topics=profile["weak_topics"])
+    return {
+        "items": materials,
+        "teacher_verified_faq": faq,
+        "focus_topics": _build_recommended_focus(profile["weak_topics"], profile["strong_topics"]),
+        "context": {
+            "course_id": course_id,
+            "class_ids": class_ids,
+            "weak_topics": profile["weak_topics"],
+            "strong_topics": profile["strong_topics"],
+            "routing": routing_flat,
+            "strategy": "weighted_weak_topics+popularity+feedback+review_faq",
+            "algorithm": {
+                "name": "explainable_weighted_rules",
+                "signals": [
+                    "student_weak_topic_match",
+                    "class_question_popularity",
+                    "rag_indexed_status",
+                    "material_recency",
+                    "student_recommendation_feedback",
+                ],
+            },
+        },
+    }
+
+
+def build_learning_path_recommendation(
+    db: Session,
+    student: User,
+    course_id: Optional[str] = None,
+) -> dict:
+    recommendation = get_material_recommendations(db, student, course_id)
+    focus_topics = recommendation["focus_topics"] or ["general"]
+    material_map = recommendation["items"]
+    faq_items = recommendation["teacher_verified_faq"]
+    steps = []
+    for index, topic in enumerate(focus_topics[:5], start=1):
+        related_materials = [
+            item for item in material_map
+            if topic in (item.get("matched_topics") or [])
+        ][:2]
+        related_faq = [
+            item for item in faq_items
+            if topic in (item.get("matched_topics") or item.get("topics") or [])
+        ][:2]
+        steps.append({
+            "step": index,
+            "topic": topic,
+            "goal": f"Strengthen understanding of {topic}",
+            "materials": related_materials,
+            "teacher_verified_faq": related_faq,
+            "practice_hint": (
+                f"Review teacher-verified explanation and then revisit course material for {topic}."
+                if related_faq or related_materials
+                else f"Ask a focused follow-up question about {topic}."
+            ),
+        })
+    return {
+        "course_id": course_id,
+        "focus_topics": focus_topics,
+        "steps": steps,
+        "context": recommendation["context"],
+    }
+
+
+def record_recommendation_feedback(
+    db: Session,
+    student: User,
+    *,
+    recommendation_type: str,
+    target_id: str,
+    feedback: str,
+    course_id: Optional[str] = None,
+    class_id: Optional[str] = None,
+    extra_data: Optional[dict[str, Any]] = None,
+) -> dict:
+    resolved_class_id = class_id
+    if not resolved_class_id:
+        class_ids = _class_ids_for_student(db, student.id, course_id)
+        resolved_class_id = class_ids[0] if class_ids else None
+    if not resolved_class_id:
+        raise ValueError("No class context available for recommendation feedback")
+
+    payload = {
+        "recommendation_type": recommendation_type,
+        "target_id": target_id,
+        "feedback": feedback,
+        "course_id": course_id,
+        **(extra_data or {}),
+    }
+    record = record_learning(
+        db,
+        user_id=student.id,
+        class_id=resolved_class_id,
+        activity_type="recommendation_feedback",
+        ref_id=target_id,
+        extra_data=payload,
+    )
+    db.commit()
+    return {
+        "id": record.id,
+        "recommendation_type": recommendation_type,
+        "target_id": target_id,
+        "feedback": feedback,
+        "recorded_at": record.created_at,
+        "class_id": resolved_class_id,
+        "course_id": course_id,
     }
 
 
@@ -465,10 +601,207 @@ def _student_strong_topics(db: Session, student_id: str) -> list[str]:
     return [topic for topic, _ in topic_counts.most_common(5)]
 
 
+def extract_terms_for_recommendation(text: str) -> list[str]:
+    return _extract_terms(text)
+
+
 def _extract_terms(text: str) -> list[str]:
     latin = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
     cjk = re.findall(r"[\u4e00-\u9fff]{2,8}", text)
     return [*latin, *cjk]
+
+
+def _build_recommended_focus(weak_topics: list[str], strong_topics: list[str]) -> list[str]:
+    focus = []
+    for topic in [*(weak_topics or [])[:3], *(strong_topics or [])[:2]]:
+        if topic and topic not in focus:
+            focus.append(topic)
+    return focus
+
+
+def _recommend_materials(
+    db: Session,
+    *,
+    student_id: str,
+    class_ids: list[str],
+    weak_topics: list[str],
+) -> list[dict]:
+    if not class_ids:
+        return []
+    materials = db.query(Material).filter(
+        Material.class_id.in_(class_ids),
+        Material.is_active == True,
+    ).order_by(Material.created_at.desc()).limit(20).all()
+
+    weak_topic_set = set(weak_topics or [])
+    feedback_scores = _recommendation_feedback_scores(db, student_id=student_id)
+    topic_popularity = _class_topic_popularity(db, class_ids=class_ids)
+    now = datetime.now(timezone.utc)
+    ranked = []
+    for material in materials:
+        haystack = " ".join(filter(None, [
+            material.title,
+            material.file_name,
+            material.description,
+        ])).lower()
+        matched_topics = [topic for topic in weak_topic_set if topic.lower() in haystack]
+        popularity_score = min(
+            3.0,
+            sum(topic_popularity.get(topic.lower(), 0) for topic in matched_topics) / 5.0,
+        )
+        recency_score = max(0.0, 1.5 - (_days_since(material.created_at, now) / 30.0))
+        feedback_score = feedback_scores.get(material.id, 0.0)
+        score = len(matched_topics) * 4.0 + popularity_score + recency_score + feedback_score
+        if material.kb_status == "indexed":
+            score += 1.5
+        evidence_signals = {
+            "weak_topic_match": round(len(matched_topics) * 4.0, 3),
+            "class_question_popularity": round(popularity_score, 3),
+            "rag_indexed_status": 1.5 if material.kb_status == "indexed" else 0.0,
+            "material_recency": round(recency_score, 3),
+            "student_feedback": round(feedback_score, 3),
+        }
+        ranked.append({
+            "material_id": material.id,
+            "title": material.title,
+            "file_name": material.file_name,
+            "file_type": material.file_type,
+            "kb_status": material.kb_status,
+            "matched_topics": matched_topics,
+            "reason": (
+                f"Matches weak topics: {', '.join(matched_topics)}"
+                if matched_topics
+                else "Recent indexed course material with no direct weak-topic match"
+            ),
+            "score": round(score, 3),
+            "evidence_signals": evidence_signals,
+            "created_at": material.created_at,
+        })
+
+    ranked.sort(key=lambda item: (item["score"], item["created_at"]), reverse=True)
+    return [
+        {
+            "material_id": item["material_id"],
+            "title": item["title"],
+            "file_name": item["file_name"],
+            "file_type": item["file_type"],
+            "kb_status": item["kb_status"],
+            "matched_topics": item["matched_topics"],
+            "reason": item["reason"],
+            "score": item["score"],
+            "evidence_signals": item["evidence_signals"],
+        }
+        for item in ranked[:5]
+    ]
+
+
+def _recommendation_feedback_scores(db: Session, *, student_id: str) -> dict[str, float]:
+    weights = {
+        "helpful": 2.0,
+        "useful": 2.0,
+        "like": 1.5,
+        "saved": 1.5,
+        "neutral": 0.0,
+        "dismissed": -1.0,
+        "not_helpful": -2.0,
+        "dislike": -2.0,
+    }
+    records = db.query(LearningRecord).filter(
+        LearningRecord.user_id == student_id,
+        LearningRecord.activity_type == "recommendation_feedback",
+    ).all()
+    scores: dict[str, float] = defaultdict(float)
+    for record in records:
+        extra = record.extra_data or {}
+        target_id = str(extra.get("target_id") or record.ref_id or "").strip()
+        feedback = str(extra.get("feedback") or "").strip().lower()
+        if target_id:
+            scores[target_id] += weights.get(feedback, 0.0)
+    return dict(scores)
+
+
+def _class_topic_popularity(db: Session, *, class_ids: list[str]) -> dict[str, int]:
+    if not class_ids:
+        return {}
+    rows = db.query(QuestionAnalytics).filter(QuestionAnalytics.class_id.in_(class_ids)).all()
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        topic = str(row.topic or "").strip().lower()
+        if topic:
+            counts[topic] += int(row.question_count or 0)
+    return dict(counts)
+
+
+def _days_since(value: datetime | None, now: datetime) -> float:
+    if not value:
+        return 365.0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - value).total_seconds() / 86400.0)
+
+
+def _recommend_teacher_verified_faq(db: Session, *, class_ids: list[str], weak_topics: list[str]) -> list[dict]:
+    if not class_ids:
+        return []
+    kb_spaces = db.query(KBSpace).filter(KBSpace.class_id.in_(class_ids)).all()
+    weak_topic_set = set(weak_topics or [])
+    faq_items = []
+    for kb_space in kb_spaces:
+        extra = kb_space.extra_data or {}
+        for faq in extra.get("review_faq") or []:
+            if not isinstance(faq, dict):
+                continue
+            topics = faq.get("topics") or []
+            matched_topics = [topic for topic in topics if topic in weak_topic_set]
+            score = len(matched_topics) * 2 + (1 if faq.get("sync_status") == "synced" else 0)
+            faq_items.append({
+                "question": faq.get("question"),
+                "answer": faq.get("answer"),
+                "topics": topics,
+                "matched_topics": matched_topics,
+                "sync_status": faq.get("sync_status"),
+                "reviewed_at": faq.get("reviewed_at"),
+                "reason": (
+                    f"Teacher-verified answer for weak topics: {', '.join(matched_topics)}"
+                    if matched_topics
+                    else "Recent teacher-verified answer"
+                ),
+                "score": score,
+            })
+    sync_records = db.query(ReviewSyncRecord).filter(
+        ReviewSyncRecord.class_id.in_(class_ids),
+        ReviewSyncRecord.sync_status.in_(["synced", "pending"]),
+    ).order_by(ReviewSyncRecord.created_at.desc()).all()
+    for record in sync_records:
+        topics = _extract_terms(record.question_content)[:6]
+        matched_topics = [topic for topic in topics if topic in weak_topic_set]
+        score = len(matched_topics) * 2 + (1 if record.sync_status == "synced" else 0)
+        faq_items.append({
+            "question": record.question_content,
+            "answer": record.final_answer,
+            "topics": topics,
+            "matched_topics": matched_topics,
+            "sync_status": record.sync_status,
+            "reviewed_at": (record.synced_at or record.created_at).isoformat() if (record.synced_at or record.created_at) else None,
+            "reason": (
+                f"Teacher-verified answer for weak topics: {', '.join(matched_topics)}"
+                if matched_topics
+                else "Recent teacher-verified answer"
+            ),
+            "score": score,
+        })
+    faq_items.sort(key=lambda item: (item["score"], item.get("reviewed_at") or ""), reverse=True)
+    deduped = []
+    seen_questions = set()
+    for item in faq_items:
+        question = item.get("question")
+        if question in seen_questions:
+            continue
+        seen_questions.add(question)
+        deduped.append(item)
+        if len(deduped) >= 5:
+            break
+    return deduped
 
 
 def _routing_slice_key_from_extra(extra_data: dict) -> str:

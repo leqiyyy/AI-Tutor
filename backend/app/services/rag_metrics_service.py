@@ -115,6 +115,14 @@ def get_rag_performance(
         ((row.extra_data or {}).get("reranker_backend") or "unknown")
         for row in rows
     )
+    confidence_band_dist = Counter(
+        ((row.extra_data or {}).get("confidence_band") or _confidence_band(row.confidence))
+        for row in rows
+    )
+    grounding_level_dist = Counter(
+        ((row.extra_data or {}).get("grounding_level") or "unknown")
+        for row in rows
+    )
     fallback_reason_dist = Counter(
         (row.fallback_reason or "unspecified")
         for row in rows
@@ -156,6 +164,8 @@ def get_rag_performance(
             "embedding_backend": dict(embedding_backend_dist),
             "vlm_backend": dict(vlm_backend_dist),
             "reranker_backend": dict(reranker_backend_dist),
+            "confidence_band": dict(confidence_band_dist),
+            "grounding_level": dict(grounding_level_dist),
             "fallback_reason": dict(fallback_reason_dist),
         },
     }
@@ -287,3 +297,17 @@ def _variant_bucket(value: Any) -> str:
     if count == 3:
         return "3"
     return "4+"
+
+
+def _confidence_band(value: Any) -> str:
+    try:
+        confidence = float(value or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.6:
+        return "medium"
+    if confidence > 0:
+        return "low"
+    return "none"

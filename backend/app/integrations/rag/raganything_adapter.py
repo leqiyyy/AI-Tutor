@@ -1,7 +1,9 @@
 import importlib
 import inspect
+import json
 import os
 import re
+import sys
 import asyncio
 import hashlib
 from datetime import datetime, timezone
@@ -13,11 +15,18 @@ from app.ai.base import RAGResult
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.logging import get_logger
-from app.integrations.parser.simple import SimpleParserProvider
+from app.integrations.preprocessors import PreprocessResult, preprocess_for_raganything
+from app.integrations.rag.education_prompts import (
+    apply_framework_prompt_overrides,
+    build_lightrag_addon_params,
+    build_query_user_prompt,
+)
 from app.integrations.rag.query_rewrite import build_query_rewrite_bundle
+from app.integrations.rag.storage_config import (
+    build_lightrag_storage_plan,
+    build_runtime_rag_storage_config_snapshot,
+)
 from app.integrations.reranker import get_reranker
-from app.integrations.rag.simple_engine import SimpleRAGEngine
-from app.models.chat import ReviewSyncRecord
 from app.models.course import Class, Course, Material
 from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, KnowledgeRelation
 from app.services import model_routing_service
@@ -25,23 +34,107 @@ from app.services import model_routing_service
 logger = get_logger(__name__)
 
 
-class RAGAnythingAdapter(SimpleRAGEngine):
+class RAGAnythingAdapter:
     """Official RAG-Anything-backed adapter with local DB metadata support."""
 
     def __init__(self) -> None:
-        super().__init__()
         self._instances: dict[str, object] = {}
         self._instance_route_signatures: dict[str, str] = {}
 
+    def __del__(self):  # pragma: no cover - interpreter shutdown timing is environment-specific
+        instances = list(getattr(self, "_instances", {}).items())
+        for _, instance in instances:
+            close = getattr(instance, "close", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(result)
+                    else:
+                        loop.create_task(result)
+            except Exception:
+                pass
+
     def _prepare_environment(self) -> None:
+        python_dir = Path(sys.executable).resolve().parent
+        candidate_dirs = [python_dir]
+        if os.name == "nt":
+            candidate_dirs.append(python_dir / "Scripts")
+        else:
+            candidate_dirs.append(python_dir / "bin")
+
+        path_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+        for candidate in candidate_dirs:
+            if candidate.exists():
+                candidate_text = str(candidate)
+                if candidate_text not in path_parts:
+                    os.environ["PATH"] = candidate_text + os.pathsep + os.environ.get("PATH", "")
+                    path_parts.insert(0, candidate_text)
+
         if settings.LIBREOFFICE_PATH:
             soffice_path = Path(settings.LIBREOFFICE_PATH)
             if soffice_path.exists():
                 os.environ["SOFFICE_PATH"] = str(soffice_path)
                 soffice_dir = str(soffice_path.parent)
-                path_parts = os.environ.get("PATH", "").split(os.pathsep)
                 if soffice_dir not in path_parts:
                     os.environ["PATH"] = soffice_dir + os.pathsep + os.environ.get("PATH", "")
+
+    def _apply_storage_env_overrides(self, env_overrides: dict[str, str]) -> None:
+        for key, value in (env_overrides or {}).items():
+            if value:
+                os.environ[key] = str(value)
+
+    def _schedule_close(self, instance: object | None, *, class_id: str | None = None, reason: str) -> None:
+        if instance is None:
+            return
+        close = getattr(instance, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(result)
+                else:
+                    loop.create_task(result)
+            logger.info(
+                "raganything_instance_close_scheduled",
+                class_id=class_id,
+                reason=reason,
+            )
+        except Exception as exc:  # pragma: no cover - defensive cleanup path
+            logger.warning(
+                "raganything_instance_close_failed",
+                class_id=class_id,
+                reason=reason,
+                error=str(exc),
+            )
+
+    async def aclose(self) -> None:
+        for class_id, instance in list(self._instances.items()):
+            close = getattr(instance, "close", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+                logger.info("raganything_instance_closed", class_id=class_id, reason="adapter_shutdown")
+            except Exception as exc:  # pragma: no cover - defensive cleanup path
+                logger.warning(
+                    "raganything_instance_close_failed",
+                    class_id=class_id,
+                    reason="adapter_shutdown",
+                    error=str(exc),
+                )
+        self._instances.clear()
+        self._instance_route_signatures.clear()
 
     def _require_model_config(self, routing_snapshot: dict[str, Any]) -> None:
         generation = routing_snapshot.get("generation") or {}
@@ -147,9 +240,9 @@ class RAGAnythingAdapter(SimpleRAGEngine):
             await client.close()
 
     def _build_llm_func(self, routing_snapshot: dict[str, Any]):
-        generation = routing_snapshot.get("generation") or {}
-        extract_model = generation.get("model") or settings.EFFECTIVE_EXTRACT_MODEL
-        extract_base = generation.get("api_base") or settings.EFFECTIVE_EXTRACT_API_BASE
+        _ = routing_snapshot
+        extract_model = settings.EFFECTIVE_EXTRACT_MODEL
+        extract_base = settings.EFFECTIVE_EXTRACT_API_BASE
         extract_api_key = settings.EFFECTIVE_EXTRACT_API_KEY
 
         async def _llm(prompt, system_prompt=None, history_messages=None, keyword_extraction=False, **kwargs):
@@ -192,6 +285,45 @@ class RAGAnythingAdapter(SimpleRAGEngine):
             )
 
         return _embedding
+
+    def _build_rerank_func(self, routing_snapshot: dict[str, Any]):
+        reranker = routing_snapshot.get("reranker") or {}
+        if reranker.get("effective_backend") in {None, "mock", "none"}:
+            return None
+
+        async def _rerank(query: str, documents: list[str], top_n: int | None = None, **kwargs):
+            _ = kwargs
+            candidates = [
+                {
+                    "_rerank_index": index,
+                    "chunk_id": f"lightrag-rerank-{index}",
+                    "raw_text": str(document or ""),
+                    "retrieval_score": 0.0,
+                }
+                for index, document in enumerate(documents or [])
+            ]
+            reranked = await get_reranker().rerank(
+                query=query,
+                candidates=candidates,
+                context={"retrieval_strategy": "lightrag_internal"},
+            )
+            results = []
+            for item in reranked[: top_n or len(reranked)]:
+                components = item.get("rerank_components") or {}
+                score = (
+                    components.get("remote_score")
+                    or components.get("semantic_score")
+                    or item.get("rerank_score")
+                    or item.get("score")
+                    or 0.0
+                )
+                results.append({
+                    "index": int(item.get("_rerank_index", 0)),
+                    "relevance_score": float(score),
+                })
+            return results
+
+        return _rerank
 
     def _build_vision_func(self, routing_snapshot: dict[str, Any]):
         vlm = routing_snapshot.get("vlm") or {}
@@ -261,17 +393,21 @@ class RAGAnythingAdapter(SimpleRAGEngine):
 
     def _get_instance(self, class_id: str):
         routing_snapshot = self._load_runtime_routing_snapshot()
-        routing_signature = self._routing_signature(routing_snapshot)
+        storage_plan = build_lightrag_storage_plan(class_id)
+        routing_signature = self._routing_signature(routing_snapshot, storage_plan)
         if class_id in self._instances and self._instance_route_signatures.get(class_id) == routing_signature:
             return self._instances[class_id]
+        stale_instance = self._instances.get(class_id)
 
         self._prepare_environment()
+        self._apply_storage_env_overrides(storage_plan.get("env_overrides") or {})
         self._require_model_config(routing_snapshot)
 
         raganything_module = importlib.import_module("raganything")
         config_module = importlib.import_module("raganything.config")
         RAGAnything = getattr(raganything_module, "RAGAnything")
         RAGAnythingConfig = getattr(config_module, "RAGAnythingConfig")
+        prompt_override_status = apply_framework_prompt_overrides(settings)
 
         working_dir = (Path(settings.RAGANYTHING_WORKING_DIR) / class_id).resolve()
         output_dir = (Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()
@@ -290,27 +426,66 @@ class RAGAnythingAdapter(SimpleRAGEngine):
         generation = routing_snapshot.get("generation") or {}
         embedding = routing_snapshot.get("embedding") or {}
         vlm = routing_snapshot.get("vlm") or {}
-        llm_model_name = generation.get("model") or settings.LLM_MODEL
+        llm_model_name = settings.EFFECTIVE_EXTRACT_MODEL or generation.get("model") or settings.LLM_MODEL
         embedding_func = self._build_embedding_func(routing_snapshot)
+        rerank_func = self._build_rerank_func(routing_snapshot)
+        lightrag_kwargs = {
+            "llm_model_name": llm_model_name,
+            "embedding_func": embedding_func,
+            "working_dir": str(working_dir),
+            "llm_model_max_async": 1,
+            "default_llm_timeout": settings.RAGANYTHING_DEFAULT_LLM_TIMEOUT_SECONDS,
+        }
+        lightrag_kwargs.update(storage_plan.get("lightrag_kwargs") or {})
+        self._attach_lightrag_addon_params(lightrag_kwargs)
+        if rerank_func is not None:
+            lightrag_kwargs["rerank_model_func"] = rerank_func
 
         instance = RAGAnything(
             llm_model_func=self._build_llm_func(routing_snapshot),
             vision_model_func=self._build_vision_func(routing_snapshot) if vlm.get("effective_backend") != "mock" else None,
             embedding_func=embedding_func,
             config=config,
-            lightrag_kwargs={
-                "llm_model_name": llm_model_name,
-                "embedding_func": embedding_func,
-                "working_dir": str(working_dir),
-                "llm_model_max_async": 1,
-            },
+            lightrag_kwargs=lightrag_kwargs,
         )
         if not instance.check_parser_installation():
             raise RuntimeError("RAG-Anything parser installation check failed")
 
         self._instances[class_id] = instance
         self._instance_route_signatures[class_id] = routing_signature
+        if prompt_override_status.get("enabled"):
+            logger.info(
+                "raganything_education_prompts_active",
+                class_id=class_id,
+                status=prompt_override_status,
+                addon_params=bool(lightrag_kwargs.get("addon_params")),
+            )
+        if stale_instance is not None and stale_instance is not instance:
+            self._schedule_close(stale_instance, class_id=class_id, reason="route_signature_changed")
         return instance
+
+    def _attach_lightrag_addon_params(self, lightrag_kwargs: dict[str, Any]) -> None:
+        addon_params = build_lightrag_addon_params(settings)
+        if not addon_params:
+            return
+        try:
+            lightrag_module = importlib.import_module("lightrag")
+            LightRAG = getattr(lightrag_module, "LightRAG", None)
+            supports_addon_params = (
+                LightRAG is not None
+                and "addon_params" in inspect.signature(LightRAG).parameters
+            )
+        except Exception as exc:  # pragma: no cover - depends on optional package version
+            logger.debug("lightrag_addon_params_probe_failed", reason=str(exc))
+            supports_addon_params = False
+
+        if not supports_addon_params:
+            logger.info("lightrag_addon_params_not_supported_by_runtime")
+            return
+        lightrag_kwargs["addon_params"] = {
+            **dict(lightrag_kwargs.get("addon_params") or {}),
+            **addon_params,
+        }
 
     def _load_runtime_routing_snapshot(self) -> dict[str, Any]:
         snapshot = model_routing_service.build_runtime_model_routing_snapshot()
@@ -318,7 +493,7 @@ class RAGAnythingAdapter(SimpleRAGEngine):
             return snapshot
         return model_routing_service.build_model_routing_snapshot()
 
-    def _routing_signature(self, snapshot: dict[str, Any]) -> str:
+    def _routing_signature(self, snapshot: dict[str, Any], storage_plan: dict[str, Any] | None = None) -> str:
         generation = snapshot.get("generation") or {}
         embedding = snapshot.get("embedding") or {}
         vlm = snapshot.get("vlm") or {}
@@ -337,7 +512,767 @@ class RAGAnythingAdapter(SimpleRAGEngine):
             str(reranker.get("model") or ""),
             str(reranker.get("api_base") or ""),
         ]
+        if storage_plan:
+            parts.extend([
+                str(storage_plan.get("requested_backend") or ""),
+                str(storage_plan.get("effective_backend") or ""),
+                str(storage_plan.get("workspace") or ""),
+                str((storage_plan.get("lightrag_kwargs") or {}).get("vector_storage") or ""),
+                str((storage_plan.get("lightrag_kwargs") or {}).get("graph_storage") or ""),
+            ])
+            for key, value in sorted((storage_plan.get("env_overrides") or {}).items()):
+                if any(token in key for token in {"KEY", "PASSWORD"}):
+                    value = hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+                parts.append(f"{key}={value}")
         return "|".join(parts)
+
+    async def _insert_preprocessed_content_list(
+        self,
+        *,
+        rag: object,
+        preprocess_result: PreprocessResult,
+        material_id: str,
+    ) -> None:
+        method = getattr(rag, "insert_content_list", None)
+        if method is None:
+            raise RuntimeError("RAG-Anything instance does not expose insert_content_list for preprocessed multimodal input")
+
+        kwargs = {
+            "content_list": preprocess_result.content_list,
+            "file_path": preprocess_result.source_file,
+            "doc_id": material_id,
+        }
+        try:
+            result = method(**kwargs)
+        except TypeError:
+            result = method(preprocess_result.content_list)
+        if inspect.isawaitable(result):
+            await result
+
+    def _build_content_list_processing_status(self, preprocess_result: PreprocessResult) -> dict[str, Any]:
+        has_text = any((item.get("text") or item.get("caption")) for item in preprocess_result.content_list)
+        has_visual = any((item.get("type") in {"image", "figure"}) for item in preprocess_result.content_list)
+        metadata_only = preprocess_result.metadata.get("preprocess_quality") == "metadata_only"
+        return {
+            "text_processed": bool(has_text),
+            "multimodal_processed": preprocess_result.modality != "video" or has_visual,
+            "fully_processed": bool(has_text) and not preprocess_result.warnings and not metadata_only,
+            "preprocess_warnings": preprocess_result.warnings,
+            "preprocess": self._preprocess_result_to_metadata(preprocess_result),
+            "entrypoint": "insert_content_list",
+        }
+
+    def _normalize_processing_status(
+        self,
+        status: Any,
+        preprocess_result: PreprocessResult,
+    ) -> dict[str, Any]:
+        if not isinstance(status, dict):
+            status = {"raw_status": status}
+        normalized = {
+            **status,
+            "entrypoint": status.get("entrypoint") or preprocess_result.metadata.get("raganything_entrypoint"),
+            "preprocess": self._preprocess_result_to_metadata(preprocess_result),
+        }
+        normalized.setdefault("text_processed", bool(status.get("text_processed") or status.get("fully_processed")))
+        normalized.setdefault("multimodal_processed", bool(status.get("multimodal_processed") or status.get("fully_processed")))
+        normalized.setdefault("fully_processed", bool(status.get("fully_processed")))
+        return normalized
+
+    def _extract_processing_error(self, status: dict[str, Any]) -> dict[str, str | None]:
+        message = self._find_payload_text(status, {"error_msg", "error_message", "error", "exception", "traceback"})
+        if not message:
+            return {"message": None, "category": None}
+
+        lowered = message.lower()
+        if "api key is invalid" in lowered or "authenticationerror" in lowered or "401" in lowered:
+            category = "llm_authentication"
+        elif "permissiondenied" in lowered or "request was blocked" in lowered or "403" in lowered:
+            category = "llm_permission"
+        elif "rate limit" in lowered or "429" in lowered:
+            category = "llm_rate_limit"
+        elif "timeout" in lowered or "timed out" in lowered:
+            category = "llm_timeout"
+        else:
+            category = "raganything_processing"
+
+        clean_message = re.sub(r"\s+", " ", message).strip()
+        return {"message": clean_message[:1200], "category": category}
+
+    def _build_metadata_payload(
+        self,
+        *,
+        class_id: str,
+        status: dict[str, Any],
+        preprocess_result: PreprocessResult,
+        file_path: str,
+        mime_type: str,
+        file_name: str,
+    ) -> dict[str, Any]:
+        content_items = self._find_payload_list(status, {"content_items", "contents", "multimodal_content"})
+        chunks = self._find_payload_list(status, {"chunks", "text_chunks", "chunk_list"})
+        keywords = self._normalize_keywords(
+            self._find_payload_list(status, {"keywords", "key_words", "entities", "entity_names"})
+        )
+        summary = self._find_payload_text(status, {"summary", "document_summary", "abstract"})
+        metadata_source = "raganything"
+
+        if preprocess_result.mode == "direct_document" and (not content_items or not chunks or not summary):
+            official_output = self._load_official_output_metadata(
+                class_id=class_id,
+                file_path=file_path,
+                file_name=file_name,
+                mime_type=mime_type,
+            )
+            if official_output:
+                content_items = content_items or official_output["content_items"]
+                chunks = chunks or official_output["chunks"]
+                summary = summary or official_output["summary"]
+                metadata_source = official_output["metadata_source"]
+
+        if not content_items and preprocess_result.content_list:
+            content_items = preprocess_result.content_list
+            metadata_source = "preprocessed_content_list"
+        if not chunks and content_items:
+            chunks = self._chunks_from_content_items(content_items, file_name)
+        text = self._text_from_chunks_or_items(chunks, content_items)
+
+        has_official_payload = bool(chunks or content_items or keywords or summary)
+        if settings.RAGANYTHING_REQUIRE_OFFICIAL_METADATA and preprocess_result.mode == "direct_document" and not has_official_payload:
+            raise RuntimeError(
+                "RAG-Anything did not expose official chunks/content metadata for this document. "
+                "Disable RAGANYTHING_REQUIRE_OFFICIAL_METADATA or add a result extractor for the configured RAG-Anything version."
+            )
+
+        if settings.RAGANYTHING_METADATA_FALLBACK_ENABLED and (not chunks or not text):
+            fallback = self._build_adapter_metadata_fallback(file_path, mime_type, file_name)
+            if not chunks:
+                chunks = fallback["chunks"]
+            if not text:
+                text = fallback["text"]
+            if not content_items:
+                content_items = fallback["content_items"]
+            if not keywords:
+                keywords = fallback["keywords"]
+            if not summary:
+                summary = fallback["summary"]
+            metadata_source = f"{metadata_source}+adapter_metadata_fallback"
+
+        if not summary:
+            summary = (text or f"Indexed material: {file_name}")[:500]
+        if not keywords:
+            keywords = self._fallback_keywords(text or file_name)
+
+        return {
+            "text": text or summary,
+            "chunks": chunks or self._chunks_from_content_items(content_items, file_name),
+            "keywords": keywords,
+            "content_items": content_items,
+            "summary": summary,
+            "metadata_source": metadata_source,
+        }
+
+    def _load_official_output_metadata(
+        self,
+        *,
+        class_id: str,
+        file_path: str,
+        file_name: str,
+        mime_type: str,
+    ) -> dict[str, Any] | None:
+        stem = Path(file_name).stem
+        output_root = (Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id / stem).resolve()
+        if not output_root.exists():
+            return None
+
+        content_list_path = self._latest_existing_path(
+            output_root,
+            [f"{stem}_content_list.json", f"{stem}_content_list_v2.json"],
+        )
+        markdown_path = self._latest_existing_path(
+            output_root,
+            [f"{stem}.md", f"{stem}.markdown", f"{stem}.txt"],
+        )
+
+        content_items = self._read_official_content_items(content_list_path)
+        markdown_text = self._safe_read_text(markdown_path)
+        if not content_items and not markdown_text:
+            return None
+
+        text = markdown_text or self._text_from_chunks_or_items([], content_items)
+        chunks = self._chunks_from_content_items(content_items, file_name) if content_items else self._build_adapter_metadata_fallback(file_path, mime_type, file_name)["chunks"]
+        return {
+            "text": text,
+            "chunks": chunks,
+            "content_items": content_items,
+            "summary": (text or f"Indexed material: {file_name}")[:500],
+            "metadata_source": "raganything_output_files",
+        }
+
+    def _latest_existing_path(self, root: Path, candidate_names: list[str]) -> Path | None:
+        matches: list[Path] = []
+        for name in candidate_names:
+            matches.extend(root.rglob(name))
+        if not matches:
+            return None
+        matches.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+        return matches[0]
+
+    def _read_official_content_items(self, path: Path | None) -> list[dict[str, Any]]:
+        if path is None:
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return [item for item in payload if isinstance(item, dict)]
+
+        flattened: list[dict[str, Any]] = []
+        if isinstance(payload, list):
+            for page_idx, page in enumerate(payload):
+                if not isinstance(page, list):
+                    continue
+                for item in page:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized = self._flatten_official_content_item(item)
+                    normalized.setdefault("page_idx", page_idx)
+                    flattened.append(normalized)
+        return flattened
+
+    def _flatten_official_content_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        raw_type = str(item.get("type") or "text").strip().lower()
+        content = item.get("content")
+        text = item.get("text")
+        if not text and isinstance(content, dict):
+            paragraph_items = content.get("paragraph_content")
+            if isinstance(paragraph_items, list):
+                text = "".join(
+                    str(part.get("content") or part.get("text") or "")
+                    for part in paragraph_items
+                    if isinstance(part, dict)
+                ).strip()
+        normalized_type = "text" if raw_type in {"paragraph", "text"} else raw_type
+        return {
+            "type": normalized_type,
+            "text": text or "",
+            "bbox": item.get("bbox"),
+            "page_idx": item.get("page_idx"),
+            "metadata": {
+                "raganything_raw_type": raw_type,
+            },
+        }
+
+    def _safe_read_text(self, path: Path | None) -> str:
+        if path is None:
+            return ""
+        try:
+            return path.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            return ""
+
+    def _build_adapter_metadata_fallback(self, file_path: str, mime_type: str, file_name: str) -> dict[str, Any]:
+        path = Path(file_path)
+        text = ""
+        if path.suffix.lower() in {".txt", ".md"}:
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                text = ""
+        if not text:
+            text = f"Material indexed through RAG-Anything: {file_name}"
+        chunk_id = hashlib.sha256(f"{file_path}|{text[:120]}".encode("utf-8")).hexdigest()[:16]
+        content_item = {
+            "type": "text",
+            "text": text[:2000],
+            "page_idx": 0,
+            "metadata": {
+                "file_name": file_name,
+                "mime_type": mime_type,
+                "fallback_source": "raganything_adapter_metadata_fallback",
+            },
+        }
+        return {
+            "text": text,
+            "chunks": [{
+                "chunk_id": f"{Path(file_name).stem}-{chunk_id}",
+                "text": text[:2000],
+                "source_name": file_name,
+                "source_type": mime_type,
+                "page": 1,
+            }],
+            "content_items": [content_item],
+            "keywords": self._fallback_keywords(text or file_name),
+            "summary": text[:500],
+        }
+
+    def _fallback_keywords(self, text: str, limit: int = 12) -> list[str]:
+        ranked: dict[str, int] = {}
+        for token in self._terms(text):
+            if len(token) < 2:
+                continue
+            ranked[token] = ranked.get(token, 0) + 1
+        return [
+            token
+            for token, _ in sorted(ranked.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        ]
+
+    def _preprocess_result_to_metadata(self, preprocess_result: PreprocessResult) -> dict[str, Any]:
+        return {
+            "mode": preprocess_result.mode,
+            "modality": preprocess_result.modality,
+            "source_file": preprocess_result.source_file,
+            "file_name": preprocess_result.file_name,
+            "warnings": preprocess_result.warnings,
+            "metadata": preprocess_result.metadata,
+            "content_item_count": len(preprocess_result.content_list),
+        }
+
+    def _find_payload_list(self, payload: Any, keys: set[str]) -> list[Any]:
+        found = self._find_payload_value(payload, keys)
+        if isinstance(found, list):
+            return found
+        if isinstance(found, tuple):
+            return list(found)
+        if isinstance(found, dict):
+            return list(found.values())
+        return []
+
+    def _find_payload_text(self, payload: Any, keys: set[str]) -> str:
+        found = self._find_payload_value(payload, keys)
+        return found.strip() if isinstance(found, str) else ""
+
+    def _find_payload_value(self, payload: Any, keys: set[str]) -> Any:
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key in keys and value:
+                    return value
+            for value in payload.values():
+                nested = self._find_payload_value(value, keys)
+                if nested:
+                    return nested
+        elif isinstance(payload, list):
+            for item in payload:
+                nested = self._find_payload_value(item, keys)
+                if nested:
+                    return nested
+        return None
+
+    def _normalize_keywords(self, values: list[Any]) -> list[str]:
+        keywords: list[str] = []
+        for item in values:
+            if isinstance(item, str):
+                candidate = item.strip()
+            elif isinstance(item, dict):
+                candidate = str(item.get("name") or item.get("entity_name") or item.get("keyword") or "").strip()
+            else:
+                candidate = ""
+            if candidate and candidate not in keywords:
+                keywords.append(candidate)
+        return keywords[:24]
+
+    def _chunks_from_content_items(self, content_items: list[dict[str, Any]], file_name: str) -> list[dict[str, Any]]:
+        chunks: list[dict[str, Any]] = []
+        for index, item in enumerate(content_items or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text") or item.get("caption") or item.get("ocr_text") or item.get("table_markdown") or ""
+            if not text:
+                continue
+            metadata = item.get("metadata") or {}
+            source_name = metadata.get("source_name") or item.get("source_name") or file_name
+            chunks.append({
+                "chunk_id": item.get("chunk_id") or f"{Path(file_name).stem}-raganything-item-{index}",
+                "text": str(text)[:2000],
+                "page": item.get("page_idx") or item.get("page") or metadata.get("page") or index,
+                "source_name": source_name,
+                "source_type": metadata.get("source_type") or item.get("type") or "content_item",
+                "metadata": metadata,
+            })
+        return chunks
+
+    def _text_from_chunks_or_items(
+        self,
+        chunks: list[dict[str, Any]],
+        content_items: list[dict[str, Any]],
+    ) -> str:
+        texts = []
+        for chunk in chunks or []:
+            text = chunk.get("text") if isinstance(chunk, dict) else None
+            if text:
+                texts.append(str(text))
+        if not texts:
+            for item in content_items or []:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text") or item.get("caption") or item.get("ocr_text") or item.get("table_markdown")
+                if text:
+                    texts.append(str(text))
+        return "\n\n".join(texts)
+
+    def _sync_raganything_graph_projection(
+        self,
+        db,
+        *,
+        class_id: str,
+        material_id: str,
+        file_name: str,
+        parsed: dict[str, Any],
+        status: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Project RAG-Anything graph/content metadata into the app's graph tables.
+
+        The app graph is a visualization and business-query layer. The source of
+        truth for retrieval remains RAG-Anything/LightRAG; this projection avoids
+        the old keyword co-occurrence graph by linking entities to materials,
+        content items and explicit RAG-Anything relations when available.
+        """
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        source_span_seed = self._build_source_span_seed(
+            material_id=material_id,
+            chunks=parsed.get("chunks") or [],
+            content_items=parsed.get("content_items") or [],
+        )
+        provenance_base = {
+            "source": "raganything_projection",
+            "source_material_ids": [material_id],
+            "first_seen_at": now_iso,
+            "last_seen_at": now_iso,
+            "occurrence_count": 1,
+        }
+
+        material_entity = self._upsert_graph_entity(
+            db,
+            class_id=class_id,
+            name=file_name,
+            entity_type="material",
+            description=f"Course material indexed by RAG-Anything: {file_name}",
+            material_id=material_id,
+            confidence=0.95,
+            source_span={**source_span_seed, "kind": "material"},
+            provenance=provenance_base,
+        )
+        entity_count = 1
+        relation_count = 0
+
+        explicit_entities = self._extract_graph_entities(status)
+        entity_by_name: dict[str, KnowledgeEntity] = {material_entity.name.lower(): material_entity}
+        for item in explicit_entities[:48]:
+            entity = self._upsert_graph_entity(
+                db,
+                class_id=class_id,
+                name=item["name"],
+                entity_type=item.get("entity_type") or "concept",
+                description=item.get("description") or f"RAG-Anything extracted entity from {file_name}",
+                material_id=material_id,
+                confidence=item.get("confidence") or 0.75,
+                source_span={**source_span_seed, **(item.get("source_span") or {}), "kind": "raganything_entity"},
+                provenance={**provenance_base, "raganything_entity": item},
+            )
+            entity_by_name[entity.name.lower()] = entity
+            entity_count += 1
+            if self._upsert_graph_relation(
+                db,
+                class_id=class_id,
+                source=entity,
+                target=material_entity,
+                relation_type="appears_in",
+                confidence=item.get("confidence") or 0.72,
+                source_span={**source_span_seed, "kind": "entity_material_link"},
+                provenance=provenance_base,
+            ):
+                relation_count += 1
+
+        if not explicit_entities:
+            for keyword in (parsed.get("keywords") or [])[:12]:
+                entity = self._upsert_graph_entity(
+                    db,
+                    class_id=class_id,
+                    name=str(keyword),
+                    entity_type="candidate_concept",
+                    description=f"Candidate concept projected from RAG-Anything metadata for {file_name}",
+                    material_id=material_id,
+                    confidence=0.62,
+                    source_span={**source_span_seed, "kind": "candidate_concept", "keyword": keyword},
+                    provenance={**provenance_base, "fallback": "raganything_metadata_keywords"},
+                )
+                entity_by_name[entity.name.lower()] = entity
+                entity_count += 1
+                if self._upsert_graph_relation(
+                    db,
+                    class_id=class_id,
+                    source=entity,
+                    target=material_entity,
+                    relation_type="appears_in",
+                    confidence=0.6,
+                    source_span={**source_span_seed, "kind": "candidate_material_link"},
+                    provenance={**provenance_base, "fallback": "raganything_metadata_keywords"},
+                ):
+                    relation_count += 1
+
+        for index, item in enumerate((parsed.get("content_items") or [])[:16], start=1):
+            if not isinstance(item, dict):
+                continue
+            content_type = str(item.get("type") or item.get("metadata", {}).get("source_type") or "content").lower()
+            if content_type == "text":
+                continue
+            display = (
+                item.get("caption")
+                or item.get("text")
+                or item.get("table_markdown")
+                or item.get("equation")
+                or f"{content_type} item {index}"
+            )
+            entity = self._upsert_graph_entity(
+                db,
+                class_id=class_id,
+                name=f"{file_name}::{content_type}-{index}",
+                entity_type=content_type,
+                description=str(display)[:500],
+                material_id=material_id,
+                confidence=0.7,
+                source_span={**source_span_seed, "kind": "content_item", "content_index": index},
+                provenance={**provenance_base, "content_item": item},
+            )
+            entity_count += 1
+            if self._upsert_graph_relation(
+                db,
+                class_id=class_id,
+                source=material_entity,
+                target=entity,
+                relation_type="contains",
+                confidence=0.72,
+                source_span={**source_span_seed, "kind": "material_content_link", "content_index": index},
+                provenance=provenance_base,
+            ):
+                relation_count += 1
+
+        for item in self._extract_graph_relations(status)[:64]:
+            source_name = item.get("source") or item.get("source_entity") or item.get("head")
+            target_name = item.get("target") or item.get("target_entity") or item.get("tail")
+            if not source_name or not target_name:
+                continue
+            source = entity_by_name.get(str(source_name).lower()) or self._upsert_graph_entity(
+                db,
+                class_id=class_id,
+                name=str(source_name),
+                entity_type="concept",
+                description=f"RAG-Anything relation endpoint from {file_name}",
+                material_id=material_id,
+                confidence=0.7,
+                source_span={**source_span_seed, "kind": "relation_endpoint"},
+                provenance=provenance_base,
+            )
+            target = entity_by_name.get(str(target_name).lower()) or self._upsert_graph_entity(
+                db,
+                class_id=class_id,
+                name=str(target_name),
+                entity_type="concept",
+                description=f"RAG-Anything relation endpoint from {file_name}",
+                material_id=material_id,
+                confidence=0.7,
+                source_span={**source_span_seed, "kind": "relation_endpoint"},
+                provenance=provenance_base,
+            )
+            if self._upsert_graph_relation(
+                db,
+                class_id=class_id,
+                source=source,
+                target=target,
+                relation_type=item.get("relation_type") or item.get("type") or "related_to",
+                confidence=item.get("confidence") or 0.7,
+                source_span={**source_span_seed, "kind": "raganything_relation", "evidence": item.get("evidence")},
+                provenance={**provenance_base, "raganything_relation": item},
+            ):
+                relation_count += 1
+
+        return {
+            "graph_source": "raganything_projection",
+            "entity_count": entity_count,
+            "relation_count": relation_count,
+            "used_explicit_raganything_graph": bool(explicit_entities),
+        }
+
+    def _upsert_graph_entity(
+        self,
+        db,
+        *,
+        class_id: str,
+        name: str,
+        entity_type: str,
+        description: str,
+        material_id: str,
+        confidence: float,
+        source_span: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> KnowledgeEntity:
+        normalized_name = str(name or "").strip()[:300]
+        entity = db.query(KnowledgeEntity).filter(
+            KnowledgeEntity.class_id == class_id,
+            KnowledgeEntity.name == normalized_name,
+        ).first()
+        if not entity:
+            entity = KnowledgeEntity(
+                class_id=class_id,
+                name=normalized_name,
+                entity_type=entity_type,
+                description=description,
+                source_material_id=material_id,
+                confidence=round(float(confidence or 0.6), 4),
+                source_span=source_span,
+                provenance=provenance,
+                status="approved",
+            )
+            db.add(entity)
+            db.flush()
+            return entity
+
+        entity.entity_type = entity.entity_type or entity_type
+        entity.description = entity.description or description
+        entity.source_material_id = material_id
+        entity.confidence = self._blended_confidence(entity.confidence, confidence)
+        entity.source_span = self._merge_source_span(entity.source_span, source_span)
+        entity.provenance = self._merge_provenance(entity.provenance, material_id, provenance.get("last_seen_at") or datetime.now(timezone.utc).isoformat())
+        db.add(entity)
+        return entity
+
+    def _upsert_graph_relation(
+        self,
+        db,
+        *,
+        class_id: str,
+        source: KnowledgeEntity,
+        target: KnowledgeEntity,
+        relation_type: str,
+        confidence: float,
+        source_span: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> bool:
+        if source.id == target.id:
+            return False
+        relation = db.query(KnowledgeRelation).filter(
+            KnowledgeRelation.class_id == class_id,
+            KnowledgeRelation.source_id == source.id,
+            KnowledgeRelation.target_id == target.id,
+            KnowledgeRelation.relation_type == relation_type,
+        ).first()
+        if not relation:
+            db.add(KnowledgeRelation(
+                class_id=class_id,
+                source_id=source.id,
+                target_id=target.id,
+                relation_type=relation_type,
+                weight=1.0,
+                confidence=round(float(confidence or 0.6), 4),
+                source_span=source_span,
+                provenance=provenance,
+            ))
+            return True
+
+        relation.weight = round(min(5.0, float(relation.weight or 1.0) + 0.2), 4)
+        relation.confidence = self._blended_confidence(relation.confidence, confidence)
+        relation.source_span = self._merge_source_span(relation.source_span, source_span)
+        relation.provenance = self._merge_provenance(relation.provenance, provenance.get("source_material_ids", [None])[0], provenance.get("last_seen_at") or datetime.now(timezone.utc).isoformat())
+        db.add(relation)
+        return False
+
+    def _extract_graph_entities(self, payload: Any) -> list[dict[str, Any]]:
+        values = self._find_payload_list(payload, {"knowledge_entities", "entities", "nodes", "graph_nodes"})
+        entities = []
+        for item in values:
+            if isinstance(item, str):
+                entities.append({"name": item, "entity_type": "concept"})
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("entity_name") or item.get("id") or item.get("label")
+                if name:
+                    entities.append({
+                        "name": str(name),
+                        "entity_type": item.get("entity_type") or item.get("type") or item.get("label_type"),
+                        "description": item.get("description") or item.get("summary"),
+                        "confidence": self._safe_float(item.get("confidence")) or self._safe_float(item.get("score")),
+                        "source_span": item.get("source_span") or item.get("span") or {},
+                    })
+        return entities
+
+    def _extract_graph_relations(self, payload: Any) -> list[dict[str, Any]]:
+        values = self._find_payload_list(payload, {"knowledge_relations", "relations", "edges", "graph_edges"})
+        relations = []
+        for item in values:
+            if isinstance(item, dict):
+                relations.append({
+                    "source": item.get("source") or item.get("source_entity") or item.get("head") or item.get("src"),
+                    "target": item.get("target") or item.get("target_entity") or item.get("tail") or item.get("dst"),
+                    "relation_type": item.get("relation_type") or item.get("type") or item.get("label"),
+                    "confidence": self._safe_float(item.get("confidence")) or self._safe_float(item.get("score")),
+                    "evidence": item.get("evidence") or item.get("description"),
+                })
+        return relations
+
+    def _build_source_span_seed(
+        self,
+        *,
+        material_id: str,
+        chunks: list[dict[str, Any]],
+        content_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        pages: list[int] = []
+        chunk_ids: list[str] = []
+        bbox = None
+
+        for chunk in chunks or []:
+            page = chunk.get("page")
+            if isinstance(page, int) and page not in pages:
+                pages.append(page)
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id and chunk_id not in chunk_ids:
+                chunk_ids.append(str(chunk_id))
+
+        for item in content_items or []:
+            page = item.get("page") if isinstance(item, dict) else None
+            if page is None and isinstance(item, dict):
+                page = item.get("page_idx")
+            if isinstance(page, int) and page not in pages:
+                pages.append(page)
+            if bbox is None and isinstance(item, dict):
+                bbox = item.get("bbox")
+
+        return {
+            "material_id": material_id,
+            "pages": pages[:8],
+            "chunk_ids": chunk_ids[:8],
+            "bbox": bbox,
+        }
+
+    def _merge_source_span(self, existing: Any, incoming: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(existing or {})
+        for key, value in (incoming or {}).items():
+            if key in {"pages", "chunk_ids"}:
+                current = merged.get(key) or []
+                if not isinstance(current, list):
+                    current = [current]
+                additions = value if isinstance(value, list) else [value]
+                merged[key] = list(dict.fromkeys([*current, *[item for item in additions if item is not None]]))[:16]
+            elif key == "bbox":
+                merged[key] = merged.get(key) or value
+            else:
+                merged[key] = value if value is not None else merged.get(key)
+        return merged
+
+    def _merge_provenance(self, existing: Any, material_id: str | None, seen_at: str) -> dict[str, Any]:
+        provenance = dict(existing or {})
+        source_material_ids = provenance.get("source_material_ids") or []
+        if not isinstance(source_material_ids, list):
+            source_material_ids = [source_material_ids]
+        if material_id and material_id not in source_material_ids:
+            source_material_ids.append(material_id)
+        provenance["source_material_ids"] = source_material_ids
+        provenance["occurrence_count"] = int(provenance.get("occurrence_count", 0) or 0) + 1
+        provenance["first_seen_at"] = provenance.get("first_seen_at") or seen_at
+        provenance["last_seen_at"] = seen_at
+        return provenance
 
     async def ingest_material(
         self,
@@ -366,39 +1301,92 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 db.add(task)
                 db.flush()
 
+            preprocess_result = preprocess_for_raganything(
+                file_path=file_path,
+                mime_type=mime_type,
+                file_name=material.file_name,
+            )
+            if (
+                preprocess_result.metadata.get("preprocess_quality") == "metadata_only"
+                and not settings.MULTIMODAL_ALLOW_METADATA_ONLY_INDEX
+            ):
+                raise RuntimeError(
+                    f"{preprocess_result.modality} preprocessing produced metadata only; "
+                    "configure ASR/keyframe extraction or enable MULTIMODAL_ALLOW_METADATA_ONLY_INDEX"
+                )
+
             task.status = "processing"
+            task.extra_data = {
+                **(task.extra_data or {}),
+                "preprocess": self._preprocess_result_to_metadata(preprocess_result),
+            }
             material.kb_status = "processing"
             db.commit()
 
             rag = self._get_instance(class_id)
-            await rag.process_document_complete(
+            if preprocess_result.use_content_list:
+                await self._insert_preprocessed_content_list(
+                    rag=rag,
+                    preprocess_result=preprocess_result,
+                    material_id=material_id,
+                )
+                status = self._build_content_list_processing_status(preprocess_result)
+            else:
+                await rag.process_document_complete(
+                    file_path=file_path,
+                    output_dir=str((Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()),
+                    parse_method=settings.RAGANYTHING_PARSE_METHOD,
+                    doc_id=material_id,
+                    file_name=material.file_name,
+                )
+
+                status = rag.get_document_processing_status(material_id)
+                if inspect.isawaitable(status):
+                    status = await status
+                status = self._normalize_processing_status(status, preprocess_result)
+
+            parsed = self._build_metadata_payload(
+                class_id=class_id,
+                status=status,
+                preprocess_result=preprocess_result,
                 file_path=file_path,
-                output_dir=str((Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()),
-                parse_method=settings.RAGANYTHING_PARSE_METHOD,
-                doc_id=material_id,
+                mime_type=mime_type,
                 file_name=material.file_name,
             )
-
-            status = rag.get_document_processing_status(material_id)
-            if inspect.isawaitable(status):
-                status = await status
-            parsed = self.parser.parse(file_path, mime_type, material.file_name)
 
             text_processed = bool(status.get("text_processed"))
             multimodal_processed = bool(status.get("multimodal_processed"))
             fully_processed = bool(status.get("fully_processed"))
             quality = self._build_processing_quality(status)
+            processing_error = self._extract_processing_error(status)
+            active_storage_plan = build_lightrag_storage_plan(class_id)
 
             task.status = "completed" if text_processed else "failed"
             task.parser_name = "raganything"
             task.summary = parsed["summary"]
             task.extracted_text = parsed["text"]
             task.chunks = parsed["chunks"]
+            task.error_message = None if task.status == "completed" else processing_error["message"]
             task.extra_data = {
                 "keywords": parsed["keywords"],
                 "content_items": parsed["content_items"],
+                "metadata_source": parsed.get("metadata_source"),
+                "preprocess": self._preprocess_result_to_metadata(preprocess_result),
                 "raganything_status": status,
                 "raganything_quality": quality,
+                "raganything_error": processing_error,
+                "raganything_storage": {
+                    **build_runtime_rag_storage_config_snapshot(),
+                    "active_lightrag_storage": {
+                        "requested_backend": active_storage_plan.get("requested_backend"),
+                        "effective_backend": active_storage_plan.get("effective_backend"),
+                        "workspace": active_storage_plan.get("workspace"),
+                        "vector_storage": (active_storage_plan.get("lightrag_kwargs") or {}).get("vector_storage"),
+                        "graph_storage": (active_storage_plan.get("lightrag_kwargs") or {}).get("graph_storage"),
+                    },
+                    "class_working_dir": str((Path(settings.RAGANYTHING_WORKING_DIR) / class_id).resolve()),
+                    "class_output_dir": str((Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()),
+                },
             }
             material.kb_status = "indexed" if task.status == "completed" else "failed"
             if task.status == "completed" and not fully_processed:
@@ -407,16 +1395,22 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 else:
                     material.kb_error = "RAG-Anything indexed text successfully, but some advanced extraction steps failed"
             else:
-                material.kb_error = None if task.status == "completed" else "RAG-Anything processing incomplete"
+                material.kb_error = None if task.status == "completed" else (
+                    processing_error["message"] or "RAG-Anything processing incomplete"
+                )
 
-            self._sync_entities(
+            graph_projection = self._sync_raganything_graph_projection(
                 db,
-                class_id,
-                material_id,
-                parsed["keywords"],
-                chunks=parsed.get("chunks"),
-                content_items=parsed.get("content_items"),
+                class_id=class_id,
+                material_id=material_id,
+                file_name=material.file_name,
+                parsed=parsed,
+                status=status,
             )
+            task.extra_data = {
+                **(task.extra_data or {}),
+                "graph_projection": graph_projection,
+            }
 
             completed_tasks = db.query(FileParseTask).filter(
                 FileParseTask.kb_space_id == kb_space.id,
@@ -431,6 +1425,7 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 "backend": "raganything",
                 "last_status": status,
                 "last_quality": quality,
+                "last_graph_projection": graph_projection,
             }
             db.commit()
             return task.status == "completed"
@@ -452,14 +1447,6 @@ class RAGAnythingAdapter(SimpleRAGEngine):
             mode=settings.RAG_QUERY_REWRITE_MODE,
             max_variants=settings.RAG_QUERY_REWRITE_MAX_VARIANTS,
         )
-        query_variants = rewrite_bundle["queries"]
-        with SessionLocal() as db:
-            review_matches = self._review_answer_candidates(db, class_id, question)
-            search_results = self._search_chunks_for_queries(
-                db,
-                class_id=class_id,
-                queries=query_variants,
-            )
 
         image_contexts = []
         for attachment in attachments or []:
@@ -468,13 +1455,14 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 if description:
                     image_contexts.append(description)
 
-        raganything_result, fallback_reason, query_method = await self._query_with_raganything(
+        raganything_result, fallback_reason, query_method, query_error_detail = await self._query_with_raganything(
             question=question,
             class_id=class_id,
             history=history,
             attachments=attachments,
             image_contexts=image_contexts,
             query_mode=query_mode,
+            role=role,
         )
         if raganything_result is not None:
             raganything_result.meta = {
@@ -486,8 +1474,9 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 "used_fallback": False,
                 "fallback_reason": None,
                 "retrieval_strategy": "main_chain",
-                "reranker_provider": "main_chain_native",
-                "reranker_model": None,
+                "reranker_provider": (raganything_result.meta or {}).get("reranker_provider") or "main_chain_native",
+                "reranker_model": (raganything_result.meta or {}).get("reranker_model"),
+                "reranked_main_chain_sources": bool((raganything_result.meta or {}).get("reranked_main_chain_sources")),
                 "candidate_count": len(raganything_result.sources or []),
                 "selected_count": len(raganything_result.sources or []),
                 "query_rewrite_enabled": bool(rewrite_bundle["enabled"]),
@@ -497,31 +1486,43 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
                 "reranker_backend": routing_meta.get("reranker_backend"),
+                "education_prompts_enabled": bool(settings.RAG_EDUCATION_PROMPTS_ENABLED),
+                "education_query_prompt_enabled": bool(settings.RAG_EDUCATION_QUERY_PROMPT_ENABLED),
+                "education_prompt_role": role,
             }
             return raganything_result
 
-        fallback_result = await self._query_with_local_fallback(
-            question=question,
-            class_id=class_id,
-            history=history,
-            role=role,
-            review_matches=review_matches,
-            search_results=search_results,
-            image_contexts=image_contexts,
-            query_variants=query_variants,
-            rewrite_bundle=rewrite_bundle,
-            routing_snapshot=routing_snapshot,
+        return RAGResult(
+            answer=(
+                "RAG-Anything main-chain retrieval is currently unavailable. "
+                "The system is configured to use RAG-Anything as the only formal RAG chain, "
+                "so no local Simple fallback was used."
+            ),
+            sources=[],
+            confidence=0.0,
+            suggestions=self._suggestions(question),
+            meta={
+                "engine": "raganything",
+                "query_mode": query_mode,
+                "query_method": query_method,
+                "used_multimodal": bool(image_contexts),
+                "used_fallback": False,
+                "fallback_disabled": True,
+                "fallback_reason": fallback_reason or "main_chain_unavailable",
+                "query_error_detail": query_error_detail,
+                "retrieval_strategy": "raganything_main_chain",
+                "query_rewrite_enabled": bool(rewrite_bundle["enabled"]),
+                "query_rewrite_mode": rewrite_bundle["mode"],
+                "query_variant_count": rewrite_bundle["variant_count"],
+                "llm_backend": routing_meta.get("llm_backend"),
+                "embedding_backend": routing_meta.get("embedding_backend"),
+                "vlm_backend": routing_meta.get("vlm_backend"),
+                "reranker_backend": routing_meta.get("reranker_backend"),
+                "education_prompts_enabled": bool(settings.RAG_EDUCATION_PROMPTS_ENABLED),
+                "education_query_prompt_enabled": bool(settings.RAG_EDUCATION_QUERY_PROMPT_ENABLED),
+                "education_prompt_role": role,
+            },
         )
-        fallback_result.meta = {
-            **(fallback_result.meta or {}),
-            "engine": "raganything",
-            "query_mode": query_mode,
-            "query_method": query_method,
-            "used_multimodal": bool(image_contexts),
-            "used_fallback": True,
-            "fallback_reason": fallback_reason or "main_chain_unavailable",
-        }
-        return fallback_result
 
     async def _query_with_raganything(
         self,
@@ -532,12 +1533,23 @@ class RAGAnythingAdapter(SimpleRAGEngine):
         attachments: list[dict] | None,
         image_contexts: list[str],
         query_mode: str,
-    ) -> tuple[RAGResult | None, str | None, str | None]:
+        role: str = "student",
+    ) -> tuple[RAGResult | None, str | None, str | None, str | None]:
         query_parts = [question]
+        attachment_contexts = [
+            (attachment or {}).get("attachment_context")
+            for attachment in (attachments or [])
+            if (attachment or {}).get("attachment_context")
+        ]
         if image_contexts:
             query_parts.append(
                 "Image-derived context:\n"
                 + "\n".join(f"- {content}" for content in image_contexts[:2])
+            )
+        if attachment_contexts:
+            query_parts.append(
+                "Attachment-derived context:\n"
+                + "\n\n".join(str(content) for content in attachment_contexts[:3])
             )
         query_text = "\n\n".join(query_parts)
 
@@ -549,7 +1561,18 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 class_id=class_id,
                 reason=str(exc),
             )
-            return None, "instance_init_failed", None
+            return None, "instance_init_failed", None, self._safe_error_detail(exc)
+
+        try:
+            await self._ensure_rag_query_ready(rag)
+        except Exception as exc:
+            logger.warning(
+                "raganything_query_init_failed",
+                class_id=class_id,
+                mode=query_mode,
+                reason=str(exc),
+            )
+            return None, "query_init_failed", None, self._safe_error_detail(exc)
 
         has_image = any((attachment or {}).get("file_type") == "image" for attachment in (attachments or []))
         logger.info(
@@ -567,6 +1590,7 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 attachments=attachments or [],
                 prefer_multimodal=has_image,
                 class_id=class_id,
+                role=role,
             )
         except Exception as exc:
             logger.warning(
@@ -575,7 +1599,7 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 mode=query_mode,
                 reason=str(exc),
             )
-            return None, "query_exception", None
+            return None, "query_exception", None, self._safe_error_detail(exc)
 
         answer, sources, confidence = self._normalize_rag_query_output(raw)
         if not answer:
@@ -584,8 +1608,12 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 class_id=class_id,
                 mode=query_mode,
             )
-            return None, "empty_answer", query_method
+            return None, "empty_answer", query_method, None
 
+        sources, rerank_meta = await self._rerank_main_chain_sources(
+            question=question,
+            sources=sources,
+        )
         if confidence <= 0:
             top_score = next((source.get("score") for source in sources if source.get("score") is not None), None)
             confidence = min(0.95, max(0.55, float(top_score))) if top_score is not None else 0.6
@@ -596,10 +1624,91 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 sources=sources,
                 confidence=confidence,
                 suggestions=self._suggestions(question),
+                meta=rerank_meta,
             ),
             None,
             query_method,
+            None,
         )
+
+    async def _ensure_rag_query_ready(self, rag: object) -> None:
+        ensure_method = getattr(rag, "_ensure_lightrag_initialized", None)
+        if ensure_method is None:
+            return
+
+        result = ensure_method()
+        if inspect.isawaitable(result):
+            result = await result
+
+        if isinstance(result, dict) and result.get("success") is False:
+            raise RuntimeError(str(result.get("error") or "Failed to initialize LightRAG"))
+
+    async def _rerank_main_chain_sources(
+        self,
+        *,
+        question: str,
+        sources: list[dict],
+    ) -> tuple[list[dict], dict[str, Any]]:
+        candidates = []
+        for index, source in enumerate(sources or []):
+            evidence_text = (
+                source.get("raw_text")
+                or source.get("snippet")
+                or source.get("text")
+                or source.get("content")
+                or source.get("description")
+                or ""
+            )
+            if not evidence_text:
+                continue
+            candidates.append({
+                **source,
+                "chunk_id": source.get("chunk_id") or f"raganything-source-{index}",
+                "source_name": source.get("name") or source.get("source_name") or "unknown",
+                "source_type": source.get("type") or source.get("source_type"),
+                "page": source.get("page"),
+                "snippet": str(evidence_text)[:800],
+                "raw_text": str(evidence_text),
+                "retrieval_score": source.get("score") or source.get("retrieval_score") or 0.0,
+                "_source_index": index,
+            })
+
+        if not candidates:
+            return sources, {
+                "reranker_provider": "main_chain_native",
+                "reranker_model": None,
+                "reranked_main_chain_sources": False,
+            }
+
+        reranker = get_reranker()
+        reranked = await reranker.rerank(
+            query=question,
+            candidates=candidates,
+            context={"retrieval_strategy": "raganything_main_chain"},
+        )
+        by_index = {item.get("_source_index"): item for item in reranked}
+        untouched = [
+            {**source, "_source_index": index}
+            for index, source in enumerate(sources or [])
+            if index not in by_index
+        ]
+        ordered = reranked + untouched
+        normalized = []
+        for item in ordered:
+            source = dict(item)
+            source.pop("_source_index", None)
+            if "name" not in source and source.get("source_name"):
+                source["name"] = source["source_name"]
+            if "type" not in source and source.get("source_type"):
+                source["type"] = source["source_type"]
+            source["score"] = source.get("rerank_score", source.get("score"))
+            normalized.append(source)
+
+        return normalized, {
+            "reranker_provider": getattr(reranker, "provider_name", "unknown"),
+            "reranker_model": getattr(reranker, "model_name", "unknown"),
+            "reranked_main_chain_sources": True,
+        }
 
     async def _invoke_rag_query(
         self,
@@ -611,7 +1720,26 @@ class RAGAnythingAdapter(SimpleRAGEngine):
         attachments: list[dict],
         prefer_multimodal: bool,
         class_id: str,
+        role: str = "student",
     ) -> tuple[Any, str]:
+        if not prefer_multimodal and getattr(rag, "lightrag", None) is not None:
+            raw, method_name = await self._invoke_lightrag_query_with_references(
+                rag=rag,
+                query_text=query_text,
+                query_mode=query_mode,
+                history=history,
+                class_id=class_id,
+                role=role,
+            )
+            if self._query_payload_has_content(raw):
+                logger.info(
+                    "raganything_query_method",
+                    class_id=class_id,
+                    method=method_name,
+                    mode=query_mode,
+                )
+                return raw, method_name
+
         candidate_methods = []
         if prefer_multimodal:
             candidate_methods.append("aquery_with_multimodal")
@@ -628,7 +1756,17 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 query_mode=query_mode,
                 history=history,
                 attachments=attachments,
+                role=role,
             )
+            signature = inspect.signature(method)
+            accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+            if (
+                kwargs is not None
+                and method_name == "aquery"
+                and not prefer_multimodal
+                and (accepts_kwargs or "vlm_enhanced" in signature.parameters)
+            ):
+                kwargs["vlm_enhanced"] = False
             try:
                 call_result = method(**kwargs) if kwargs is not None else method(query_text)
             except TypeError:
@@ -646,6 +1784,90 @@ class RAGAnythingAdapter(SimpleRAGEngine):
 
         raise RuntimeError("No compatible query method found on RAG-Anything instance")
 
+    async def _invoke_lightrag_query_with_references(
+        self,
+        *,
+        rag: object,
+        query_text: str,
+        query_mode: str,
+        history: list[dict],
+        class_id: str,
+        role: str = "student",
+    ) -> tuple[dict[str, Any], str]:
+        lightrag = getattr(rag, "lightrag", None)
+        if lightrag is None or not hasattr(lightrag, "aquery_llm"):
+            return {}, "lightrag_aquery_llm"
+
+        lightrag_module = importlib.import_module("lightrag")
+        QueryParam = getattr(lightrag_module, "QueryParam")
+        attempted_modes = [query_mode]
+        attempted_modes.extend(
+            mode for mode in ("hybrid", "naive", "local")
+            if mode not in attempted_modes
+        )
+
+        last_raw: dict[str, Any] = {}
+        for effective_mode in attempted_modes:
+            query_param = self._build_lightrag_query_param(
+                QueryParam=QueryParam,
+                mode=effective_mode,
+                history=history or [],
+                role=role,
+            )
+            raw = await lightrag.aquery_llm(query_text, param=query_param)
+            if isinstance(raw, dict):
+                metadata = dict(raw.get("metadata") or {})
+                metadata["adapter_requested_mode"] = query_mode
+                metadata["adapter_effective_mode"] = effective_mode
+                raw["metadata"] = metadata
+                last_raw = raw
+                if self._query_payload_has_content(raw):
+                    return raw, f"lightrag_aquery_llm:{effective_mode}"
+
+        return last_raw, f"lightrag_aquery_llm:{attempted_modes[-1]}"
+
+    def _build_lightrag_query_param(
+        self,
+        *,
+        QueryParam: Any,
+        mode: str,
+        history: list[dict],
+        role: str,
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "mode": mode,
+            "include_references": True,
+            "conversation_history": history or [],
+        }
+        user_prompt = build_query_user_prompt(settings, role=role)
+        try:
+            signature = inspect.signature(QueryParam)
+            supports_user_prompt = "user_prompt" in signature.parameters
+        except Exception:  # pragma: no cover - optional dependency implementation detail
+            supports_user_prompt = False
+        if user_prompt and supports_user_prompt:
+            kwargs["user_prompt"] = user_prompt
+        return QueryParam(**kwargs)
+
+    def _query_payload_has_content(self, raw: Any) -> bool:
+        if isinstance(raw, str):
+            return bool(raw.strip())
+        if not isinstance(raw, dict):
+            return bool(raw)
+
+        llm_response = raw.get("llm_response") or {}
+        if str(llm_response.get("content") or "").strip():
+            return True
+
+        data = raw.get("data") or {}
+        if data.get("chunks") or data.get("references") or data.get("entities") or data.get("relationships"):
+            return True
+
+        for key in ("answer", "response", "output", "text"):
+            if str(raw.get(key) or "").strip():
+                return True
+        return False
+
     def _build_rag_query_kwargs(
         self,
         *,
@@ -654,6 +1876,7 @@ class RAGAnythingAdapter(SimpleRAGEngine):
         query_mode: str,
         history: list[dict],
         attachments: list[dict],
+        role: str = "student",
     ) -> dict[str, Any] | None:
         signature = inspect.signature(method)
         params = signature.parameters
@@ -663,16 +1886,13 @@ class RAGAnythingAdapter(SimpleRAGEngine):
             (name for name in ("query", "question", "prompt") if accepts_kwargs or name in params),
             None,
         )
-        mode_param = next(
-            (name for name in ("query_mode", "mode") if accepts_kwargs or name in params),
-            None,
-        )
+        mode_param = next((name for name in ("mode", "query_mode") if name in params), None)
         history_param = next(
             (name for name in ("history_messages", "history", "conversation_history") if accepts_kwargs or name in params),
             None,
         )
         attachments_param = next(
-            (name for name in ("attachments", "images", "image_inputs") if accepts_kwargs or name in params),
+            (name for name in ("multimodal_content", "attachments", "images", "image_inputs") if name in params),
             None,
         )
 
@@ -687,10 +1907,15 @@ class RAGAnythingAdapter(SimpleRAGEngine):
 
         if mode_param:
             kwargs[mode_param] = query_mode
+        elif accepts_kwargs:
+            kwargs["mode"] = query_mode
         if history and history_param:
             kwargs[history_param] = history
         if attachments and attachments_param:
             kwargs[attachments_param] = attachments
+        user_prompt = build_query_user_prompt(settings, role=role)
+        if user_prompt and "user_prompt" in params:
+            kwargs["user_prompt"] = user_prompt
         return kwargs
 
     def _normalize_rag_query_output(self, raw: Any) -> tuple[str, list[dict], float]:
@@ -702,7 +1927,8 @@ class RAGAnythingAdapter(SimpleRAGEngine):
 
         if isinstance(raw, dict):
             answer = (
-                raw.get("answer")
+                ((raw.get("llm_response") or {}).get("content") if isinstance(raw.get("llm_response"), dict) else None)
+                or raw.get("answer")
                 or raw.get("response")
                 or raw.get("output")
                 or raw.get("text")
@@ -716,6 +1942,15 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 or raw.get("evidence")
                 or []
             )
+            if not source_candidates and isinstance(raw.get("data"), dict):
+                data = raw["data"]
+                source_candidates = (
+                    data.get("chunks")
+                    or data.get("references")
+                    or data.get("entities")
+                    or data.get("relationships")
+                    or []
+                )
             if not source_candidates and isinstance(raw.get("context"), dict):
                 source_candidates = raw["context"].get("sources") or raw["context"].get("chunks") or []
             sources = self._normalize_sources(source_candidates)
@@ -746,6 +1981,8 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                     "type": None,
                     "score": None,
                     "chunk_id": None,
+                    "snippet": item,
+                    "raw_text": item,
                 })
                 continue
             if not isinstance(item, dict):
@@ -756,12 +1993,20 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 or self._safe_float(item.get("similarity"))
                 or self._safe_float(item.get("confidence"))
             )
+            file_name = item.get("name") or item.get("source_name") or item.get("source") or item.get("file_name")
+            file_path = item.get("file_path")
+            if not file_name and file_path:
+                file_name = Path(str(file_path)).name
             normalized.append({
-                "name": item.get("name") or item.get("source_name") or item.get("source") or item.get("file_name") or "unknown",
+                "name": file_name or "unknown",
                 "page": item.get("page") or item.get("page_idx") or item.get("page_number"),
                 "type": item.get("type") or item.get("source_type") or item.get("mime_type"),
                 "score": score,
-                "chunk_id": item.get("chunk_id") or item.get("id") or item.get("doc_id"),
+                "chunk_id": item.get("chunk_id") or item.get("id") or item.get("doc_id") or item.get("reference_id"),
+                "snippet": item.get("snippet") or item.get("content") or item.get("text") or item.get("description"),
+                "raw_text": item.get("raw_text") or item.get("content") or item.get("text") or item.get("snippet"),
+                "metadata": item.get("metadata") or item.get("extra_data"),
+                "retrieval_score": score,
             })
         return normalized
 
@@ -773,174 +2018,508 @@ class RAGAnythingAdapter(SimpleRAGEngine):
         except (TypeError, ValueError):
             return None
 
-    async def _query_with_local_fallback(
-        self,
-        *,
-        question: str,
-        class_id: str,
-        history: list[dict] | None,
-        role: str,
-        review_matches: list[dict],
-        search_results: list[dict],
-        image_contexts: list[str],
-        query_variants: list[str],
-        rewrite_bundle: dict[str, Any],
-        routing_snapshot: dict[str, Any],
-    ) -> RAGResult:
-        logger.info("raganything_local_fallback_used", class_id=class_id)
-        routing_meta = model_routing_service.flatten_routing_snapshot(routing_snapshot)
-
-        retrieval_bundle = self._apply_retrieval_strategy(
-            question=question,
-            class_id=class_id,
-            search_results=search_results,
-            query_variants=query_variants,
-        )
-        candidates = retrieval_bundle["candidates"]
-        reranker = get_reranker()
-        reranked_results = await reranker.rerank(
-            query=question,
-            candidates=candidates,
-            context={
-                "review_matches": review_matches,
-                "image_contexts": image_contexts,
-                "retrieval_strategy": retrieval_bundle["strategy"],
-                "query_variants": query_variants,
-            },
-        )
-        top_k = max(1, int(settings.RAG_ANSWER_TOP_K))
-        top_results = reranked_results[:top_k]
-
-        sources = [{
-            "name": item["source_name"],
-            "page": item["page"],
-            "type": item["source_type"],
-            "score": item.get("rerank_score", item.get("retrieval_score", item.get("score"))),
-            "chunk_id": item["chunk_id"],
-            "retrieval_score": item.get("retrieval_score"),
-            "rerank_score": item.get("rerank_score"),
-        } for item in top_results]
-        context_text = "\n\n".join(
-            f"Source {idx + 1} ({source['name']} p.{source['page']} | score={source['score']}): {item['snippet']}"
-            for idx, (source, item) in enumerate(zip(sources, top_results))
-        )
-        review_context = "\n\n".join(
-            f"Teacher-reviewed answer {idx + 1}: {item['final_answer']}"
-            for idx, item in enumerate(review_matches[:2])
-        )
-        image_context = "\n\n".join(
-            f"Image context {idx + 1}: {content}"
-            for idx, content in enumerate(image_contexts[:2])
-        )
-
-        if sources or review_context or image_context:
-            role_instruction = (
-                "Answer like a patient course tutor for a student. Use simple teaching language, definitions, and a short example when helpful."
-                if role == "student"
-                else "Answer like a teaching copilot for an instructor. Be concise, structured, and classroom-oriented."
-            )
-            sections = []
-            if review_context:
-                sections.append("Teacher-reviewed corrections:\n" + review_context)
-            if context_text:
-                sections.append("Retrieved course context:\n" + context_text)
-            if image_context:
-                sections.append("User-provided image context:\n" + image_context)
-            generation = routing_snapshot.get("generation") or {}
-            if generation.get("effective_backend") in {"api", "local"}:
-                answer = await self._call_llm_api(
-                    prompt=(
-                        "Answer the user question using the supplied course evidence. "
-                        "Prefer teacher-reviewed answers when they are relevant. "
-                        "Do not invent facts outside the provided evidence. "
-                        "If evidence is limited, say what is supported and what is uncertain.\n\n"
-                        f"{role_instruction}\n\n"
-                        f"Question: {question}\n\n"
-                        + "\n\n".join(sections)
-                    ),
-                    system_prompt=(
-                        "You are the AI tutor for a course. "
-                        "Produce grounded answers, mention the core concept first, then a brief explanation, then a practical example when possible."
-                    ),
-                    history_messages=history or [],
-                    model=generation.get("model") or settings.LLM_MODEL,
-                    base_url=generation.get("api_base") or settings.EFFECTIVE_LLM_API_BASE,
-                    api_key=settings.EFFECTIVE_LLM_API_KEY,
-                    wire_api=settings.LLM_WIRE_API,
-                )
-            else:
-                answer = self._build_rule_based_fallback_answer(
-                    question=question,
-                    top_results=top_results,
-                    role_instruction=role_instruction,
-                )
-            top_score = float(top_results[0].get("rerank_score", 0.0)) if top_results else 0.0
-            confidence = min(0.96, max(0.4, top_score + 0.35))
-        else:
-            answer = (
-                "I could not find grounded evidence in the current course knowledge base. "
-                "Please upload more course materials or ask a more specific question."
-            )
-            confidence = 0.4
-        return RAGResult(
-            answer=answer,
-            sources=sources,
-            confidence=confidence,
-            suggestions=self._suggestions(question),
-            meta={
-                "retrieval_strategy": retrieval_bundle["strategy"],
-                "candidate_count": retrieval_bundle["candidate_count"],
-                "selected_count": len(top_results),
-                "graph_term_count": retrieval_bundle["graph_term_count"],
-                "reranker_provider": getattr(reranker, "provider_name", "unknown"),
-                "reranker_model": getattr(reranker, "model_name", "unknown"),
-                "query_rewrite_enabled": bool(rewrite_bundle["enabled"]),
-                "query_rewrite_mode": rewrite_bundle["mode"],
-                "query_variant_count": rewrite_bundle["variant_count"],
-                "llm_backend": routing_meta.get("llm_backend"),
-                "embedding_backend": routing_meta.get("embedding_backend"),
-                "vlm_backend": routing_meta.get("vlm_backend"),
-                "reranker_backend": routing_meta.get("reranker_backend"),
-            },
-        )
-
-    def _build_rule_based_fallback_answer(
-        self,
-        *,
-        question: str,
-        top_results: list[dict[str, Any]],
-        role_instruction: str,
-    ) -> str:
-        if not top_results:
-            return (
-                "I could not find grounded evidence in the current course knowledge base. "
-                "Please upload more course materials or ask a more specific question."
-            )
-
-        snippets = []
-        for idx, item in enumerate(top_results[:3]):
-            snippets.append(f"{idx + 1}. {(item.get('snippet') or '').strip()}")
-        return (
-            f"{role_instruction}\n\n"
-            f"Question: {question}\n\n"
-            "Based on the retrieved course evidence, here are the most relevant points:\n"
-            + "\n".join(snippets)
-        )
+    def _safe_error_detail(self, exc: Exception, *, max_length: int = 500) -> str:
+        detail = re.sub(r"\s+", " ", str(exc or "")).strip()
+        if not detail:
+            return exc.__class__.__name__
+        detail = re.sub(r"(?i)(api[_-]?key|authorization|bearer)\s*[:=]\s*[^,'\"\\s}]+", r"\1=<redacted>", detail)
+        return detail[:max(80, int(max_length))]
 
     async def add_qa_pair(self, class_id: str, question: str, answer: str) -> bool:
         rag = self._get_instance(class_id)
-        await rag.insert_content_list(
-            content_list=[{
-                "type": "text",
-                "text": f"Question: {question}\nAnswer: {answer}",
-                "page_idx": 0,
-            }],
-            file_path=f"manual_review_{class_id}.txt",
-            doc_id=f"manual-{abs(hash(question + answer))}",
-        )
-        return await super().add_qa_pair(class_id, question, answer)
+        now = datetime.now(timezone.utc)
+        content_list = [{
+            "type": "text",
+            "text": f"Teacher-reviewed question: {question}\nTeacher-verified answer: {answer}",
+            "page_idx": 0,
+            "metadata": {
+                "source": "teacher_review",
+                "class_id": class_id,
+                "created_at": now.isoformat(),
+            },
+        }]
+        doc_id = "teacher-review-" + hashlib.sha256(
+            f"{class_id}|{question}|{answer}".encode("utf-8")
+        ).hexdigest()[:24]
+        file_path = f"teacher_review_{class_id}.txt"
+        method = getattr(rag, "insert_content_list", None)
+        if method is None:
+            raise RuntimeError("RAG-Anything instance does not expose insert_content_list for teacher feedback sync")
 
-    async def rebuild_course(self, course_id: str) -> dict:
+        kwargs = {
+            "content_list": content_list,
+            "file_path": file_path,
+            "doc_id": doc_id,
+        }
+        try:
+            result = method(**kwargs)
+        except TypeError:
+            result = method(content_list)
+        if inspect.isawaitable(result):
+            await result
+
+        with SessionLocal() as db:
+            cls = db.query(Class).filter(Class.id == class_id).first()
+            if cls:
+                kb_space = self._ensure_kb_space(db, course_id=cls.course_id, class_id=class_id)
+                extra = kb_space.extra_data or {}
+                sync_items = [
+                    item for item in (extra.get("raganything_teacher_review_sync") or [])
+                    if isinstance(item, dict) and item.get("doc_id") != doc_id
+                ]
+                sync_items.append({
+                    "doc_id": doc_id,
+                    "entrypoint": "insert_content_list",
+                    "question": question,
+                    "answer_preview": answer[:240],
+                    "synced_at": now.isoformat(),
+                })
+                extra["raganything_teacher_review_sync"] = sync_items[-50:]
+                extra["last_teacher_review_sync_at"] = now.isoformat()
+                kb_space.extra_data = extra
+                kb_space.updated_at = now
+                db.add(kb_space)
+                db.commit()
+        return True
+
+    def get_parse_task(self, task_id: str) -> dict[str, Any] | None:
+        with SessionLocal() as db:
+            task = db.query(FileParseTask).filter(FileParseTask.id == task_id).first()
+            if not task:
+                return None
+            material = db.query(Material).filter(Material.id == task.material_id).first()
+            extra = task.extra_data or {}
+            ingest = extra.get("ingest", {}) if isinstance(extra.get("ingest"), dict) else {}
+            alert = ingest.get("alert", {}) if isinstance(ingest.get("alert"), dict) else {}
+            raw_items = extra.get("content_items")
+            content_items = raw_items if isinstance(raw_items, list) else []
+            return {
+                "id": task.id,
+                "kind": "file_parse",
+                "course_id": task.course_id,
+                "class_id": task.class_id,
+                "material_id": task.material_id,
+                "material_name": material.file_name if material else None,
+                "status": task.status,
+                "parser_name": task.parser_name,
+                "summary": task.summary,
+                "extracted_text": task.extracted_text,
+                "chunks": task.chunks or [],
+                "chunk_count": len(task.chunks or []),
+                "content_items": content_items,
+                "content_items_schema": extra.get("content_items_schema") or ("v1" if content_items else None),
+                "preprocess": extra.get("preprocess"),
+                "raganything_status": extra.get("raganything_status"),
+                "raganything_quality": extra.get("raganything_quality"),
+                "graph_projection": extra.get("graph_projection"),
+                "error_message": task.error_message,
+                "attempt_count": int(ingest.get("attempt_count", 0) or 0),
+                "max_attempts": int(ingest.get("max_attempts", settings.KB_PARSE_MAX_RETRIES) or settings.KB_PARSE_MAX_RETRIES),
+                "retry_available": bool(ingest.get("retry_available", task.status == "failed")),
+                "last_error_category": (
+                    getattr(task, "last_error_category", None)
+                    or ingest.get("last_error_category")
+                    or (extra.get("raganything_error") or {}).get("category")
+                ),
+                "queue_task_id": ingest.get("queue_task_id"),
+                "queue_status": ingest.get("queue_status"),
+                "auto_retry_round": int(ingest.get("auto_retry_round", 0) or 0),
+                "next_retry_after": ingest.get("next_retry_after"),
+                "alert_count": int(alert.get("count", 0) or 0),
+                "last_alert_reason": alert.get("last_reason"),
+                "last_alert_at": alert.get("last_alert_at"),
+                "created_at": task.created_at,
+                "updated_at": task.updated_at,
+            }
+
+    def get_kb_status(self, course_id: str) -> dict[str, Any]:
+        with SessionLocal() as db:
+            classes = db.query(Class).filter(Class.course_id == course_id).all()
+            class_ids = [row.id for row in classes]
+            materials_query = db.query(Material).join(Class, Class.id == Material.class_id).filter(
+                Class.course_id == course_id,
+                Material.is_active == True,
+            )
+            tasks_query = db.query(FileParseTask).filter(FileParseTask.course_id == course_id)
+            kb_query = db.query(KBSpace).filter(KBSpace.course_id == course_id)
+            entity_query = db.query(KnowledgeEntity)
+            relation_query = db.query(KnowledgeRelation)
+            if class_ids:
+                entity_query = entity_query.filter(KnowledgeEntity.class_id.in_(class_ids))
+                relation_query = relation_query.filter(KnowledgeRelation.class_id.in_(class_ids))
+            else:
+                entity_query = entity_query.filter(KnowledgeEntity.class_id == "__missing__")
+                relation_query = relation_query.filter(KnowledgeRelation.class_id == "__missing__")
+
+            materials = materials_query.all()
+            tasks = tasks_query.all()
+            kb_spaces = kb_query.all()
+
+            materials_total = len(materials)
+            materials_indexed = sum(1 for item in materials if str(item.kb_status) == "indexed")
+            materials_failed = sum(1 for item in materials if str(item.kb_status) == "failed")
+            materials_pending = sum(1 for item in materials if str(item.kb_status) in {"pending", "processing"})
+            tasks_completed = sum(1 for item in tasks if str(item.status) == "completed")
+            tasks_failed = sum(1 for item in tasks if str(item.status) == "failed")
+            tasks_processing = sum(1 for item in tasks if str(item.status) in {"pending", "processing"})
+            latest_built_at = max(
+                (space.last_built_at for space in kb_spaces if space.last_built_at is not None),
+                default=None,
+            )
+
+            if materials_total == 0 and not kb_spaces:
+                health = "empty"
+            elif tasks_processing > 0 and tasks_completed == 0:
+                health = "building"
+            elif tasks_failed > 0 and tasks_completed == 0:
+                health = "failed"
+            elif materials_failed > 0 or tasks_failed > 0:
+                health = "degraded"
+            elif materials_indexed > 0 or tasks_completed > 0:
+                health = "healthy"
+            else:
+                health = "building"
+
+            teacher_review_sync_count = 0
+            for space in kb_spaces:
+                extra = space.extra_data or {}
+                sync_items = extra.get("raganything_teacher_review_sync") or []
+                if isinstance(sync_items, list):
+                    teacher_review_sync_count += len(sync_items)
+            storage_summary = self._build_kb_storage_summary(
+                tasks=tasks,
+                materials=materials,
+            )
+
+            return {
+                "course_id": course_id,
+                "backend": "raganything",
+                "strict_mode": settings.RAGANYTHING_STRICT_MODE,
+                "status": health,
+                "class_count": len(class_ids),
+                "materials_total": materials_total,
+                "materials_indexed": materials_indexed,
+                "materials_failed": materials_failed,
+                "materials_pending": materials_pending,
+                "parse_tasks": {
+                    "total": len(tasks),
+                    "completed": tasks_completed,
+                    "failed": tasks_failed,
+                    "processing": tasks_processing,
+                },
+                "kb_spaces": {
+                    "total": len(kb_spaces),
+                    "ready": sum(1 for item in kb_spaces if str(item.status) == "ready"),
+                    "failed": sum(1 for item in kb_spaces if str(item.status) == "failed"),
+                },
+                "knowledge_graph": {
+                    "entity_count": entity_query.count(),
+                    "relation_count": relation_query.count(),
+                },
+                "teacher_review_sync_count": teacher_review_sync_count,
+                "last_rebuild_at": latest_built_at,
+                "storage": storage_summary,
+            }
+
+    def _build_kb_storage_summary(
+        self,
+        *,
+        tasks: list[FileParseTask],
+        materials: list[Material],
+    ) -> dict[str, Any]:
+        current_storage = build_runtime_rag_storage_config_snapshot()
+        current_requested = current_storage.get("requested_backend")
+        current_effective = current_storage.get("effective_backend")
+        target_backend = current_effective if current_effective != "unavailable" else current_requested
+
+        latest_task_by_material: dict[str, FileParseTask] = {}
+        backend_distribution: dict[str, int] = {}
+        latest_completed_backend = None
+        latest_completed_at = None
+
+        completed_tasks = [
+            task for task in tasks
+            if str(task.status) == "completed"
+        ]
+        for task in sorted(completed_tasks, key=lambda item: item.updated_at or item.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+            if task.material_id not in latest_task_by_material:
+                latest_task_by_material[task.material_id] = task
+            storage_meta = self._extract_task_storage_meta(task)
+            backend = storage_meta.get("effective_backend") or storage_meta.get("requested_backend") or "unknown"
+            backend_distribution[backend] = backend_distribution.get(backend, 0) + 1
+            if latest_completed_backend is None:
+                latest_completed_backend = backend
+                latest_completed_at = task.updated_at or task.created_at
+
+        reindex_candidates = []
+        for material in materials:
+            if str(material.kb_status) != "indexed":
+                continue
+            latest_task = latest_task_by_material.get(material.id)
+            storage_meta = self._extract_task_storage_meta(latest_task) if latest_task else {}
+            indexed_backend = storage_meta.get("effective_backend") or storage_meta.get("requested_backend")
+            if not indexed_backend and target_backend == "lightrag-default":
+                indexed_backend = "lightrag-default"
+            if not indexed_backend:
+                reindex_candidates.append({
+                    "material_id": material.id,
+                    "title": material.title,
+                    "file_name": material.file_name,
+                    "class_id": material.class_id,
+                    "current_kb_status": material.kb_status,
+                    "indexed_backend": None,
+                    "reason": "missing_storage_metadata",
+                })
+            elif target_backend and indexed_backend != target_backend:
+                reindex_candidates.append({
+                    "material_id": material.id,
+                    "title": material.title,
+                    "file_name": material.file_name,
+                    "class_id": material.class_id,
+                    "current_kb_status": material.kb_status,
+                    "indexed_backend": indexed_backend,
+                    "reason": "backend_mismatch",
+                })
+
+        return {
+            "current_requested_backend": current_requested,
+            "current_effective_backend": current_effective,
+            "indexed_backend_distribution": dict(sorted(backend_distribution.items(), key=lambda item: (-item[1], item[0]))),
+            "latest_completed_backend": latest_completed_backend,
+            "latest_completed_at": latest_completed_at.isoformat() if latest_completed_at else None,
+            "reindex_required": bool(reindex_candidates),
+            "reindex_required_count": len(reindex_candidates),
+            "reindex_target_backend": target_backend,
+            "reindex_candidates": reindex_candidates[:20],
+        }
+
+    def _extract_task_storage_meta(self, task: FileParseTask | None) -> dict[str, Any]:
+        if not task:
+            return {}
+        extra = task.extra_data or {}
+        storage = extra.get("raganything_storage") or {}
+        active = storage.get("active_lightrag_storage") or {}
+        return {
+            "requested_backend": active.get("requested_backend") or storage.get("requested_backend"),
+            "effective_backend": active.get("effective_backend") or storage.get("effective_backend"),
+            "workspace": active.get("workspace"),
+            "vector_storage": active.get("vector_storage"),
+            "graph_storage": active.get("graph_storage"),
+        }
+
+    def get_graph(
+        self,
+        course_id: str,
+        *,
+        class_id: str | None = None,
+        entity_type: str | None = None,
+        min_confidence: float = 0.0,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        with SessionLocal() as db:
+            classes = db.query(Class).filter(Class.course_id == course_id).all()
+            class_ids = [row.id for row in classes]
+            requested_class_id = str(class_id or "").strip() or None
+            if requested_class_id:
+                class_ids = [item for item in class_ids if item == requested_class_id]
+            normalized_entity_type = str(entity_type or "").strip().lower() or None
+            normalized_min_confidence = max(0.0, min(1.0, float(min_confidence or 0.0)))
+            node_limit = max(1, min(int(limit or 300), 2000))
+            if not class_ids:
+                return {
+                    "course_id": course_id,
+                    "backend": "raganything",
+                    "nodes": [],
+                    "edges": [],
+                    "stats": {"node_count": 0, "edge_count": 0, "class_count": 0},
+                    "summary": {
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "entity_type_distribution": {},
+                        "relation_type_distribution": {},
+                        "source_material_count": 0,
+                        "material_type_distribution": {},
+                        "average_node_confidence": 0.0,
+                        "average_edge_confidence": 0.0,
+                    },
+                    "legend": {"entity_types": [], "relation_types": []},
+                    "materials": [],
+                    "filters": {
+                        "class_id": requested_class_id,
+                        "entity_type": normalized_entity_type,
+                        "min_confidence": normalized_min_confidence,
+                        "limit": node_limit,
+                        "available_class_ids": [],
+                        "available_entity_types": [],
+                    },
+                }
+
+            entity_query = db.query(KnowledgeEntity).filter(
+                KnowledgeEntity.class_id.in_(class_ids),
+                KnowledgeEntity.confidence >= normalized_min_confidence,
+            )
+            if normalized_entity_type:
+                entity_query = entity_query.filter(KnowledgeEntity.entity_type == normalized_entity_type)
+            entities = entity_query.all()
+
+            relation_query = db.query(KnowledgeRelation).filter(
+                KnowledgeRelation.class_id.in_(class_ids),
+                KnowledgeRelation.confidence >= normalized_min_confidence,
+            )
+            relations = relation_query.all()
+
+            entity_by_id = {entity.id: entity for entity in entities}
+            nodes = []
+            sorted_entities = sorted(
+                entities,
+                key=lambda item: (float(item.confidence or 0.0), str(item.updated_at or item.created_at or "")),
+                reverse=True,
+            )
+            for entity in sorted_entities[:node_limit]:
+                nodes.append({
+                    "id": entity.id,
+                    "label": entity.name,
+                    "name": entity.name,
+                    "class_id": entity.class_id,
+                    "group": entity.entity_type or "concept",
+                    "entity_type": entity.entity_type,
+                    "description": entity.description,
+                    "source_material_id": entity.source_material_id,
+                    "confidence": float(entity.confidence or 0.0),
+                    "source_span": entity.source_span or {},
+                    "provenance": entity.provenance or {},
+                    "status": entity.status,
+                })
+            visible_node_ids = {node["id"] for node in nodes}
+
+            edges = []
+            sorted_relations = sorted(
+                relations,
+                key=lambda item: (float(item.confidence or 0.0), float(item.weight or 0.0)),
+                reverse=True,
+            )
+            for relation in sorted_relations:
+                if relation.source_id not in visible_node_ids or relation.target_id not in visible_node_ids:
+                    continue
+                source = entity_by_id.get(relation.source_id)
+                target = entity_by_id.get(relation.target_id)
+                edges.append({
+                    "id": relation.id,
+                    "source": relation.source_id,
+                    "target": relation.target_id,
+                    "source_label": source.name if source else relation.source_id,
+                    "target_label": target.name if target else relation.target_id,
+                    "label": relation.relation_type or "related_to",
+                    "relation_type": relation.relation_type,
+                    "weight": float(relation.weight or 0.0),
+                    "confidence": float(relation.confidence or 0.0),
+                    "source_span": relation.source_span or {},
+                    "provenance": relation.provenance or {},
+                    "class_id": relation.class_id,
+                })
+
+            entity_type_distribution = self._count_labels(
+                node.get("entity_type") or node.get("group") or "concept"
+                for node in nodes
+            )
+            relation_type_distribution = self._count_labels(
+                edge.get("relation_type") or edge.get("label") or "related_to"
+                for edge in edges
+            )
+            material_ids = sorted({
+                str(node.get("source_material_id"))
+                for node in nodes
+                if node.get("source_material_id")
+            })
+            materials_by_id = {
+                row.id: row
+                for row in (
+                    db.query(Material).filter(Material.id.in_(material_ids)).all()
+                    if material_ids
+                    else []
+                )
+            }
+            material_type_distribution = self._count_labels(
+                str(materials_by_id[item].file_type or "unknown")
+                for item in material_ids
+                if item in materials_by_id
+            )
+            material_summaries = []
+            for material_id in material_ids:
+                material = materials_by_id.get(material_id)
+                if not material:
+                    continue
+                material_summaries.append({
+                    "material_id": material.id,
+                    "title": material.title,
+                    "file_name": material.file_name,
+                    "file_type": material.file_type,
+                    "kb_status": material.kb_status,
+                    "class_id": material.class_id,
+                    "created_at": material.created_at.isoformat() if material.created_at else None,
+                })
+
+            return {
+                "course_id": course_id,
+                "backend": "raganything",
+                "nodes": nodes,
+                "edges": edges,
+                "stats": {
+                    "node_count": len(nodes),
+                    "edge_count": len(edges),
+                    "class_count": len(class_ids),
+                },
+                "summary": {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "entity_type_distribution": entity_type_distribution,
+                    "relation_type_distribution": relation_type_distribution,
+                    "source_material_count": len(material_summaries),
+                    "material_type_distribution": material_type_distribution,
+                    "average_node_confidence": self._average_numeric(node.get("confidence") for node in nodes),
+                    "average_edge_confidence": self._average_numeric(edge.get("confidence") for edge in edges),
+                },
+                "legend": {
+                    "entity_types": [
+                        {"name": key, "count": value}
+                        for key, value in entity_type_distribution.items()
+                    ],
+                    "relation_types": [
+                        {"name": key, "count": value}
+                        for key, value in relation_type_distribution.items()
+                    ],
+                },
+                "materials": material_summaries,
+                "filters": {
+                    "class_id": requested_class_id,
+                    "entity_type": normalized_entity_type,
+                    "min_confidence": normalized_min_confidence,
+                    "limit": node_limit,
+                    "available_class_ids": sorted({str(item.id) for item in classes}),
+                    "available_entity_types": sorted({
+                        str(item.entity_type or "concept")
+                        for item in entities
+                        if (item.entity_type or "concept")
+                    }),
+                },
+            }
+
+    def _count_labels(self, values: Any) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for value in values:
+            label = str(value or "unknown").strip() or "unknown"
+            counts[label] = counts.get(label, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    def _average_numeric(self, values: Any) -> float:
+        normalized = [
+            float(item)
+            for item in values
+            if item is not None
+        ]
+        if not normalized:
+            return 0.0
+        return round(sum(normalized) / len(normalized), 4)
+
+    async def rebuild_course(self, course_id: str, *, storage_migration_only: bool = False) -> dict:
         with SessionLocal() as db:
             materials = db.query(Material).join(
                 Class, Class.id == Material.class_id
@@ -948,270 +2527,73 @@ class RAGAnythingAdapter(SimpleRAGEngine):
                 Class.course_id == course_id,
                 Material.is_active == True,
             ).all()
+            tasks = db.query(FileParseTask).filter(FileParseTask.course_id == course_id).all()
+            storage_summary = self._build_kb_storage_summary(
+                tasks=tasks,
+                materials=materials,
+            )
 
+        selected_material_ids = None
+        if storage_migration_only:
+            selected_material_ids = {
+                str(item.get("material_id"))
+                for item in (storage_summary.get("reindex_candidates") or [])
+                if item.get("material_id")
+            }
+
+        requested = 0
         processed = 0
         for material in materials:
+            if not material.file_path:
+                continue
+            if selected_material_ids is not None and material.id not in selected_material_ids:
+                continue
+            requested += 1
             if material.file_path:
                 ok = await self.ingest_material(material.class_id, material.id, material.file_path, material.mime_type or "application/octet-stream")
                 if ok:
                     processed += 1
 
         status = self.get_kb_status(course_id)
+        status["rebuild_scope"] = "storage_migration_only" if storage_migration_only else "full"
+        status["requested_reindex_count"] = requested
         status["reprocessed_count"] = processed
+        if storage_migration_only:
+            status["storage_migration_target_backend"] = (storage_summary.get("reindex_target_backend"))
         return status
-
-    def _search_class_chunks(self, db, class_id: str, query: str) -> list[dict]:
-        tasks = db.query(FileParseTask).filter(
-            FileParseTask.class_id == class_id,
-            FileParseTask.status == "completed",
-        ).all()
-        query_terms = self._terms(query)
-        results = []
-        for task in tasks:
-            for chunk in task.chunks or []:
-                chunk_text = chunk.get("text", "")
-                overlap = len(query_terms & self._terms(chunk_text))
-                if overlap <= 0:
-                    continue
-                results.append({
-                    "source_name": chunk.get("source_name"),
-                    "source_type": chunk.get("source_type"),
-                    "page": chunk.get("page"),
-                    "chunk_id": chunk.get("chunk_id"),
-                    "score": round(overlap / max(len(query_terms), 1), 4),
-                    "snippet": chunk_text[:280],
-                    "raw_text": chunk_text,
-                })
-        results.sort(key=lambda item: item["score"], reverse=True)
-        limit = max(8, int(settings.RAG_RETRIEVAL_CANDIDATE_K) * 2)
-        return results[:limit]
-
-    def _search_chunks_for_queries(self, db, class_id: str, queries: list[str]) -> list[dict]:
-        ordered_queries: list[str] = []
-        seen_queries = set()
-        for query in queries or []:
-            normalized = (query or "").strip()
-            if not normalized:
-                continue
-            lowered = normalized.lower()
-            if lowered in seen_queries:
-                continue
-            seen_queries.add(lowered)
-            ordered_queries.append(normalized)
-
-        if not ordered_queries:
-            return []
-
-        merged: dict[str, dict] = {}
-        for query in ordered_queries:
-            query_results = self._search_class_chunks(db, class_id, query)
-            for item in query_results:
-                key = item.get("chunk_id") or hashlib.md5(
-                    f"{item.get('source_name')}|{item.get('page')}|{item.get('snippet')}".encode()
-                ).hexdigest()
-                current_score = float(item.get("score") or 0.0)
-                existing = merged.get(key)
-                if not existing:
-                    merged[key] = {
-                        **item,
-                        "score": current_score,
-                        "matched_queries": [query],
-                        "query_hits": 1,
-                    }
-                    continue
-
-                existing_score = float(existing.get("score") or 0.0)
-                if current_score > existing_score:
-                    existing.update({
-                        **item,
-                        "score": current_score,
-                    })
-                    existing["matched_queries"] = existing.get("matched_queries", [])
-
-                matched_queries = existing.get("matched_queries") or []
-                if query not in matched_queries:
-                    matched_queries.append(query)
-                existing["matched_queries"] = matched_queries
-                existing["query_hits"] = len(matched_queries)
-
-        results = list(merged.values())
-        results.sort(
-            key=lambda item: (
-                float(item.get("score") or 0.0),
-                int(item.get("query_hits") or 0),
-            ),
-            reverse=True,
-        )
-        limit = max(10, int(settings.RAG_RETRIEVAL_CANDIDATE_K) * 4)
-        return results[:limit]
-
-    def _deduplicate_results(self, results: list[dict]) -> list[dict]:
-        deduped = []
-        seen = set()
-        for item in results:
-            key = (
-                item.get("chunk_id")
-                or hashlib.md5(f"{item.get('source_name')}|{item.get('page')}|{item.get('snippet')}".encode()).hexdigest()
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(item)
-        return deduped
-
-    def _rerank_results(
-        self,
-        question: str,
-        results: list[dict],
-        review_matches: list[dict],
-        image_contexts: list[str],
-    ) -> list[dict]:
-        question_terms = self._terms(question)
-        image_terms = self._terms(" ".join(image_contexts))
-        reranked = []
-        for item in results:
-            snippet_terms = self._terms(item.get("raw_text", ""))
-            lexical = len(question_terms & snippet_terms)
-            image_boost = 0.2 if image_terms and (image_terms & snippet_terms) else 0.0
-            review_boost = 0.1 if review_matches else 0.0
-            score = float(item["score"]) + lexical * 0.05 + image_boost + review_boost
-            reranked.append({**item, "score": round(score, 3)})
-        reranked.sort(key=lambda item: item["score"], reverse=True)
-        return reranked
-
-    def _apply_retrieval_strategy(
-        self,
-        *,
-        question: str,
-        class_id: str,
-        search_results: list[dict],
-        query_variants: list[str] | None = None,
-    ) -> dict[str, Any]:
-        strategy = self._normalized_retrieval_strategy()
-        deduped = self._deduplicate_results(search_results)
-        normalized_queries = self._normalize_query_variants(query_variants, fallback=question)
-        variant_term_sets = []
-        for query_text in normalized_queries:
-            term_set = self._terms(query_text)
-            if term_set:
-                variant_term_sets.append(term_set)
-        graph_seed = " ".join(normalized_queries) if normalized_queries else question
-        graph_terms = self._collect_graph_terms(class_id, graph_seed) if strategy in {"hybrid", "graph"} else set()
-        candidate_limit = max(5, int(settings.RAG_RETRIEVAL_CANDIDATE_K))
-
-        candidates: list[dict[str, Any]] = []
-        for item in deduped:
-            lexical_score = float(item.get("score") or 0.0)
-            snippet_terms = self._terms(item.get("raw_text") or item.get("snippet") or "")
-            matched_variants = sum(
-                1 for term_set in variant_term_sets if term_set and (term_set & snippet_terms)
-            )
-            query_coverage = (
-                matched_variants / len(variant_term_sets)
-                if variant_term_sets
-                else 0.0
-            )
-            coverage_boost = 0.0
-            if len(variant_term_sets) > 1:
-                coverage_boost = min(0.16, max(0, matched_variants - 1) * 0.04)
-            graph_overlap = len(graph_terms & snippet_terms)
-            graph_boost = min(0.5, graph_overlap * 0.07)
-
-            if strategy == "lexical":
-                retrieval_score = lexical_score + coverage_boost
-            elif strategy == "graph":
-                retrieval_score = graph_boost + lexical_score * 0.1 + coverage_boost
-            else:  # hybrid
-                retrieval_score = lexical_score + graph_boost + coverage_boost
-
-            candidates.append({
-                **item,
-                "lexical_score": round(lexical_score, 4),
-                "graph_boost": round(graph_boost, 4),
-                "query_coverage": round(query_coverage, 4),
-                "query_coverage_boost": round(coverage_boost, 4),
-                "matched_query_count": matched_variants,
-                "retrieval_score": round(retrieval_score, 4),
-                "retrieval_strategy": strategy,
-            })
-
-        candidates.sort(key=lambda item: item.get("retrieval_score", 0.0), reverse=True)
-        return {
-            "strategy": strategy,
-            "candidate_count": len(candidates),
-            "graph_term_count": len(graph_terms),
-            "query_variant_count": len(normalized_queries),
-            "candidates": candidates[:candidate_limit],
-        }
-
-    def _normalize_query_variants(self, query_variants: list[str] | None, *, fallback: str) -> list[str]:
-        variants: list[str] = []
-        seen = set()
-        for query in query_variants or []:
-            normalized = (query or "").strip()
-            if not normalized:
-                continue
-            lowered = normalized.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            variants.append(normalized)
-        if not variants:
-            fallback_query = (fallback or "").strip()
-            if fallback_query:
-                variants.append(fallback_query)
-        return variants
-
-    def _normalized_retrieval_strategy(self) -> str:
-        strategy = (settings.RAG_RETRIEVAL_STRATEGY or "hybrid").lower().strip()
-        if strategy not in {"lexical", "hybrid", "graph"}:
-            logger.warning("retrieval_strategy_fallback", requested=strategy, fallback="hybrid")
-            return "hybrid"
-        return strategy
-
-    def _collect_graph_terms(self, class_id: str, question: str) -> set[str]:
-        question_terms = self._terms(question)
-        if not question_terms:
-            return set()
-
-        with SessionLocal() as db:
-            entities = db.query(KnowledgeEntity).filter(KnowledgeEntity.class_id == class_id).all()
-
-        terms: set[str] = set()
-        for entity in entities:
-            name = (entity.name or "").strip().lower()
-            if not name:
-                continue
-            entity_terms = self._terms(name)
-            if not entity_terms:
-                continue
-            if entity_terms & question_terms:
-                terms.update(entity_terms)
-        return terms
-
-    def _review_answer_candidates(self, db, class_id: str, question: str) -> list[dict]:
-        question_terms = self._terms(question)
-        matches = []
-        for record in db.query(ReviewSyncRecord).filter(
-            ReviewSyncRecord.class_id == class_id,
-            ReviewSyncRecord.sync_status == "synced",
-        ).all():
-            overlap = len(question_terms & self._terms(record.question_content))
-            if overlap <= 0:
-                continue
-            matches.append({
-                "review_id": record.review_id,
-                "question_content": record.question_content,
-                "final_answer": record.final_answer,
-                "score": round(overlap / max(len(question_terms), 1), 3),
-            })
-        matches.sort(key=lambda item: item["score"], reverse=True)
-        return matches
 
     def _terms(self, text: str) -> set[str]:
         latin = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
         cjk = re.findall(r"[\u4e00-\u9fff]{2,8}", text)
         return {token for token in [*latin, *cjk] if token}
+
+    def _ensure_kb_space(self, db, course_id: str, class_id: str | None = None) -> KBSpace:
+        kb_space = db.query(KBSpace).filter(
+            KBSpace.course_id == course_id,
+            KBSpace.class_id == class_id,
+        ).first()
+        if not kb_space:
+            kb_space = KBSpace(
+                course_id=course_id,
+                class_id=class_id,
+                status="building",
+                extra_data={},
+            )
+            db.add(kb_space)
+            db.flush()
+        return kb_space
+
+    def _blended_confidence(self, current: float | None, incoming: float) -> float:
+        baseline = float(current) if current is not None else 0.55
+        blended = baseline * 0.8 + float(incoming) * 0.2
+        return round(min(0.99, max(0.4, blended)), 4)
+
+    def _suggestions(self, question: str) -> list[str]:
+        return [
+            "Can you explain this with an example?",
+            "Which source should I read next?",
+            f"What is the key concept behind: {question[:30]}?",
+        ]
 
     def _build_processing_quality(self, status: dict[str, Any]) -> dict[str, Any]:
         text_processed = bool(status.get("text_processed"))

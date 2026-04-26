@@ -10,6 +10,13 @@ class AttachedFile(BaseModel):
     size: int
     mime_type: str
     file_type: str
+    storage_key: Optional[str] = None
+    file_path: Optional[str] = None
+    class_id: Optional[str] = None
+    temporary: bool = True
+    attachment_context: Optional[str] = None
+    created_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
 
 
 class KnowledgeSource(BaseModel):
@@ -29,6 +36,7 @@ class ChatMessageOut(BaseModel):
     sources: Optional[List[dict]] = None
     suggestions: Optional[List[str]] = None
     confidence: Optional[float] = None
+    quality: Optional[dict] = None
     feedback: Optional[str] = None
     needs_review: bool = False
     created_at: datetime
@@ -87,3 +95,16 @@ class ReviewItemOut(BaseModel):
 class ResolveReviewRequest(BaseModel):
     teacher_answer: str
     add_to_kb: bool = True
+
+
+class PromoteChatAttachmentRequest(BaseModel):
+    storage_key: str
+    name: str
+    mime_type: Optional[str] = None
+    file_type: Optional[str] = None
+    size: Optional[int] = None
+    class_id: Optional[str] = None
+    course_id: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    async_index: bool = False

@@ -26,5 +26,75 @@
     "create_time": 1775714822,
     "update_time": 1775714822,
     "_id": "45d31e62-17d9-4a9f-b133-a3b430f13dde"
+  },
+  "d03f7c71-9055-4027-9c08-c731326be044": {
+    "content": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "file_path": "fixture_notes.txt",
+    "create_time": 1776926710,
+    "update_time": 1776926710,
+    "_id": "d03f7c71-9055-4027-9c08-c731326be044"
+  },
+  "a9d2af5d-d9ba-4feb-a4a2-999174ad6451": {
+    "content": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "file_path": "fixture_notes.txt",
+    "create_time": 1776927510,
+    "update_time": 1776927510,
+    "_id": "a9d2af5d-d9ba-4feb-a4a2-999174ad6451"
+  },
+  "8013197d-ac52-463e-9fd3-bf352f2b6173": {
+    "content": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "file_path": "fixture_notes.txt",
+    "create_time": 1776927613,
+    "update_time": 1776927613,
+    "_id": "8013197d-ac52-463e-9fd3-bf352f2b6173"
+  },
+  "c6aba5eb-daee-446f-8980-752e1a545463": {
+    "content": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "file_path": "fixture_notes.txt",
+    "create_time": 1776927781,
+    "update_time": 1776927781,
+    "_id": "c6aba5eb-daee-446f-8980-752e1a545463"
+  },
+  "a8495264-b520-4eec-a19c-dc358785f16f": {
+    "content": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "file_path": "fixture_notes.txt",
+    "create_time": 1776943666,
+    "update_time": 1776943666,
+    "_id": "a8495264-b520-4eec-a19c-dc358785f16f"
+  },
+  "teacher-review-96ee986d34ba2c701bb3772d": {
+    "content": "Teacher-reviewed question: What is TCP slow start?\nTeacher-verified answer: TCP slow start rapidly grows the congestion window during the initial phase.",
+    "file_path": "teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt",
+    "create_time": 1776962624,
+    "update_time": 1776962624,
+    "_id": "teacher-review-96ee986d34ba2c701bb3772d"
+  },
+  "teacher-review-f3060262ec200a0d1458790d": {
+    "content": "Teacher-reviewed question: What is TCP slow start?\nTeacher-verified answer: TCP slow start is the initial congestion control phase where cwnd grows quickly each RTT.",
+    "file_path": "teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt",
+    "create_time": 1776962841,
+    "update_time": 1776962841,
+    "_id": "teacher-review-f3060262ec200a0d1458790d"
+  },
+  "8b11b4cf-6baf-480b-af50-a827e4af786f": {
+    "content": "Congestion control improves throughput stability.",
+    "file_path": "graph_filter_notes.txt",
+    "create_time": 1776996304,
+    "update_time": 1776996304,
+    "_id": "8b11b4cf-6baf-480b-af50-a827e4af786f"
+  },
+  "75da7a3f-093b-4dff-a0cf-44f0d15a52be": {
+    "content": "Congestion control improves throughput stability.",
+    "file_path": "graph_filter_notes.txt",
+    "create_time": 1776996890,
+    "update_time": 1776996890,
+    "_id": "75da7a3f-093b-4dff-a0cf-44f0d15a52be"
+  },
+  "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1": {
+    "content": "Congestion control improves throughput stability.",
+    "file_path": "graph_filter_notes.txt",
+    "create_time": 1776998505,
+    "update_time": 1776998505,
+    "_id": "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1"
   }
 }

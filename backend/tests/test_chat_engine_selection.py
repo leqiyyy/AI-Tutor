@@ -40,7 +40,7 @@ def test_chat_query_uses_persisted_rag_engine(monkeypatch, client):
                 sources=[],
                 confidence=0.8,
                 suggestions=[],
-                meta={"engine": "simple", "used_fallback": False},
+                meta={"engine": "raganything", "used_fallback": False},
             )
 
     def fake_get_rag_engine(requested_engine=None):

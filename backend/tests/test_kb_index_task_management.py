@@ -1,12 +1,21 @@
 import asyncio
+import importlib.util
 import io
 import uuid
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from app.core.database import SessionLocal
 from app.models.course import Material
 from app.models.knowledge import FileParseTask
 from app.services import kb_service
+
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("raganything") is None,
+    reason="Strict RAG-Anything indexing tests require the raganything package to be installed.",
+)
 
 
 def _admin_headers(client) -> dict:

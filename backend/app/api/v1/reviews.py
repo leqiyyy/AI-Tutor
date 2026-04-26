@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_student, get_current_teacher
 from app.core.response import ok
 from app.db.base import get_db
+from app.integrations.rag.quality import build_evidence_quality, build_review_context
 from app.models.chat import ChatMessage, ChatSession, ReviewItem
 from app.models.course import Class
 from app.models.user import User
@@ -43,6 +44,9 @@ def pending_reviews(
     data = []
     for item in items:
         student = db.query(User).filter(User.id == item.student_id).first()
+        message = item.message
+        sources = (message.sources if message else []) or []
+        confidence = message.confidence if message else 0.0
         data.append({
             "id": item.id,
             "message_id": item.message_id,
@@ -54,6 +58,13 @@ def pending_reviews(
             "ai_answer": item.ai_answer,
             "teacher_answer": item.teacher_answer,
             "status": item.status,
+            "quality": build_evidence_quality(sources, confidence),
+            "review_context": build_review_context(
+                sources,
+                confidence,
+                trigger=item.trigger,
+                feedback=message.feedback if message else None,
+            ),
             "created_at": item.created_at,
         })
     return ok(data=data)

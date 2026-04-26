@@ -1,19 +1,167 @@
+from datetime import datetime, timezone
+import os
+import tempfile
 from typing import Optional
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
+import app.storage as storage
+from app.core.config import settings
 from app.core.exceptions import BadRequestException
 from app.core.deps import get_current_teacher, get_current_user
 from app.core.error_codes import ErrorCode
 from app.core.openapi_examples import responses_with_success
 from app.core.response import ok
 from app.db.base import get_db
+from app.integrations.preprocessors import detect_material_file_type
+from app.models.course import Class, Material
+from app.models.knowledge import FileParseTask
 from app.models.user import User
-from app.schemas.chat import ChatQueryRequest, FeedbackRequest, ResolveReviewRequest, SendMessageRequest
+from app.schemas.chat import ChatQueryRequest, FeedbackRequest, PromoteChatAttachmentRequest, ResolveReviewRequest, SendMessageRequest
 from app.services import chat_service, kb_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+@router.post("/attachments/upload", response_model=None)
+async def upload_chat_attachment(
+    file: UploadFile = File(...),
+    class_id: Optional[str] = Form(None),
+    course_id: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    resolved_class_id = class_id
+    if course_id and not class_id:
+        resolved_class_id = kb_service.resolve_class_for_course(db, course_id, current_user).id
+    created_at = datetime.now(timezone.utc)
+    expires_at = chat_service.chat_attachment_expiry(created_at)
+
+    content = await file.read()
+    suffix = os.path.splitext(file.filename or "file")[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    scope_id = chat_service.chat_attachment_scope_id(current_user.id)
+    storage_key, stored_path = storage.save_upload(scope_id, file.filename or "file", tmp_path)
+    os.unlink(tmp_path)
+    file_type = detect_material_file_type(
+        file.filename or "file",
+        file.content_type or "application/octet-stream",
+    )
+
+    return ok(data={
+        "id": storage_key,
+        "name": file.filename or "file",
+        "size": len(content),
+        "mime_type": file.content_type or "application/octet-stream",
+        "file_type": file_type,
+        "storage_key": storage_key,
+        "file_path": stored_path,
+        "class_id": resolved_class_id,
+        "temporary": True,
+        "created_at": created_at,
+        "expires_at": expires_at,
+    })
+
+
+@router.post("/attachments/cleanup", response_model=None)
+def cleanup_chat_attachments(
+    current_user: User = Depends(get_current_user),
+):
+    return ok(data=chat_service.cleanup_expired_chat_attachments(current_user.id))
+
+
+@router.post("/attachments/promote", response_model=None)
+async def promote_chat_attachment(
+    body: PromoteChatAttachmentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if body.class_id:
+        cls = db.query(Class).filter(Class.id == body.class_id, Class.is_active == True).first()
+        if not cls:
+            raise BadRequestException("class_id is invalid")
+    elif body.course_id:
+        cls = kb_service.resolve_class_for_course(db, body.course_id, current_user)
+    else:
+        raise BadRequestException("course_id or class_id is required")
+
+    scope_id = chat_service.chat_attachment_scope_id(current_user.id)
+    stored_path = storage.get_file_path(scope_id, body.storage_key)
+    if not stored_path or not os.path.exists(stored_path):
+        raise BadRequestException("Attachment file is unavailable or already expired")
+
+    content = Path(stored_path).read_bytes()
+    file_hash = kb_service.compute_file_hash(content)
+    duplicate = kb_service.find_duplicate_material(db, class_id=cls.id, file_hash=file_hash)
+    if duplicate:
+        existing_material, existing_task = duplicate
+        return ok(data={
+            "id": existing_material.id,
+            "class_id": cls.id,
+            "file_name": existing_material.file_name,
+            "kb_status": existing_material.kb_status,
+            "parse_task_id": existing_task.id if existing_task else None,
+            "deduplicated": True,
+            "promoted_from_chat_attachment": True,
+        }, message="Chat attachment already exists in the course knowledge base")
+
+    file_type = body.file_type or detect_material_file_type(body.name, body.mime_type or "application/octet-stream")
+    material = Material(
+        class_id=cls.id,
+        uploaded_by=current_user.id,
+        title=body.title or body.name or "Chat Attachment",
+        file_name=body.name,
+        file_path=stored_path,
+        file_size=body.size or len(content),
+        mime_type=body.mime_type or "application/octet-stream",
+        file_type=file_type,
+        description=body.description or "Promoted from temporary chat attachment",
+        kb_status="pending",
+    )
+    db.add(material)
+    db.commit()
+    db.refresh(material)
+
+    if body.async_index:
+        parse_task = kb_service.prepare_parse_task_for_enqueue(
+            db,
+            cls=cls,
+            material=material,
+            file_hash=file_hash,
+            force=False,
+        )
+        queue_info = kb_service.enqueue_parse_task(db, parse_task=parse_task, force=False)
+        queue_task_id = queue_info.get("queue_task_id")
+    else:
+        parse_task, _action = await kb_service.ingest_material_with_retry(
+            db,
+            cls=cls,
+            material=material,
+            file_hash=file_hash,
+            force=False,
+        )
+        queue_task_id = None
+
+    db.expire_all()
+    material = db.query(Material).filter(Material.id == material.id).first()
+    if not parse_task:
+        parse_task = db.query(FileParseTask).filter_by(material_id=material.id).first()
+
+    return ok(data={
+        "id": material.id,
+        "class_id": cls.id,
+        "file_name": material.file_name,
+        "kb_status": material.kb_status,
+        "kb_error": material.kb_error,
+        "parse_task_id": parse_task.id if parse_task else None,
+        "queue_task_id": queue_task_id,
+        "promoted_from_chat_attachment": True,
+    })
 
 
 @router.get("/sessions", response_model=None)
@@ -79,6 +227,18 @@ async def send_message(
                 "Explain how slow start differs from congestion avoidance.",
             ],
             "confidence": 0.87,
+            "quality": {
+                "confidence_band": "high",
+                "grounding_level": "strong",
+                "source_count": 1,
+                "evidence_score": 0.82,
+            },
+            "review_context": {
+                "needs_teacher_review": False,
+                "review_priority": "none",
+                "review_reasons": [],
+                "recommended_action": "direct_answer",
+            },
             "needs_review": False,
         },
         include_errors=(
@@ -119,6 +279,8 @@ async def query_chat(
         "sources": ai_message["sources"],
         "suggestions": ai_message["suggestions"],
         "confidence": ai_message["confidence"],
+        "quality": ai_message.get("quality"),
+        "review_context": ai_message.get("review_context"),
         "needs_review": ai_message["needs_review"],
     })
 

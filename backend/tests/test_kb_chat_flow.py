@@ -1,4 +1,13 @@
 import io
+import importlib.util
+
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("raganything") is None,
+    reason="Strict RAG-Anything integration flow requires the raganything package to be installed.",
+)
 
 
 def test_kb_chat_review_flow(client, teacher_headers, student_headers):
@@ -42,6 +51,11 @@ def test_kb_chat_review_flow(client, teacher_headers, student_headers):
     assert query.status_code == 200
     query_data = query.json()["data"]
     assert query_data["sources"]
+    assert query_data["quality"]["source_count"] == len(query_data["sources"])
+    assert query_data["quality"]["confidence_band"] in {"high", "medium", "low", "none"}
+    assert query_data["quality"]["grounding_level"] in {"strong", "adequate", "weak", "ungrounded"}
+    assert query_data["review_context"]["recommended_action"] in {"direct_answer", "answer_with_caution", "teacher_review"}
+    assert isinstance(query_data["review_context"]["review_reasons"], list)
 
     low_conf = client.post(
         "/api/v1/chat/query",
@@ -50,7 +64,10 @@ def test_kb_chat_review_flow(client, teacher_headers, student_headers):
     )
     assert low_conf.status_code == 200
     assert low_conf.json()["data"]["needs_review"] is True
+    assert low_conf.json()["data"]["review_context"]["needs_teacher_review"] is True
+    assert low_conf.json()["data"]["review_context"]["review_reasons"]
 
     pending = client.get(f"/api/v1/reviews/pending?course_id={course_id}", headers=teacher_headers)
     assert pending.status_code == 200
     assert len(pending.json()["data"]) >= 1
+    assert "review_context" in pending.json()["data"][0]

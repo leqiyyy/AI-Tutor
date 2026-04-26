@@ -1,8 +1,17 @@
 import base64
+import importlib.util
 import io
 import json
 import uuid
 from pathlib import Path
+
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("raganything") is None,
+    reason="Strict multimodal RAG-Anything regression tests require the raganything package to be installed.",
+)
 
 
 def _fixture_dir() -> Path:
@@ -94,6 +103,10 @@ def test_multimodal_regression_fixtures_upload_analysis_graph(client, teacher_he
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
     assert nodes
+    assert "summary" in graph_data
+    assert "legend" in graph_data
+    assert "materials" in graph_data
+    assert graph_data["summary"]["source_material_count"] >= 1
 
     assert any(
         set((node.get("provenance") or {}).get("source_material_ids") or []).intersection(uploaded_material_ids)

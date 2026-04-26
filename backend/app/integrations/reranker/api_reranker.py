@@ -15,7 +15,12 @@ class APIReranker(BaseReranker):
         self._path = self._normalized_path(settings.RERANKER_API_PATH)
         self._endpoint = f"{self._base}{self._path}" if self._base else ""
         self._timeout = max(1.0, float(settings.RERANKER_API_TIMEOUT_SECONDS or 20.0))
-        self._api_key = settings.RERANKER_API_KEY or settings.EFFECTIVE_LLM_API_KEY
+        self._api_key = (
+            settings.RERANKER_API_KEY
+            or settings.EFFECTIVE_EMBEDDING_API_KEY
+            or settings.EFFECTIVE_EXTRACT_API_KEY
+            or settings.EFFECTIVE_LLM_API_KEY
+        )
 
     async def rerank(
         self,
@@ -107,7 +112,7 @@ class APIReranker(BaseReranker):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            score = row.get("score")
+            score = row.get("relevance_score", row.get("score"))
             if score is None:
                 continue
             try:

@@ -15,20 +15,20 @@
 <key id="d0" for="node" attr.name="entity_id" attr.type="string"/>
 <graph edgedefault="undirected"><node id="TCP Slow Start">
   <data key="d0">TCP Slow Start</data>
-  <data key="d1">method</data>
-  <data key="d2">TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.</data>
-  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
-  <data key="d4">rag_test.txt</data>
-  <data key="d5">1775714829</data>
+  <data key="d1">concept</data>
+  <data key="d2">TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP Slow Start is the initial phase of congestion control in TCP.&lt;SEP&gt;TCP slow start is a method used to gradually increase the congestion window size during the initial phase of network communication.&lt;SEP&gt;TCP Slow Start is the initial congestion control phase where the cwnd grows quickly during each RTT.</data>
+  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5&lt;SEP&gt;chunk-cbcea58946eb6b3a1a9a2eefa0fbfee9&lt;SEP&gt;chunk-c19f1fd6689902f8144ee71d81d15c7f</data>
+  <data key="d4">rag_test.txt&lt;SEP&gt;teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt</data>
+  <data key="d5">1776962847</data>
   <data key="d6"></data>
 </node>
 <node id="Congestion Control">
   <data key="d0">Congestion Control</data>
   <data key="d1">concept</data>
-  <data key="d2">Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.</data>
-  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
-  <data key="d4">rag_test.txt</data>
-  <data key="d5">1775714829</data>
+  <data key="d2">Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a control mechanism that includes TCP Slow Start as its initial phase.&lt;SEP&gt;Congestion control is a method used to improve network performance by managing data flow to prevent network congestion.&lt;SEP&gt;Congestion control is a method used to improve network performance by managing data flow to prevent network congestion.&lt;SEP&gt;Congestion control is a method used to improve network performance by managing data flow to prevent network congestion.</data>
+  <data key="d3">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5&lt;SEP&gt;chunk-3317d1ab02cc65a25adf9d368924d824</data>
+  <data key="d4">rag_test.txt&lt;SEP&gt;graph_filter_notes.txt</data>
+  <data key="d5">1776998507</data>
   <data key="d6"></data>
 </node>
 <node id="CIDR /24">
@@ -49,6 +49,114 @@
   <data key="d5">1775714830</data>
   <data key="d6"></data>
 </node>
+<node id="Adaptive Congestion Control">
+  <data key="d0">Adaptive Congestion Control</data>
+  <data key="d1">method</data>
+  <data key="d2">Concept that improves queue stability and reduces packet loss.&lt;SEP&gt;Adaptive congestion control is a technique to improve queue stability and reduce packet loss.&lt;SEP&gt;Adaptive congestion control is a technique to improve queue stability and reduce packet loss.&lt;SEP&gt;Adaptive congestion control is a technique to improve queue stability and reduce packet loss.&lt;SEP&gt;Adaptive congestion control is a technique to improve queue stability and reduce packet loss.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962671</data>
+  <data key="d6"></data>
+</node>
+<node id="Slow-Start Behavior">
+  <data key="d0">Slow-Start Behavior</data>
+  <data key="d1">concept</data>
+  <data key="d2">Behavior in congestion control comparing to other methods.&lt;SEP&gt;Slow-start behavior is a method used in congestion control processes.&lt;SEP&gt;Slow-start behavior is a method used in congestion control processes.&lt;SEP&gt;Slow-start behavior is a method used in congestion control processes.&lt;SEP&gt;Slow-start behavior is a method used in congestion control processes.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962671</data>
+  <data key="d6"></data>
+</node>
+<node id="Additive Increase">
+  <data key="d0">Additive Increase</data>
+  <data key="d1">concept</data>
+  <data key="d2">Method in congestion control comparing to slow-start behavior.&lt;SEP&gt;Additive increase is a method used in congestion control processes.&lt;SEP&gt;Additive increase is a method used in congestion control processes.&lt;SEP&gt;Additive increase is a method used in congestion control processes.&lt;SEP&gt;Additive increase is a method used in congestion control processes.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962672</data>
+  <data key="d6"></data>
+</node>
+<node id="Burst Traffic">
+  <data key="d0">Burst Traffic</data>
+  <data key="d1">concept</data>
+  <data key="d2">Type of traffic input for system comparison.&lt;SEP&gt;Burst traffic refers to sudden increases in network traffic.&lt;SEP&gt;Burst traffic refers to sudden increases in network traffic.&lt;SEP&gt;Burst traffic refers to sudden increases in network traffic.&lt;SEP&gt;Burst traffic refers to sudden increases in network traffic.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962672</data>
+  <data key="d6"></data>
+</node>
+<node id="Queue Delay">
+  <data key="d0">Queue Delay</data>
+  <data key="d1">concept</data>
+  <data key="d2">System metric for queue stability.&lt;SEP&gt;Queue delay is a key metric in evaluating congestion control methods.&lt;SEP&gt;Queue delay is a key metric in evaluating congestion control methods.&lt;SEP&gt;Queue delay is a key metric in evaluating congestion control methods.&lt;SEP&gt;Queue delay is a key metric in evaluating congestion control methods.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962671</data>
+  <data key="d6"></data>
+</node>
+<node id="Throughput">
+  <data key="d0">Throughput</data>
+  <data key="d1">concept</data>
+  <data key="d2">System performance metric.&lt;SEP&gt;Throughput is a key metric in evaluating the efficiency of congestion control methods.&lt;SEP&gt;Throughput is a key metric in evaluating the efficiency of congestion control methods.&lt;SEP&gt;Throughput is a key metric in evaluating the efficiency of congestion control methods.&lt;SEP&gt;Throughput is a key metric in evaluating the efficiency of congestion control methods.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962671</data>
+  <data key="d6"></data>
+</node>
+<node id="Fairness">
+  <data key="d0">Fairness</data>
+  <data key="d1">concept</data>
+  <data key="d2">System concern for resource distribution.&lt;SEP&gt;Fairness is a key concept in evaluating congestion control methods.&lt;SEP&gt;Fairness is a key concept in evaluating congestion control methods.&lt;SEP&gt;Fairness is a key concept in evaluating congestion control methods.&lt;SEP&gt;Fairness is a key concept in evaluating congestion control methods.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962671</data>
+  <data key="d6"></data>
+</node>
+<node id="Retransmission Efficiency">
+  <data key="d0">Retransmission Efficiency</data>
+  <data key="d1">concept</data>
+  <data key="d2">System metric for retransmission performance.&lt;SEP&gt;Retransmission efficiency is a key metric in evaluating congestion control methods.&lt;SEP&gt;Retransmission efficiency is a key metric in evaluating congestion control methods.&lt;SEP&gt;Retransmission efficiency is a key metric in evaluating congestion control methods.&lt;SEP&gt;Retransmission efficiency is a key metric in evaluating congestion control methods.</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962671</data>
+  <data key="d6"></data>
+</node>
+<node id="System Comparison">
+  <data key="d0">System Comparison</data>
+  <data key="d3">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d2">Adaptive congestion control compares its behavior with other methods under burst traffic conditions.</data>
+  <data key="d1">UNKNOWN</data>
+  <data key="d4">fixture_notes.txt</data>
+  <data key="d5">1776962658</data>
+  <data key="d6"></data>
+</node>
+<node id="Congestion Window">
+  <data key="d0">Congestion Window</data>
+  <data key="d1">concept</data>
+  <data key="d2">Congestion window is a metric that indicates the amount of data that can be transmitted into the network before the sender has to reduce the data rate due to packet loss or other congestion issues.</data>
+  <data key="d3">chunk-cbcea58946eb6b3a1a9a2eefa0fbfee9</data>
+  <data key="d4">teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt</data>
+  <data key="d5">1776962839</data>
+  <data key="d6"></data>
+</node>
+<node id="cwnd">
+  <data key="d0">cwnd</data>
+  <data key="d1">variable</data>
+  <data key="d2">cwnd is the variable that represents the congestion window, which grows quickly during the initial congestion control phase of TCP slow start.</data>
+  <data key="d3">chunk-c19f1fd6689902f8144ee71d81d15c7f</data>
+  <data key="d4">teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt</data>
+  <data key="d5">1776962847</data>
+  <data key="d6"></data>
+</node>
+<node id="Throughput Stability">
+  <data key="d0">Throughput Stability</data>
+  <data key="d1">concept</data>
+  <data key="d2">Throughput stability refers to the consistent data transfer rate in network communications despite varying network conditions.&lt;SEP&gt;Throughput stability refers to the consistent data transfer rate in network communications despite varying network conditions.&lt;SEP&gt;Throughput stability refers to the consistent data transfer rate in network communications despite varying network conditions.</data>
+  <data key="d3">chunk-3317d1ab02cc65a25adf9d368924d824</data>
+  <data key="d4">graph_filter_notes.txt</data>
+  <data key="d5">1776998507</data>
+  <data key="d6"></data>
+</node>
 <edge source="TCP Slow Start" target="Congestion Control">
   <data key="d7">4.0</data>
   <data key="d8">TCP Slow Start is identified as the initial phase of congestion control.&lt;SEP&gt;TCP Slow Start is identified as the initial phase of congestion control.&lt;SEP&gt;TCP Slow Start is identified as the initial phase of congestion control.&lt;SEP&gt;TCP Slow Start is identified as the initial phase of congestion control.</data>
@@ -58,6 +166,33 @@
   <data key="d12">1775714830</data>
   <data key="d13"></data>
 </edge>
+<edge source="TCP Slow Start" target="Congestion Window">
+  <data key="d7">1.0</data>
+  <data key="d8">TCP slow start increases the congestion window size rapidly during the initial phase to efficiently manage network congestion.</data>
+  <data key="d9">congestion control,initial phase</data>
+  <data key="d10">chunk-cbcea58946eb6b3a1a9a2eefa0fbfee9</data>
+  <data key="d11">teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt</data>
+  <data key="d12">1776962840</data>
+  <data key="d13"></data>
+</edge>
+<edge source="TCP Slow Start" target="cwnd">
+  <data key="d7">1.0</data>
+  <data key="d8">During TCP slow start, the cwnd grows quickly during each RTT to control congestion.</data>
+  <data key="d9">congestion control,variable growth</data>
+  <data key="d10">chunk-c19f1fd6689902f8144ee71d81d15c7f</data>
+  <data key="d11">teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt</data>
+  <data key="d12">1776962848</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Congestion Control" target="Throughput Stability">
+  <data key="d7">3.0</data>
+  <data key="d8">Congestion control methods are employed to enhance throughput stability by regulating data flow and mitigating network congestion.&lt;SEP&gt;Congestion control methods are employed to enhance throughput stability by regulating data flow and mitigating network congestion.&lt;SEP&gt;Congestion control methods are employed to enhance throughput stability by regulating data flow and mitigating network congestion.</data>
+  <data key="d9">network optimization,performance improvement</data>
+  <data key="d10">chunk-3317d1ab02cc65a25adf9d368924d824</data>
+  <data key="d11">graph_filter_notes.txt</data>
+  <data key="d12">1776998508</data>
+  <data key="d13"></data>
+</edge>
 <edge source="CIDR /24" target="255.255.255.0">
   <data key="d7">4.0</data>
   <data key="d8">CIDR /24 means the subnet mask 255.255.255.0.&lt;SEP&gt;CIDR /24 means the subnet mask 255.255.255.0.&lt;SEP&gt;CIDR /24 means the subnet mask 255.255.255.0.&lt;SEP&gt;CIDR /24 means the subnet mask 255.255.255.0.</data>
@@ -65,6 +200,114 @@
   <data key="d10">chunk-5d9b6678256fdb0e6d346d41fc2f3aa5</data>
   <data key="d11">rag_test.txt</data>
   <data key="d12">1775714830</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="System Comparison">
+  <data key="d7">1.0</data>
+  <data key="d8">Adaptive congestion control compares its behavior with other methods under burst traffic conditions.</data>
+  <data key="d9">method comparison</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962658</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Queue Delay">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control improves stability and reduces packet loss by managing queue delay.&lt;SEP&gt;Adaptive congestion control improves stability and reduces packet loss by managing queue delay.&lt;SEP&gt;Adaptive congestion control improves stability and reduces packet loss by managing queue delay.&lt;SEP&gt;Adaptive congestion control improves stability and reduces packet loss by managing queue delay.</data>
+  <data key="d9">metric improvement</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962673</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Throughput">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control enhances network efficiency by improving throughput.&lt;SEP&gt;Adaptive congestion control enhances network efficiency by improving throughput.&lt;SEP&gt;Adaptive congestion control enhances network efficiency by improving throughput.&lt;SEP&gt;Adaptive congestion control enhances network efficiency by improving throughput.</data>
+  <data key="d9">metric improvement</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962673</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Fairness">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control ensures fair distribution of network resources.&lt;SEP&gt;Adaptive congestion control ensures fair distribution of network resources.&lt;SEP&gt;Adaptive congestion control ensures fair distribution of network resources.&lt;SEP&gt;Adaptive congestion control ensures fair distribution of network resources.</data>
+  <data key="d9">metric improvement</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962674</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Retransmission Efficiency">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control increases the efficiency of retransmitting data packets.&lt;SEP&gt;Adaptive congestion control increases the efficiency of retransmitting data packets.&lt;SEP&gt;Adaptive congestion control increases the efficiency of retransmitting data packets.&lt;SEP&gt;Adaptive congestion control increases the efficiency of retransmitting data packets.</data>
+  <data key="d9">metric improvement</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962674</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Slow-Start Behavior">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control uses slow-start behavior to handle congestion.&lt;SEP&gt;Adaptive congestion control uses slow-start behavior to handle congestion.&lt;SEP&gt;Adaptive congestion control uses slow-start behavior to handle congestion.&lt;SEP&gt;Adaptive congestion control uses slow-start behavior to handle congestion.</data>
+  <data key="d9">control method</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962675</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Additive Increase">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control employs additive increase to control congestion.&lt;SEP&gt;Adaptive congestion control employs additive increase to control congestion.&lt;SEP&gt;Adaptive congestion control employs additive increase to control congestion.&lt;SEP&gt;Adaptive congestion control employs additive increase to control congestion.</data>
+  <data key="d9">control method</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962675</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Adaptive Congestion Control" target="Burst Traffic">
+  <data key="d7">4.0</data>
+  <data key="d8">Adaptive congestion control is effective in managing burst traffic.&lt;SEP&gt;Adaptive congestion control is effective in managing burst traffic.&lt;SEP&gt;Adaptive congestion control is effective in managing burst traffic.&lt;SEP&gt;Adaptive congestion control is effective in managing burst traffic.</data>
+  <data key="d9">processing target</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962675</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Queue Delay" target="System Comparison">
+  <data key="d7">1.0</data>
+  <data key="d8">Queue delay is analyzed as a metric in the system comparison.</data>
+  <data key="d9">metric analysis</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962658</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Throughput" target="System Comparison">
+  <data key="d7">1.0</data>
+  <data key="d8">Throughput is analyzed as a metric in the system comparison.</data>
+  <data key="d9">metric analysis</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962658</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Fairness" target="System Comparison">
+  <data key="d7">1.0</data>
+  <data key="d8">Fairness is a metric concern in the system comparison.</data>
+  <data key="d9">metric analysis</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962659</data>
+  <data key="d13"></data>
+</edge>
+<edge source="Retransmission Efficiency" target="System Comparison">
+  <data key="d7">1.0</data>
+  <data key="d8">Retransmission efficiency is a metric in the system comparison.</data>
+  <data key="d9">metric analysis</data>
+  <data key="d10">chunk-00002a3dfcc7efe2746e6448c76c6b7d</data>
+  <data key="d11">fixture_notes.txt</data>
+  <data key="d12">1776962659</data>
   <data key="d13"></data>
 </edge>
 </graph></graphml>

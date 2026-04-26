@@ -67,5 +67,231 @@
       "processing_end_time": 1775714830
     },
     "multimodal_processed": true
+  },
+  "d03f7c71-9055-4027-9c08-c731326be044": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-00002a3dfcc7efe2746e6448c76c6b7d"
+    ],
+    "content_summary": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "content_length": 243,
+    "created_at": "2026-04-23T06:45:10.288490+00:00",
+    "updated_at": "2026-04-23T16:44:27.567576+00:00",
+    "file_path": "fixture_notes.txt",
+    "track_id": "insert_20260423_144510_f3c4a90c",
+    "metadata": {
+      "processing_start_time": 1776962624,
+      "processing_end_time": 1776962667
+    }
+  },
+  "a9d2af5d-d9ba-4feb-a4a2-999174ad6451": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-00002a3dfcc7efe2746e6448c76c6b7d"
+    ],
+    "content_summary": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "content_length": 243,
+    "created_at": "2026-04-23T06:58:30.484168+00:00",
+    "updated_at": "2026-04-23T16:44:19.638223+00:00",
+    "file_path": "fixture_notes.txt",
+    "track_id": "insert_20260423_145830_b9d329ca",
+    "metadata": {
+      "processing_start_time": 1776962624,
+      "processing_end_time": 1776962659
+    }
+  },
+  "8013197d-ac52-463e-9fd3-bf352f2b6173": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-00002a3dfcc7efe2746e6448c76c6b7d"
+    ],
+    "content_summary": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "content_length": 243,
+    "created_at": "2026-04-23T07:00:13.831301+00:00",
+    "updated_at": "2026-04-23T16:44:35.045311+00:00",
+    "file_path": "fixture_notes.txt",
+    "track_id": "insert_20260423_150013_6057de5d",
+    "metadata": {
+      "processing_start_time": 1776962659,
+      "processing_end_time": 1776962675
+    }
+  },
+  "c6aba5eb-daee-446f-8980-752e1a545463": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-00002a3dfcc7efe2746e6448c76c6b7d"
+    ],
+    "content_summary": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "content_length": 243,
+    "created_at": "2026-04-23T07:03:01.231541+00:00",
+    "updated_at": "2026-04-23T16:44:30.586077+00:00",
+    "file_path": "fixture_notes.txt",
+    "track_id": "insert_20260423_150301_c8e30db3",
+    "metadata": {
+      "processing_start_time": 1776962667,
+      "processing_end_time": 1776962670
+    }
+  },
+  "a8495264-b520-4eec-a19c-dc358785f16f": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-00002a3dfcc7efe2746e6448c76c6b7d"
+    ],
+    "content_summary": "Adaptive congestion control improves queue stability and lowers packet loss. \n\nThe system compares slow-start behavior with additive increase under burst traffic. \n\nKey anchors: queue delay, throughput, fairness, and retransmission efficiency.",
+    "content_length": 243,
+    "created_at": "2026-04-23T11:27:46.043814+00:00",
+    "updated_at": "2026-04-23T16:44:35.875390+00:00",
+    "file_path": "fixture_notes.txt",
+    "track_id": "insert_20260423_192746_545aa25f",
+    "metadata": {
+      "processing_start_time": 1776962670,
+      "processing_end_time": 1776962675
+    }
+  },
+  "teacher-review-96ee986d34ba2c701bb3772d": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-cbcea58946eb6b3a1a9a2eefa0fbfee9"
+    ],
+    "content_summary": "Teacher-reviewed question: What is TCP slow start?\nTeacher-verified answer: TCP slow start rapidly grows the congestion window during the initial phase.",
+    "content_length": 152,
+    "created_at": "2026-04-23T16:43:44.718981+00:00",
+    "updated_at": "2026-04-24T00:47:20+00:00",
+    "file_path": "teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt",
+    "track_id": "insert_20260424_004344_2566c10f",
+    "metadata": {
+      "processing_start_time": 1776962675,
+      "processing_end_time": 1776962840
+    },
+    "multimodal_processed": true
+  },
+  "teacher-review-f3060262ec200a0d1458790d": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-c19f1fd6689902f8144ee71d81d15c7f"
+    ],
+    "content_summary": "Teacher-reviewed question: What is TCP slow start?\nTeacher-verified answer: TCP slow start is the initial congestion control phase where cwnd grows quickly each RTT.",
+    "content_length": 165,
+    "created_at": "2026-04-23T16:47:21.182700+00:00",
+    "updated_at": "2026-04-24T00:47:28+00:00",
+    "file_path": "teacher_review_eb8c3c3f-4d41-4326-b8b2-b72900b844bc.txt",
+    "track_id": "insert_20260424_004721_b8a03dd3",
+    "metadata": {
+      "processing_start_time": 1776962841,
+      "processing_end_time": 1776962848
+    },
+    "multimodal_processed": true
+  },
+  "8b11b4cf-6baf-480b-af50-a827e4af786f": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-3317d1ab02cc65a25adf9d368924d824"
+    ],
+    "content_summary": "Congestion control improves throughput stability.",
+    "content_length": 49,
+    "created_at": "2026-04-24T02:05:04.942355+00:00",
+    "updated_at": "2026-04-24T10:05:18+00:00",
+    "file_path": "graph_filter_notes.txt",
+    "track_id": "insert_20260424_100504_2d667430",
+    "metadata": {
+      "processing_start_time": 1776996305,
+      "processing_end_time": 1776996318
+    },
+    "multimodal_processed": true
+  },
+  "dup-c8a293b4920894bd4242c455d76cf5ba": {
+    "status": "failed",
+    "content_summary": "[DUPLICATE] Original document: 8b11b4cf-6baf-480b-af50-a827e4af786f",
+    "content_length": 49,
+    "chunks_count": 0,
+    "chunks_list": [],
+    "created_at": "2026-04-24T02:05:18.823878+00:00",
+    "updated_at": "2026-04-24T02:05:18.823878+00:00",
+    "file_path": "graph_filter_notes.txt",
+    "track_id": "insert_20260424_100518_3db3dd16",
+    "error_msg": "Content already exists. Original doc_id: 8b11b4cf-6baf-480b-af50-a827e4af786f, Status: DocStatus.PROCESSED",
+    "metadata": {
+      "is_duplicate": true,
+      "original_doc_id": "8b11b4cf-6baf-480b-af50-a827e4af786f",
+      "original_track_id": "insert_20260424_100504_2d667430"
+    }
+  },
+  "75da7a3f-093b-4dff-a0cf-44f0d15a52be": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-3317d1ab02cc65a25adf9d368924d824"
+    ],
+    "content_summary": "Congestion control improves throughput stability.",
+    "content_length": 49,
+    "created_at": "2026-04-24T02:14:50.113591+00:00",
+    "updated_at": "2026-04-24T10:14:53+00:00",
+    "file_path": "graph_filter_notes.txt",
+    "track_id": "insert_20260424_101450_663a2ef6",
+    "metadata": {
+      "processing_start_time": 1776996890,
+      "processing_end_time": 1776996893
+    },
+    "multimodal_processed": true
+  },
+  "dup-fb396f2def402fe9b3c633d281920edf": {
+    "status": "failed",
+    "content_summary": "[DUPLICATE] Original document: 75da7a3f-093b-4dff-a0cf-44f0d15a52be",
+    "content_length": 49,
+    "chunks_count": 0,
+    "chunks_list": [],
+    "created_at": "2026-04-24T02:14:53.422933+00:00",
+    "updated_at": "2026-04-24T02:14:53.422933+00:00",
+    "file_path": "graph_filter_notes.txt",
+    "track_id": "insert_20260424_101453_4ef4d04d",
+    "error_msg": "Content already exists. Original doc_id: 75da7a3f-093b-4dff-a0cf-44f0d15a52be, Status: DocStatus.PROCESSED",
+    "metadata": {
+      "is_duplicate": true,
+      "original_doc_id": "75da7a3f-093b-4dff-a0cf-44f0d15a52be",
+      "original_track_id": "insert_20260424_101450_663a2ef6"
+    }
+  },
+  "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1": {
+    "status": "processed",
+    "chunks_count": 1,
+    "chunks_list": [
+      "chunk-3317d1ab02cc65a25adf9d368924d824"
+    ],
+    "content_summary": "Congestion control improves throughput stability.",
+    "content_length": 49,
+    "created_at": "2026-04-24T02:41:45.401547+00:00",
+    "updated_at": "2026-04-24T10:41:48+00:00",
+    "file_path": "graph_filter_notes.txt",
+    "track_id": "insert_20260424_104145_aee08c03",
+    "metadata": {
+      "processing_start_time": 1776998505,
+      "processing_end_time": 1776998508
+    },
+    "multimodal_processed": true
+  },
+  "dup-9e1ba47bda2808a1c7b89429635834e5": {
+    "status": "failed",
+    "content_summary": "[DUPLICATE] Original document: 937b3fad-7fcc-4d3c-946d-6e47e3fb51d1",
+    "content_length": 49,
+    "chunks_count": 0,
+    "chunks_list": [],
+    "created_at": "2026-04-24T02:41:48.744328+00:00",
+    "updated_at": "2026-04-24T02:41:48.744328+00:00",
+    "file_path": "graph_filter_notes.txt",
+    "track_id": "insert_20260424_104148_52f1351c",
+    "error_msg": "Content already exists. Original doc_id: 937b3fad-7fcc-4d3c-946d-6e47e3fb51d1, Status: DocStatus.PROCESSED",
+    "metadata": {
+      "is_duplicate": true,
+      "original_doc_id": "937b3fad-7fcc-4d3c-946d-6e47e3fb51d1",
+      "original_track_id": "insert_20260424_104145_aee08c03"
+    }
   }
 }

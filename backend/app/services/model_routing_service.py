@@ -219,7 +219,12 @@ def _resolve_reranker(config: Mapping[str, Any]) -> dict[str, Any]:
         "provider": effective,
         "model": model,
         "api_base": _normalize_base(_cfg(config, "reranker_api_base", settings.RERANKER_API_BASE)) if effective == "api" else None,
-        "api_key_configured": bool(settings.RERANKER_API_KEY or settings.EFFECTIVE_LLM_API_KEY) if effective == "api" else None,
+        "api_key_configured": bool(
+            settings.RERANKER_API_KEY
+            or settings.EFFECTIVE_EMBEDDING_API_KEY
+            or settings.EFFECTIVE_EXTRACT_API_KEY
+            or settings.EFFECTIVE_LLM_API_KEY
+        ) if effective == "api" else None,
         "fallback_reason": fallback_reason,
     }
 

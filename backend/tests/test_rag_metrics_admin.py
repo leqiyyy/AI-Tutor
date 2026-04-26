@@ -55,6 +55,8 @@ def test_admin_rag_performance_metrics(client):
     assert "embedding_backend" in payload["distributions"]
     assert "vlm_backend" in payload["distributions"]
     assert "reranker_backend" in payload["distributions"]
+    assert "confidence_band" in payload["distributions"]
+    assert "grounding_level" in payload["distributions"]
 
     ablation = client.get("/api/v1/admin/rag-ablation", headers=admin_headers)
     assert ablation.status_code == 200
