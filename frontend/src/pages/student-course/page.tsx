@@ -1,22 +1,134 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import AIAssistant from './components/AIAssistant';
+import MyLearning from './components/MyLearning';
+import {
+  getKnowledgeGraphRootIds,
+  getVisibleKnowledgeGraph,
+  normalizeKnowledgeGraph,
+} from '@/lib/knowledge-graph';
+import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
+import { courseService } from '@/services/course';
+import { learningService } from '@/services/learning';
+import type {
+  CourseDiscussion,
+  CourseFaq,
+  KnowledgeGraphEdge,
+  KnowledgeGraphNode,
+  StudentCourseMaterial,
+  StudentCourseHomeData,
+  StudentCourseQuestion,
+  StudentCourseTask,
+} from '@/types/course';
+import type { FlashcardDeck, LearningMistake } from '@/types/learning';
+
+const EMPTY_STUDENT_HOME: StudentCourseHomeData = {
+  welcome: {
+    studentName: '',
+    weeklyStudyHours: '0小时',
+    weeklyGoalRemaining: '0小时',
+    courseProgress: 0,
+    streakDays: 0,
+    homeworkCompleted: '0/0',
+    learnedChapters: '0/0',
+    aiQuestions: '0次',
+  },
+  quickActions: [],
+  notices: [],
+  upcomingTasks: [],
+  todayUpdates: [],
+  classActivities: [],
+  milestones: [],
+  progress: {
+    percent: 0,
+    startDate: '',
+    endDate: '',
+  },
+};
+
+function StudentCourseEmptyState({
+  icon,
+  title,
+  description,
+}: {
+  icon: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center px-6 py-12 text-center text-gray-500">
+      <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gray-50 text-gray-400">
+        <i className={`${icon} text-2xl`}></i>
+      </div>
+      <div className="text-sm font-medium text-gray-700">{title}</div>
+      <div className="mt-1 max-w-sm text-xs leading-5 text-gray-400">{description}</div>
+    </div>
+  );
+}
+
+function createEmptyMistakeForm() {
+  return {
+    question: '',
+    chapter: '',
+    myAnswer: '',
+    correctAnswer: '',
+    analysis: '',
+  };
+}
+
+function createEmptyQuestionForm() {
+  return {
+    title: '',
+    content: '',
+    attachments: [] as File[],
+  };
+}
+
+function createEmptyDiscussionForm() {
+  return {
+    title: '',
+    content: '',
+  };
+}
+
+function createEmptyAiToTeacherForm() {
+  return {
+    title: '',
+    content: '',
+    aiAnswer: '',
+    reason: '',
+  };
+}
+
+function createEmptyDeckForm() {
+  return {
+    name: '',
+    cards: [{ front: '', back: '' }],
+  };
+}
 
 export default function StudentCourse() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const [activeSection, setActiveSection] = useState('home');
+  const { bootstrap, course, courseError } = useCourseBootstrap(id, 'student');
+  const courseId = course?.id ?? id ?? '1';
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [highlightedChapterId, setHighlightedChapterId] = useState<string | null>(null);
+  const [studentHome, setStudentHome] = useState<StudentCourseHomeData>(EMPTY_STUDENT_HOME);
 
   // 新增：课程资料相关状态
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [showAIAnalysisModal, setShowAIAnalysisModal] = useState(false);
   const [showKnowledgeGraphModal, setShowKnowledgeGraphModal] = useState(false);
-  const [currentFile, setCurrentFile] = useState<any>(null);
+  const [currentFile, setCurrentFile] = useState<StudentCourseMaterial | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [videoSpeed, setVideoSpeed] = useState('1.0');
+  const [courseMaterials, setCourseMaterials] = useState<StudentCourseMaterial[]>([]);
   const [expandedGraphNodes, setExpandedGraphNodes] = useState<string[]>(['root']);
+  const [graphNodes, setGraphNodes] = useState<KnowledgeGraphNode[]>([]);
+  const [graphEdges, setGraphEdges] = useState<KnowledgeGraphEdge[]>([]);
+  const [graphRootIds, setGraphRootIds] = useState<string[]>(['root']);
   const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
   const graphContainerRef = useRef<HTMLDivElement>(null);
 
@@ -28,168 +140,38 @@ export default function StudentCourse() {
   const [homeworkAnswers, setHomeworkAnswers] = useState<Record<number, string>>({});
   const [showMistakeDetailModal, setShowMistakeDetailModal] = useState(false);
   const [showAddMistakeModal, setShowAddMistakeModal] = useState(false);
-  const [currentMistake, setCurrentMistake] = useState<any>(null);
+  const [currentMistake, setCurrentMistake] = useState<LearningMistake | null>(null);
   const [mistakeFilter, setMistakeFilter] = useState('all');
-  const [newMistakeForm, setNewMistakeForm] = useState({
-    question: '',
-    chapter: '',
-    myAnswer: '',
-    correctAnswer: '',
-    analysis: ''
-  });
+  const [newMistakeForm, setNewMistakeForm] = useState(createEmptyMistakeForm);
 
   // 新增：互动空间相关状态
   const [expandedQuestions, setExpandedQuestions] = useState<number[]>([]);
   const [replyingToQuestion, setReplyingToQuestion] = useState<number | null>(null);
   const [questionReplyContent, setQuestionReplyContent] = useState('');
   const [showAddQuestionModal, setShowAddQuestionModal] = useState(false);
-  const [newQuestionForm, setNewQuestionForm] = useState({
-    title: '',
-    content: '',
-    attachments: [] as File[]
-  });
-  const [myQuestions, setMyQuestions] = useState([
-    {
-      id: 1,
-      title: 'TCP三次握手的第三次可以携带数据吗?',
-      content: '老师您好，我在学习TCP协议时，看到资料说第三次握手可以携带数据，但不太理解为什么前两次不能携带数据。能否详细解释一下原因？',
-      time: '2024-03-18 10:30',
-      status: 'answered',
-      replies: [
-        {
-          author: '王教授',
-          content: '是的，TCP三次握手的第三次握手可以携带数据。\n\n原因如下：\n• 第一次握手（SYN）：客户端发送SYN报文，此时连接尚未建立，不能携带数据\n• 第二次握手（SYN+ACK）：服务器回复SYN+ACK报文，连接仍未完全建立，不能携带数据\n• 第三次握手（ACK）：客户端发送ACK报文，此时连接已建立，可以携带数据\n\n这是因为前两次握手时连接尚未完全建立，而第三次握手时客户端已经确认服务器的接收能力，连接进入ESTABLISHED状态，因此可以开始传输应用层数据。',
-          time: '2024-03-18 14:20',
-          isTeacher: true
-        }
-      ]
-    },
-    {
-      id: 2,
-      title: '红黑树的左旋和右旋操作具体是如何实现的?',
-      content: '在学习红黑树时，对左旋和右旋操作的具体实现不太理解，能否提供一个详细的图解或代码示例？',
-      time: '2024-03-17 15:45',
-      status: 'pending',
-      replies: []
-    },
-    {
-      id: 3,
-      title: 'HTTP和HTTPS的主要区别是什么?',
-      content: '除了加密之外，HTTP和HTTPS在性能、端口等方面还有哪些区别？',
-      time: '2024-03-16 09:20',
-      status: 'answered',
-      replies: [
-        {
-          author: '王教授',
-          content: 'HTTP与HTTPS的主要区别包括：\n\n1. 安全性：HTTP是明文传输，HTTPS通过TLS/SSL加密传输\n2. 端口：HTTP默认使用80端口，HTTPS默认使用443端口\n3. 证书：HTTPS需要CA颁发的数字证书\n4. 性能：HTTPS因加密解密有轻微性能开销\n5. SEO：搜索引擎对HTTPS站点有更高的排名权重',
-          time: '2024-03-16 16:30',
-          isTeacher: true
-        }
-      ]
-    }
-  ]);
+  const [newQuestionForm, setNewQuestionForm] = useState(createEmptyQuestionForm);
+  const [myQuestions, setMyQuestions] = useState<StudentCourseQuestion[]>([]);
 
   const [expandedDiscussions, setExpandedDiscussions] = useState<number[]>([]);
   const [replyingToDiscussion, setReplyingToDiscussion] = useState<number | null>(null);
   const [discussionReplyContent, setDiscussionReplyContent] = useState('');
   const [showNewDiscussionModal, setShowNewDiscussionModal] = useState(false);
-  const [newDiscussionForm, setNewDiscussionForm] = useState({
-    title: '',
-    content: ''
-  });
-  const [discussions, setDiscussions] = useState([
-    {
-      id: 1,
-      student: '张三',
-      title: '关于OSI七层模型的理解',
-      content: '老师您好，我在学习OSI七层模型时，对于传输层和网络层的区别有些疑惑。传输层的TCP协议和网络层的IP协议在数据传输中分别起什么作用？它们之间是如何协作的？希望老师能详细讲解一下。',
-      replies: [
-        {
-          author: '李四',
-          content: '我也有同样的疑问，期待老师解答！',
-          time: '1小时前',
-          isStudent: true
-        },
-        {
-          author: '王五',
-          content: '我觉得传输层主要负责端到端的可靠传输，网络层负责路由选择。',
-          time: '50分钟前',
-          isStudent: true
-        }
-      ],
-      likes: 8,
-      time: '2小时前',
-      liked: false
-    },
-    {
-      id: 2,
-      student: '李四',
-      title: '路由算法的实际应用场景',
-      content: '在课堂上学习了Dijkstra算法和Bellman-Ford算法，想请教老师这两种算法在实际网络中的应用场景有什么区别？哪种算法更适合大规模网络？',
-      replies: [],
-      likes: 5,
-      time: '5小时前',
-      liked: false
-    },
-    {
-      id: 3,
-      student: '王五',
-      title: 'TCP拥塞控制机制讨论',
-      content: 'TCP的拥塞控制包括慢启动、拥塞避免、快重传和快恢复四个阶段。我想和大家讨论一下，在实际网络环境中，这些机制是如何协同工作的？',
-      replies: [
-        {
-          author: '赵六',
-          content: '我认为慢启动阶段是指数增长，拥塞避免是线性增长，这样可以快速探测网络容量同时避免过度拥塞。',
-          time: '3小时前',
-          isStudent: true
-        }
-      ],
-      likes: 3,
-      time: '1天前',
-      liked: false
-    }
-  ]);
+  const [newDiscussionForm, setNewDiscussionForm] = useState(createEmptyDiscussionForm);
+  const [discussions, setDiscussions] = useState<CourseDiscussion[]>([]);
 
   const [expandedFAQs, setExpandedFAQs] = useState<number[]>([]);
-  const [faqs, setFaqs] = useState([
-    {
-      id: 1,
-      title: '第5章高频问题解答',
-      date: '2024-03-10',
-      views: 156,
-      content: '本次集中答疑主要针对第5章传输层的高频问题进行解答：\n\n1. TCP三次握手和四次挥手的详细过程\n2. TCP拥塞控制算法的工作原理\n3. UDP协议的应用场景\n4. 滑动窗口机制的实现细节\n\n详细内容请查看附件文档。',
-      attachments: ['第5章答疑汇总.pdf']
-    },
-    {
-      id: 2,
-      title: 'TCP协议常见疑问',
-      date: '2024-03-05',
-      views: 142,
-      content: '针对同学们在学习TCP协议时遇到的常见问题进行统一解答：\n\n1. 为什么需要三次握手？两次不行吗？\n2. TIME_WAIT状态的作用是什么？\n3. TCP如何保证可靠传输？\n4. 粘包问题如何解决？',
-      attachments: []
-    },
-    {
-      id: 3,
-      title: '期中考试答疑汇总',
-      date: '2024-02-28',
-      views: 189,
-      content: '期中考试前的集中答疑内容汇总，包括：\n\n1. 各层协议的主要功能\n2. 常见网络设备的工作层次\n3. 子网划分的计算方法\n4. 路由算法的比较',
-      attachments: ['期中考试复习要点.pdf', '历年真题解析.pdf']
-    }
-  ]);
+  const [faqs, setFaqs] = useState<CourseFaq[]>([]);
 
   const [showAIToTeacherModal, setShowAIToTeacherModal] = useState(false);
-  const [aiToTeacherForm, setAiToTeacherForm] = useState({
-    title: '',
-    content: '',
-    aiAnswer: '',
-    reason: ''
-  });
+  const [aiToTeacherForm, setAiToTeacherForm] = useState(createEmptyAiToTeacherForm);
 
   const questionAttachmentRef = useRef<HTMLInputElement>(null);
 
   // 模拟作业数据
-  const [homeworks, setHomeworks] = useState([
+  const [examCountdown, setExamCountdown] = useState<number | null>(null);
+  const examTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const [homeworks, setHomeworks] = useState<StudentCourseTask[]>([
     { 
       id: 'hw-tree-binary', 
       title: '第5章树与二叉树课后作业', 
@@ -218,12 +200,19 @@ export default function StudentCourse() {
     { 
       id: 'exam-midterm-os', 
       title: '操作系统期中考试', 
-      deadline: '明天 14:00', 
+      startTime: '明天 14:00',
+      deadline: '明天 16:00', 
+      duration: 90,
       status: 'pending', 
       score: null, 
       urgent: false, 
       isExam: true,
-      questions: []
+      questions: [
+        { id: 1, content: '请简述进程与线程的区别，并说明在什么场景下优先选择多线程而非多进程。', type: 'text', answer: '' },
+        { id: 2, content: '操作系统的四种进程调度算法各有什么优缺点？请结合实际场景分析。', type: 'text', answer: '' },
+        { id: 3, content: '什么是死锁？产生死锁的四个必要条件是什么？请给出一种预防死锁的方法。', type: 'text', answer: '' },
+        { id: 4, content: '请说明页面置换算法（FIFO、LRU、OPT）的工作原理，并比较其优劣。', type: 'text', answer: '' },
+      ]
     },
     { 
       id: 'hw-stack-queue', 
@@ -263,86 +252,17 @@ export default function StudentCourse() {
     }
   ]);
 
-  // 模拟错题本数据
-  const [mistakes, setMistakes] = useState([
-    { 
-      id: 1, 
-      question: 'TCP三次握手过程中，第二次握手发送的标志位是？', 
-      chapter: '第5章 传输层', 
-      wrongCount: 2,
-      myAnswer: 'SYN',
-      correctAnswer: 'SYN+ACK',
-      analysis: '第二次握手时，服务器需要同时发送SYN和ACK标志位，表示同意建立连接并确认收到客户端的SYN。',
-      addTime: '2024-03-10',
-      lastPracticeTime: '2024-03-15',
-      mastered: false
-    },
-    { 
-      id: 2, 
-      question: '红黑树的左旋和右旋操作具体是如何实现的？', 
-      chapter: '第7章 树', 
-      wrongCount: 1,
-      myAnswer: '将节点向左移动',
-      correctAnswer: '左旋是将节点的右子节点提升为新的根节点，原节点成为新根的左子节点；右旋相反。',
-      analysis: '旋转操作是红黑树保持平衡的关键。左旋和右旋是对称的操作，需要正确处理节点之间的指针关系。',
-      addTime: '2024-03-12',
-      lastPracticeTime: '2024-03-16',
-      mastered: false
-    },
-    { 
-      id: 3, 
-      question: '进程调度算法中，时间片轮转的优缺点是？', 
-      chapter: '第4章 进程管理', 
-      wrongCount: 1,
-      myAnswer: '优点是公平，缺点是效率低',
-      correctAnswer: '优点：公平性好，响应时间短；缺点：上下文切换开销大，时间片大小难以确定。',
-      analysis: '时间片轮转算法是一种抢占式调度算法，需要权衡公平性和效率。时间片太小会导致频繁切换，太大则退化为先来先服务。',
-      addTime: '2024-03-08',
-      lastPracticeTime: '2024-03-14',
-      mastered: true
-    }
-  ]);
+  const [mistakes, setMistakes] = useState<LearningMistake[]>([]);
 
   // 新增：学习闪卡相关状态
   const [showCreateDeckModal, setShowCreateDeckModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showStudyModal, setShowStudyModal] = useState(false);
-  const [currentDeck, setCurrentDeck] = useState<any>(null);
+  const [currentDeck, setCurrentDeck] = useState<FlashcardDeck | null>(null);
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
   const [isCardFlipped, setIsCardFlipped] = useState(false);
-  const [newDeckForm, setNewDeckForm] = useState({
-    name: '',
-    cards: [{ front: '', back: '' }]
-  });
-  const [decks, setDecks] = useState([
-    { id: 1, name: '第5章 传输层', cards: 45, mastered: 32, learning: 10, new: 3, nextReview: '今天', cardList: [
-      { front: 'TCP三次握手的三个步骤是什么？', back: '1. SYN：客户端发送SYN报文\n2. SYN+ACK：服务器回复SYN+ACK报文\n3. ACK：客户端发送ACK报文，连接建立' },
-      { front: 'TCP拥塞控制的四个算法是什么？', back: '1. 慢启动（Slow Start）\n2. 拥塞避免（Congestion Avoidance）\n3. 快速重传（Fast Retransmit）\n4. 快速恢复（Fast Recovery）' },
-      { front: 'UDP协议的特点有哪些？', back: '1. 无连接\n2. 不可靠传输\n3. 面向报文\n4. 无拥塞控制\n5. 支持一对一、一对多、多对多通信' }
-    ]},
-    { id: 2, name: '第4章 网络层', cards: 38, mastered: 28, learning: 8, new: 2, nextReview: '明天', cardList: [
-      { front: 'IP地址分为哪几类？', back: 'A类：1.0.0.0 ~ 126.255.255.255\nB类：128.0.0.0 ~ 191.255.255.255\nC类：192.0.0.0 ~ 223.255.255.255\nD类：224.0.0.0 ~ 239.255.255.255（组播）\nE类：240.0.0.0 ~ 255.255.255.255（保留）' },
-      { front: '子网掩码的作用是什么？', back: '子网掩码用于将IP地址划分为网络部分和主机部分，通过与IP地址进行按位与运算，可以得到网络地址。' }
-    ]},
-    { id: 3, name: '第3章 数据链路层', cards: 42, mastered: 35, learning: 5, new: 2, nextReview: '2天后', cardList: [] },
-    { id: 4, name: 'TCP协议专题', cards: 28, mastered: 20, learning: 6, new: 2, nextReview: '今天', cardList: [] },
-    { id: 5, name: '路由算法', cards: 25, mastered: 18, learning: 5, new: 2, nextReview: '3天后', cardList: [] },
-    { id: 6, name: '我的自定义卡组', cards: 15, mastered: 8, learning: 5, new: 2, nextReview: '今天', cardList: [] }
-  ]);
-
-  // 新增：我的学习相关状态
-  const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
-  const [showMonthlyReportModal, setShowMonthlyReportModal] = useState(false);
-  const [showExportDataModal, setShowExportDataModal] = useState(false);
-  const [exportFormat, setExportFormat] = useState('csv');
-  const [exportFields, setExportFields] = useState({
-    studyTime: true,
-    homework: true,
-    aiQuestions: true,
-    attendance: true,
-    grades: true
-  });
-
+  const [newDeckForm, setNewDeckForm] = useState(createEmptyDeckForm);
+  const [decks, setDecks] = useState<FlashcardDeck[]>([]);
   // 处理URL参数，自动跳转到对应模块
   useEffect(() => {
     const section = searchParams.get('section');
@@ -380,7 +300,7 @@ export default function StudentCourse() {
   }, [searchParams]);
 
   // 新增：预览文件
-  const handlePreviewFile = (file: any) => {
+  const handlePreviewFile = (file: StudentCourseMaterial) => {
     setCurrentFile(file);
     setShowPreviewModal(true);
     
@@ -389,7 +309,7 @@ export default function StudentCourse() {
   };
 
   // 新增：下载文件
-  const handleDownloadFile = (file: any) => {
+  const handleDownloadFile = (file: StudentCourseMaterial) => {
     // 预留后端接口：下载文件
     console.log('下载文件API调用:', { fileId: file.id });
     
@@ -398,7 +318,7 @@ export default function StudentCourse() {
   };
 
   // 新增：AI解析文件
-  const handleAIAnalysis = (file: any) => {
+  const handleAIAnalysis = (file: StudentCourseMaterial) => {
     setCurrentFile(file);
     setShowAIAnalysisModal(true);
     
@@ -435,7 +355,7 @@ export default function StudentCourse() {
 
   // 新增：重置知识图谱
   const resetGraph = () => {
-    setExpandedGraphNodes(['root']);
+    setExpandedGraphNodes(graphRootIds);
     setIsGraphFullscreen(false);
   };
 
@@ -459,41 +379,127 @@ export default function StudentCourse() {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  // 知识图谱节点数据
-  const graphNodes = [
-    { id: 'root', label: '计算机网络', x: 400, y: 50, parent: null, color: '#14b8a6' },
-    { id: 'physical', label: '物理层', x: 200, y: 150, parent: 'root', color: '#3b82f6' },
-    { id: 'datalink', label: '数据链路层', x: 350, y: 150, parent: 'root', color: '#10b981' },
-    { id: 'network', label: '网络层', x: 500, y: 150, parent: 'root', color: '#8b5cf6' },
-    { id: 'transport', label: '传输层', x: 650, y: 150, parent: 'root', color: '#f59e0b' },
-    { id: 'application', label: '应用层', x: 800, y: 150, parent: 'root', color: '#ec4899' },
-    { id: 'tcp', label: 'TCP协议', x: 600, y: 250, parent: 'transport', color: '#f59e0b' },
-    { id: 'udp', label: 'UDP协议', x: 700, y: 250, parent: 'transport', color: '#f59e0b' },
-    { id: 'ip', label: 'IP协议', x: 450, y: 250, parent: 'network', color: '#8b5cf6' },
-    { id: 'routing', label: '路由算法', x: 550, y: 250, parent: 'network', color: '#8b5cf6' },
-    { id: 'http', label: 'HTTP', x: 750, y: 250, parent: 'application', color: '#ec4899' },
-    { id: 'dns', label: 'DNS', x: 850, y: 250, parent: 'application', color: '#ec4899' },
-  ];
+  useEffect(() => {
+    let mounted = true;
+
+    courseService
+      .getKnowledgeGraph(courseId, 'student')
+      .then((data) => {
+        if (!mounted) return;
+        const normalized = normalizeKnowledgeGraph(data);
+        const rootIds = getKnowledgeGraphRootIds(normalized);
+        setGraphNodes(normalized.nodes);
+        setGraphEdges(normalized.edges);
+        setGraphRootIds(rootIds);
+        setExpandedGraphNodes(rootIds);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setGraphNodes([]);
+        setGraphEdges([]);
+        setGraphRootIds([]);
+        setExpandedGraphNodes([]);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [courseId]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    courseService
+      .getStudentCourseMaterials(courseId)
+      .then((data) => {
+        if (mounted) setCourseMaterials(data.files);
+      })
+      .catch(() => {
+        if (mounted) setCourseMaterials([]);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [courseId]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    Promise.all([
+      courseService.getStudentCourseHome(courseId),
+      courseService.getStudentCourseTasks(courseId),
+      courseService.getStudentCourseQuestions(courseId),
+      courseService.getCourseDiscussions('student', courseId),
+      courseService.getCourseFaqs(courseId),
+    ])
+      .then(([homeData, tasksData, questionsData, discussionsData, faqsData]) => {
+        if (!mounted) return;
+        setStudentHome(homeData);
+        setHomeworks(tasksData.tasks);
+        setMyQuestions(questionsData.questions);
+        setDiscussions(discussionsData.discussions);
+        setFaqs(faqsData.faqs);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setStudentHome(EMPTY_STUDENT_HOME);
+        setHomeworks([]);
+        setMyQuestions([]);
+        setDiscussions([]);
+        setFaqs([]);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [courseId]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    Promise.all([
+      learningService.getMistakes(courseId),
+      learningService.getFlashcardDecks(courseId),
+    ])
+      .then(([mistakesData, decksData]) => {
+        if (!mounted) return;
+        setMistakes(mistakesData.mistakes);
+        setDecks(decksData.decks);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setMistakes([]);
+        setDecks([]);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [courseId]);
 
   // 获取可见的知识图谱节点
   const getVisibleGraphNodes = () => {
-    const visible = graphNodes.filter(node => {
-      if (node.parent === null) return true;
-      return expandedGraphNodes.includes(node.parent);
-    });
-    return visible;
+    return getVisibleKnowledgeGraph(
+      {
+        nodes: graphNodes,
+        edges: graphEdges,
+        meta: { rootNodeId: graphRootIds[0] ?? null },
+      },
+      expandedGraphNodes,
+    ).nodes;
   };
 
-  // 模拟课程数据
-  const courseData = {
-    1: { name: '计算机网络', teacher: '王教授', code: 'CS301' },
-    2: { name: '数据结构与算法', teacher: '李教授', code: 'CS201' },
-    3: { name: '操作系统原理', teacher: '张教授', code: 'CS302' },
-    4: { name: '数据库系统', teacher: '刘教授', code: 'CS303' },
-    5: { name: '软件工程', teacher: '陈教授', code: 'CS401' }
+  const getVisibleGraphEdges = () => {
+    return getVisibleKnowledgeGraph(
+      {
+        nodes: graphNodes,
+        edges: graphEdges,
+        meta: { rootNodeId: graphRootIds[0] ?? null },
+      },
+      expandedGraphNodes,
+    ).edges;
   };
-
-  const course = courseData[id as keyof typeof courseData] || { name: '未知课程', teacher: '未知教师', code: 'UNKNOWN' };
 
   // 新增：获取过滤后的任务列表
   const getFilteredHomeworks = () => {
@@ -513,22 +519,39 @@ export default function StudentCourse() {
     setCurrentHomework(homework);
     setHomeworkAnswers({});
     setShowHomeworkModal(true);
+
+    // 如果是考试且有答题时长，启动倒计时
+    if (homework.isExam && homework.duration) {
+      const totalSeconds = homework.duration * 60;
+      setExamCountdown(totalSeconds);
+      if (examTimerRef.current) clearInterval(examTimerRef.current);
+      examTimerRef.current = setInterval(() => {
+        setExamCountdown(prev => {
+          if (prev === null || prev <= 1) {
+            if (examTimerRef.current) clearInterval(examTimerRef.current);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      setExamCountdown(null);
+    }
     
     // 预留后端接口：获取作业详情
     console.log('获取作业详情API调用:', { homeworkId: homework.id });
   };
 
   // 新增：提交作业
-  const handleSubmitHomework = () => {
+  const handleSubmitHomework = async () => {
     if (Object.keys(homeworkAnswers).length < currentHomework.questions.length) {
       alert('请完成所有题目后再提交');
       return;
     }
 
-    // 预留后端接口：提交作业
-    console.log('提交作业API调用:', {
-      homeworkId: currentHomework.id,
-      answers: homeworkAnswers
+    await courseService.submitHomework(courseId, currentHomework.id, {
+      answers: homeworkAnswers,
+      taskType: currentHomework.isExam ? 'exam' : 'homework',
     });
 
     // 更新作业状态
@@ -536,7 +559,11 @@ export default function StudentCourse() {
       hw.id === currentHomework.id ? { ...hw, status: 'submitted' } : hw
     ));
 
-    alert('作业提交成功！等待教师批改。');
+    // 清除倒计时
+    if (examTimerRef.current) clearInterval(examTimerRef.current);
+    setExamCountdown(null);
+
+    alert(currentHomework.isExam ? '考试答卷已提交！等待成绩发布。' : '作业提交成功！等待教师批改。');
     setShowHomeworkModal(false);
     setCurrentHomework(null);
     setHomeworkAnswers({});
@@ -560,13 +587,13 @@ export default function StudentCourse() {
   };
 
   // 新增：查看错题详情
-  const handleViewMistake = (mistake: any) => {
+  const handleViewMistake = (mistake: LearningMistake) => {
     setCurrentMistake(mistake);
     setShowMistakeDetailModal(true);
   };
 
   // 新增：重新练习错题
-  const handlePracticeMistake = (mistake: any) => {
+  const handlePracticeMistake = (mistake: LearningMistake) => {
     // 预留后端接口：开始练习错题
     console.log('开始练习错题API调用:', { mistakeId: mistake.id });
     
@@ -574,49 +601,33 @@ export default function StudentCourse() {
   };
 
   // 新增：标记错题为已掌握
-  const handleMarkMastered = (mistakeId: number) => {
+  const handleMarkMastered = async (mistakeId: number) => {
+    await learningService.markMistakeMastered(courseId, mistakeId);
     setMistakes(prev => prev.map(m => 
       m.id === mistakeId ? { ...m, mastered: true, lastPracticeTime: new Date().toISOString().split('T')[0] } : m
     ));
-    
-    // 预留后端接口：更新错题状态
-    console.log('更新错题状态API调用:', { mistakeId, mastered: true });
   };
 
   // 新增：添加错题
-  const handleAddMistake = () => {
+  const handleAddMistake = async () => {
     if (!newMistakeForm.question.trim() || !newMistakeForm.chapter.trim()) {
       alert('请至少填写题目和章节');
       return;
     }
 
-    const newMistake = {
-      id: Date.now(),
+    const newMistake = await learningService.createMistake(courseId, {
       question: newMistakeForm.question,
       chapter: newMistakeForm.chapter,
-      wrongCount: 1,
       myAnswer: newMistakeForm.myAnswer,
       correctAnswer: newMistakeForm.correctAnswer,
       analysis: newMistakeForm.analysis,
-      addTime: new Date().toISOString().split('T')[0],
-      lastPracticeTime: new Date().toISOString().split('T')[0],
-      mastered: false
-    };
+    });
 
     setMistakes([newMistake, ...mistakes]);
 
-    // 预留后端接口：添加错题
-    console.log('添加错题API调用:', newMistake);
-
     alert('错题添加成功！');
     setShowAddMistakeModal(false);
-    setNewMistakeForm({
-      question: '',
-      chapter: '',
-      myAnswer: '',
-      correctAnswer: '',
-      analysis: ''
-    });
+    setNewMistakeForm(createEmptyMistakeForm());
   };
 
   // 新增：切换问题展开状态
@@ -641,11 +652,15 @@ export default function StudentCourse() {
   };
 
   // 新增：提交问题回复
-  const submitQuestionReply = (questionId: number) => {
+  const submitQuestionReply = async (questionId: number) => {
     if (!questionReplyContent.trim()) return;
 
     const now = new Date();
     const timeStr = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+
+    await courseService.replyStudentQuestion(courseId, questionId, {
+      content: questionReplyContent,
+    });
 
     setMyQuestions(prev => prev.map(q => {
       if (q.id === questionId) {
@@ -662,22 +677,22 @@ export default function StudentCourse() {
       return q;
     }));
 
-    // 预留后端接口
-    console.log('提交问题回复API调用:', {
-      questionId,
-      content: questionReplyContent
-    });
-
     setReplyingToQuestion(null);
     setQuestionReplyContent('');
   };
 
   // 新增：添加新提问
-  const handleAddQuestion = () => {
+  const handleAddQuestion = async () => {
     if (!newQuestionForm.title.trim() || !newQuestionForm.content.trim()) {
       alert('请填写完整的提问标题和内容');
       return;
     }
+
+    await courseService.createStudentQuestion(courseId, {
+      title: newQuestionForm.title,
+      content: newQuestionForm.content,
+      attachments: newQuestionForm.attachments.map((file) => file.name),
+    });
 
     const now = new Date();
     const timeStr = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
@@ -693,16 +708,9 @@ export default function StudentCourse() {
 
     setMyQuestions([newQuestion, ...myQuestions]);
 
-    // 预留后端接口
-    console.log('添加新提问API调用:', {
-      title: newQuestionForm.title,
-      content: newQuestionForm.content,
-      attachments: newQuestionForm.attachments
-    });
-
     alert('提问提交成功！等待教师回复。');
     setShowAddQuestionModal(false);
-    setNewQuestionForm({ title: '', content: '', attachments: [] });
+    setNewQuestionForm(createEmptyQuestionForm());
   };
 
   // 新增：处理提问附件上传
@@ -744,11 +752,15 @@ export default function StudentCourse() {
   };
 
   // 新增：提交讨论回复
-  const submitDiscussionReply = (discussionId: number) => {
+  const submitDiscussionReply = async (discussionId: number) => {
     if (!discussionReplyContent.trim()) return;
 
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+
+    await courseService.replyDiscussion('student', courseId, discussionId, {
+      content: discussionReplyContent,
+    });
 
     setDiscussions(prev => prev.map(d => {
       if (d.id === discussionId) {
@@ -765,18 +777,13 @@ export default function StudentCourse() {
       return d;
     }));
 
-    // 预留后端接口
-    console.log('提交讨论回复API调用:', {
-      discussionId,
-      content: discussionReplyContent
-    });
-
     setReplyingToDiscussion(null);
     setDiscussionReplyContent('');
   };
 
   // 新增：点赞讨论
-  const toggleLikeDiscussion = (discussionId: number) => {
+  const toggleLikeDiscussion = async (discussionId: number) => {
+    await courseService.toggleDiscussionLike('student', courseId, discussionId);
     setDiscussions(prev => prev.map(d => {
       if (d.id === discussionId) {
         return {
@@ -787,17 +794,19 @@ export default function StudentCourse() {
       }
       return d;
     }));
-
-    // 预留后端接口
-    console.log('点赞讨论API调用:', { discussionId });
   };
 
   // 新增：发布新讨论
-  const handlePublishDiscussion = () => {
+  const handlePublishDiscussion = async () => {
     if (!newDiscussionForm.title.trim() || !newDiscussionForm.content.trim()) {
       alert('请填写完整的讨论标题和内容');
       return;
     }
+
+    await courseService.createDiscussion('student', courseId, {
+      title: newDiscussionForm.title,
+      content: newDiscussionForm.content,
+    });
 
     const newDiscussion = {
       id: Date.now(),
@@ -812,15 +821,9 @@ export default function StudentCourse() {
 
     setDiscussions([newDiscussion, ...discussions]);
 
-    // 预留后端接口
-    console.log('发布新讨论API调用:', {
-      title: newDiscussionForm.title,
-      content: newDiscussionForm.content
-    });
-
     alert('讨论发布成功！');
     setShowNewDiscussionModal(false);
-    setNewDiscussionForm({ title: '', content: '' });
+    setNewDiscussionForm(createEmptyDiscussionForm());
   };
 
   // 新增：切换FAQ展开状态
@@ -833,23 +836,22 @@ export default function StudentCourse() {
   };
 
   // 新增：申请AI转人工
-  const handleAIToTeacherRequest = () => {
+  const handleAIToTeacherRequest = async () => {
     if (!aiToTeacherForm.title.trim() || !aiToTeacherForm.content.trim() || !aiToTeacherForm.reason.trim()) {
       alert('请填写完整的申请信息');
       return;
     }
 
-    // 预留后端接口
-    console.log('AI转人工申请API调用:', {
+    await courseService.requestTeacherHelp(courseId, {
       title: aiToTeacherForm.title,
       content: aiToTeacherForm.content,
       aiAnswer: aiToTeacherForm.aiAnswer,
-      reason: aiToTeacherForm.reason
+      reason: aiToTeacherForm.reason,
     });
 
     alert('申请已提交！教师将尽快为您解答。');
     setShowAIToTeacherModal(false);
-    setAiToTeacherForm({ title: '', content: '', aiAnswer: '', reason: '' });
+    setAiToTeacherForm(createEmptyAiToTeacherForm());
   };
 
   // 新增：开始今日复习
@@ -872,7 +874,7 @@ export default function StudentCourse() {
   };
 
   // 新增：开始学习卡组
-  const handleStartStudy = (deck: any) => {
+  const handleStartStudy = (deck: FlashcardDeck) => {
     setCurrentDeck(deck);
     setCurrentCardIndex(0);
     setIsCardFlipped(false);
@@ -888,12 +890,13 @@ export default function StudentCourse() {
   };
 
   // 新增：回答卡片（SRS算法）
-  const handleAnswerCard = (difficulty: 'forget' | 'hard' | 'good' | 'easy') => {
-    // 预留后端接口：提交卡片回答
-    console.log('提交卡片回答API调用:', {
+  const handleAnswerCard = async (difficulty: 'forget' | 'hard' | 'good' | 'easy') => {
+    if (!currentDeck) return;
+
+    await learningService.submitFlashcardReview(courseId, {
       deckId: currentDeck.id,
       cardIndex: currentCardIndex,
-      difficulty
+      difficulty,
     });
 
     // 移动到下一张卡片
@@ -911,7 +914,7 @@ export default function StudentCourse() {
   };
 
   // 新增：创建卡组
-  const handleCreateDeck = () => {
+  const handleCreateDeck = async () => {
     if (!newDeckForm.name.trim()) {
       alert('请输入卡组名称');
       return;
@@ -923,25 +926,16 @@ export default function StudentCourse() {
       return;
     }
 
-    const newDeck = {
-      id: Date.now(),
+    const newDeck = await learningService.createFlashcardDeck(courseId, {
       name: newDeckForm.name,
-      cards: validCards.length,
-      mastered: 0,
-      learning: 0,
-      new: validCards.length,
-      nextReview: '今天',
-      cardList: validCards
-    };
+      cards: validCards,
+    });
 
     setDecks([newDeck, ...decks]);
 
-    // 预留后端接口：创建卡组
-    console.log('创建卡组API调用:', newDeck);
-
     alert('卡组创建成功！');
     setShowCreateDeckModal(false);
-    setNewDeckForm({ name: '', cards: [{ front: '', back: '' }] });
+    setNewDeckForm(createEmptyDeckForm());
   };
 
   // 新增：添加卡片到表单
@@ -971,48 +965,7 @@ export default function StudentCourse() {
     setNewDeckForm({ ...newDeckForm, cards: updatedCards });
   };
 
-  // 新增：生成周报
-  const handleGenerateWeeklyReport = () => {
-    setShowWeeklyReportModal(true);
-    
-    // 预留后端接口：生成周报
-    console.log('生成周报API调用:', { courseId: id, type: 'weekly' });
-  };
 
-  // 新增：生成月报
-  const handleGenerateMonthlyReport = () => {
-    setShowMonthlyReportModal(true);
-    
-    // 预留后端接口：生成月报
-    console.log('生成月报API调用:', { courseId: id, type: 'monthly' });
-  };
-
-  // 新增：导出数据
-  const handleExportData = () => {
-    setShowExportDataModal(true);
-  };
-
-  // 新增：确认导出
-  const handleConfirmExport = () => {
-    const selectedFields = Object.entries(exportFields)
-      .filter(([_, selected]) => selected)
-      .map(([field]) => field);
-
-    if (selectedFields.length === 0) {
-      alert('请至少选择一个导出字段');
-      return;
-    }
-
-    // 预留后端接口：导出数据
-    console.log('导出数据API调用:', {
-      courseId: id,
-      format: exportFormat,
-      fields: selectedFields
-    });
-
-    alert(`正在导出${exportFormat.toUpperCase()}格式的数据...`);
-    setShowExportDataModal(false);
-  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1028,7 +981,10 @@ export default function StudentCourse() {
               <div className="h-6 w-px bg-gray-300"></div>
               <div>
                 <div className="text-sm font-semibold text-gray-900">{course.name}</div>
-                <div className="text-xs text-gray-500">{course.teacher} · {course.code}</div>
+                  <div className="text-xs text-gray-500">
+                    {course.teacher} · {course.code}
+                    {bootstrap && ` · 进度 ${bootstrap.completionRate}% · 未读 ${bootstrap.unreadCount}`}
+                  </div>
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -1077,116 +1033,245 @@ export default function StudentCourse() {
 
       {/* 右侧内容区 */}
       <main className="ml-56 pt-16 p-6">
+        {courseError && (
+          <div className="mx-auto mb-4 max-w-6xl rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-700">
+            {courseError}
+          </div>
+        )}
         {activeSection === 'home' && (
           <div className="max-w-6xl mx-auto space-y-5">
-            <h1 className="text-xl font-bold text-gray-900">班级首页</h1>
-
-            {/* 个人进度环 */}
-            <div className="bg-white rounded-lg p-5 border border-gray-200">
-              <div className="flex items-center gap-6">
-                <div className="relative w-32 h-32">
-                  <svg className="w-full h-full transform -rotate-90">
-                    <circle cx="64" cy="64" r="56" fill="none" stroke="#e5e7eb" strokeWidth="8" />
-                    <circle cx="64" cy="64" r="56" fill="none" stroke="#14b8a6" strokeWidth="8" strokeDasharray="351.86" strokeDashoffset="87.97" strokeLinecap="round" />
-                  </svg>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <div className="text-2xl font-bold text-gray-900">75%</div>
-                    <div className="text-xs text-gray-500">总体进度</div>
+            {/* 顶部 Banner：个人欢迎卡 */}
+            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-600 via-teal-500 to-cyan-500 p-6 text-white">
+              <div className="absolute right-0 top-0 w-72 h-full opacity-10">
+                <svg viewBox="0 0 300 200" className="w-full h-full" fill="none">
+                  <circle cx="250" cy="50" r="120" fill="white"/>
+                  <circle cx="80" cy="180" r="80" fill="white"/>
+                </svg>
+              </div>
+              <div className="relative flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-medium opacity-80 mb-1">{course.name} {course.code} · {course.teacher}</div>
+                  <h1 className="text-2xl font-bold mb-2">你好，{studentHome.welcome.studentName} 👋</h1>
+                  <p className="text-sm opacity-90">本周已学习 <strong>{studentHome.welcome.weeklyStudyHours}</strong>，继续保持，距目标还差 <strong>{studentHome.welcome.weeklyGoalRemaining}</strong></p>
+                  <div className="mt-3 flex items-center gap-3">
+                    <div className="flex items-center gap-1.5 bg-white/20 rounded-full px-3 py-1 text-xs font-medium">
+                      <i className="ri-time-line"></i> 课程进度 {studentHome.welcome.courseProgress}%
+                    </div>
+                    <div className="flex items-center gap-1.5 bg-white/20 rounded-full px-3 py-1 text-xs font-medium">
+                      <i className="ri-fire-line"></i> 已连续打卡 {studentHome.welcome.streakDays} 天
+                    </div>
                   </div>
                 </div>
-                <div className="flex-1 grid grid-cols-3 gap-4">
-                  <div className="text-center p-3 rounded-lg bg-blue-50">
-                    <div className="text-xl font-bold text-blue-600">12/15</div>
-                    <div className="text-xs text-gray-600 mt-1">已完成作业</div>
+                <div className="flex-shrink-0 flex items-center gap-5">
+                  {/* 进度环 */}
+                  <div className="relative w-28 h-28">
+                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 112 112">
+                      <circle cx="56" cy="56" r="48" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="8" />
+                      <circle cx="56" cy="56" r="48" fill="none" stroke="white" strokeWidth="8"
+                        strokeDasharray="301.59" strokeDashoffset={301.59 * (1 - studentHome.welcome.courseProgress / 100)} strokeLinecap="round" />
+                    </svg>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <div className="text-2xl font-bold">{studentHome.welcome.courseProgress}%</div>
+                      <div className="text-xs opacity-80">总进度</div>
+                    </div>
                   </div>
-                  <div className="text-center p-3 rounded-lg bg-green-50">
-                    <div className="text-xl font-bold text-green-600">28/32</div>
-                    <div className="text-xs text-gray-600 mt-1">已学章节</div>
-                  </div>
-                  <div className="text-center p-3 rounded-lg bg-purple-50">
-                    <div className="text-xl font-bold text-purple-600">47</div>
-                    <div className="text-xs text-gray-600 mt-1">AI提问次数</div>
+                  <div className="space-y-3">
+                    {[
+                      { val: studentHome.welcome.homeworkCompleted, label: '作业完成', icon: 'ri-task-line' },
+                      { val: studentHome.welcome.learnedChapters, label: '已学章节', icon: 'ri-book-open-line' },
+                      { val: studentHome.welcome.aiQuestions, label: 'AI提问', icon: 'ri-robot-line' },
+                    ].map((s, i) => (
+                      <div key={i} className="flex items-center gap-2 bg-white/15 rounded-lg px-3 py-1.5">
+                        <i className={`${s.icon} text-sm opacity-90`}></i>
+                        <span className="text-sm font-bold">{s.val}</span>
+                        <span className="text-xs opacity-75">{s.label}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-5">
+            {/* 快速入口 */}
+            <div className="grid grid-cols-4 gap-3">
+              {studentHome.quickActions.map((item, i) => (
+                <button
+                  key={i}
+                  onClick={() => setActiveSection(item.section)}
+                  className={`bg-gradient-to-br ${item.color} rounded-xl p-4 text-left hover:scale-[1.02] transition-transform cursor-pointer border border-white`}
+                >
+                  <div className={`w-9 h-9 flex items-center justify-center rounded-lg bg-white mb-3`}>
+                    <i className={`${item.icon} ${item.iconColor} text-lg`}></i>
+                  </div>
+                  <div className="text-sm font-semibold text-gray-900">{item.label}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{item.sub}</div>
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-3 gap-5">
               {/* 课程公告 */}
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">课程公告</h2>
-                <div className="space-y-3">
-                  {[
-                    { title: '期中考试安排通知', time: '2小时前', important: true },
-                    { title: '第6章学习资料已上传', time: '1天前', important: false },
-                    { title: '本周五集中答疑', time: '2天前', important: false }
-                  ].map((notice, index) => (
-                    <div key={index} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 cursor-pointer">
-                      <div className={`w-8 h-8 flex items-center justify-center rounded-lg flex-shrink-0 ${notice.important ? 'bg-red-50' : 'bg-blue-50'}`}>
-                        <i className={`text-base ${notice.important ? 'ri-error-warning-line text-red-600' : 'ri-notification-3-line text-blue-600'}`}></i>
+              <div className="col-span-2 bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-gray-900">课程公告</h2>
+                  <span className="text-xs text-teal-600 cursor-pointer hover:text-teal-700">全部公告</span>
+                </div>
+                <div className="divide-y divide-gray-50">
+                  {studentHome.notices.map((notice, index) => (
+                    <div key={index} className="flex items-start gap-3 px-5 py-3.5 hover:bg-gray-50 cursor-pointer">
+                      <div className={`flex-shrink-0 mt-0.5 w-16 text-center`}>
+                        <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full ${
+                          notice.important ? 'bg-red-100 text-red-600' :
+                          notice.tag === '资料' ? 'bg-green-100 text-green-700' :
+                          notice.tag === '答疑' ? 'bg-teal-100 text-teal-700' :
+                          'bg-gray-100 text-gray-600'
+                        }`}>{notice.tag}</span>
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium text-gray-900">{notice.title}</div>
-                        <div className="text-xs text-gray-500 mt-1">{notice.time}</div>
+                        <div className="text-sm font-medium text-gray-900 mb-0.5">{notice.title}</div>
+                        <div className="text-xs text-gray-500 leading-relaxed line-clamp-1">{notice.content}</div>
                       </div>
+                      <span className="text-xs text-gray-400 flex-shrink-0 mt-0.5">{notice.time}</span>
                     </div>
                   ))}
                 </div>
               </div>
 
-              {/* 最近更新 */}
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">最近更新</h2>
-                <div className="space-y-3">
-                  {[
-                    { type: 'material', title: '第6章应用层.pdf', time: '2小时前' },
-                    { type: 'homework', title: '第5章课后作业', time: '1天前' },
-                    { type: 'video', title: 'TCP拥塞控制讲解视频', time: '2天前' }
-                  ].map((update, index) => (
-                    <div key={index} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 cursor-pointer">
-                      <div className={`w-8 h-8 flex items-center justify-center rounded-lg flex-shrink-0 ${
-                        update.type === 'material' ? 'bg-green-50' :
-                        update.type === 'homework' ? 'bg-orange-50' :
-                        'bg-purple-50'
-                      }`}>
-                        <i className={`text-base ${
-                          update.type === 'material' ? 'ri-file-text-line text-green-600' :
-                          update.type === 'homework' ? 'ri-file-list-3-line text-orange-600' :
-                          'ri-video-line text-purple-600'
-                        }`}></i>
+              {/* 近期任务 & 同班动态 */}
+              <div className="space-y-5">
+                {/* 近期任务截止 */}
+                <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                  <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-gray-900">近期截止</h2>
+                    <button onClick={() => setActiveSection('tasks')} className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap">查看全部</button>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    {studentHome.upcomingTasks.map((task, i) => (
+                      <div key={i} className={`flex items-center gap-3 p-2.5 rounded-lg border ${task.urgent ? 'bg-red-50 border-red-100' : 'bg-gray-50 border-gray-100'}`}>
+                        <div className={`w-7 h-7 flex items-center justify-center rounded-md flex-shrink-0 ${task.urgent ? 'bg-red-100' : 'bg-white'}`}>
+                          <i className={`${task.icon} text-sm ${task.urgent ? 'text-red-600' : 'text-gray-500'}`}></i>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-gray-900 truncate">{task.title}</div>
+                          <div className={`text-xs mt-0.5 ${task.urgent ? 'text-red-500 font-medium' : 'text-gray-400'}`}>{task.deadline}</div>
+                        </div>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium text-gray-900">{update.title}</div>
-                        <div className="text-xs text-gray-500 mt-1">{update.time}</div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 今日更新 */}
+                <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                  <div className="px-5 py-4 border-b border-gray-100">
+                    <h2 className="text-sm font-semibold text-gray-900">今日更新</h2>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    {studentHome.todayUpdates.map((item, i) => (
+                      <div key={i} className="flex items-center gap-3 cursor-pointer hover:bg-gray-50 rounded-lg p-1.5 transition-colors">
+                        <div className={`w-7 h-7 flex items-center justify-center rounded-md flex-shrink-0 ${item.color}`}>
+                          <i className={`${item.icon} text-sm`}></i>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-gray-900 truncate">{item.title}</div>
+                        </div>
+                        <span className="text-xs text-gray-400 flex-shrink-0">{item.time}</span>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* 同班学习动态 */}
-            <div className="bg-white rounded-lg p-5 border border-gray-200">
-              <h2 className="text-base font-semibold text-gray-900 mb-4">同班学习动态</h2>
-              <div className="space-y-3">
-                {[
-                  { name: '张同学', action: '完成了第5章作业', time: '10分钟前' },
-                  { name: '王同学', action: '获得满分成就', time: '1小时前' },
-                  { name: '李同学', action: '提出了新问题', time: '2小时前' },
-                  { name: '刘同学', action: '完成了今日复习', time: '3小时前' }
-                ].map((activity, index) => (
-                  <div key={index} className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-50">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-teal-400 to-blue-500 flex items-center justify-center text-white text-xs font-medium flex-shrink-0">
-                      {activity.name[0]}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-gray-900">
-                        <span className="font-medium">{activity.name}</span> {activity.action}
+            {/* 同班学习动态 + 课程学习里程碑 */}
+            <div className="grid grid-cols-3 gap-5">
+              {/* 同班动态 */}
+              <div className="col-span-2 bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-gray-900">同班学习动态</h2>
+                  <span className="text-xs text-gray-400">实时更新</span>
+                </div>
+                <div className="p-4">
+                  <div className="space-y-3">
+                    {[
+                      ...studentHome.classActivities,
+                    ].map((activity, index) => (
+                      <div key={index} className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 transition-colors">
+                        <div className={`w-9 h-9 rounded-full bg-gradient-to-br ${activity.avatarBg} flex items-center justify-center text-white text-sm font-semibold flex-shrink-0`}>
+                          {activity.avatar}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-medium text-gray-900">{activity.name}</span>
+                            <i className={`${activity.icon} ${activity.iconColor} text-xs`}></i>
+                            <span className="text-sm text-gray-600">{activity.action}</span>
+                          </div>
+                          <div className="text-xs text-gray-400 mt-0.5">{activity.detail} · {activity.time}</div>
+                        </div>
                       </div>
-                      <div className="text-xs text-gray-500 mt-1">{activity.time}</div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* 学习里程碑 */}
+              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-100">
+                  <h2 className="text-sm font-semibold text-gray-900">学习里程碑</h2>
+                  <p className="text-xs text-gray-400 mt-0.5">课程节点与考核安排</p>
+                </div>
+                <div className="p-4">
+                  <div className="relative">
+                    <div className="absolute left-3.5 top-0 bottom-0 w-px bg-gray-100"></div>
+                    <div className="space-y-4">
+                      {studentHome.milestones.map((milestone, i) => (
+                        <div key={i} className="flex items-start gap-3 relative pl-1">
+                          <div className={`relative z-10 w-6 h-6 flex items-center justify-center rounded-full flex-shrink-0 border-2 ${
+                            milestone.done
+                              ? 'bg-green-500 border-green-500'
+                              : milestone.urgent
+                              ? 'bg-red-500 border-red-500 animate-pulse'
+                              : milestone.current
+                              ? 'bg-teal-500 border-teal-500'
+                              : 'bg-white border-gray-200'
+                          }`}>
+                            {milestone.done ? (
+                              <i className="ri-check-line text-white text-xs"></i>
+                            ) : milestone.urgent ? (
+                              <i className="ri-alarm-warning-line text-white text-xs"></i>
+                            ) : milestone.current ? (
+                              <div className="w-2 h-2 rounded-full bg-white"></div>
+                            ) : (
+                              <div className="w-2 h-2 rounded-full bg-gray-300"></div>
+                            )}
+                          </div>
+                          <div className="flex-1 pt-0.5">
+                            <div className={`text-xs font-medium ${milestone.done ? 'text-gray-400 line-through' : milestone.urgent ? 'text-red-600' : 'text-gray-900'}`}>
+                              {milestone.title}
+                            </div>
+                            <div className={`text-xs mt-0.5 ${milestone.done ? 'text-gray-300' : milestone.urgent ? 'text-red-400 font-medium' : 'text-gray-400'}`}>
+                              {milestone.date}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                ))}
+
+                  {/* 课程整体进度条 */}
+                  <div className="mt-5 pt-4 border-t border-gray-100">
+                    <div className="flex items-center justify-between text-xs text-gray-500 mb-2">
+                      <span>课程整体进度</span>
+                      <span className="font-semibold text-teal-600">{studentHome.progress.percent}%</span>
+                    </div>
+                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-teal-400 to-cyan-400 rounded-full transition-all duration-700" style={{ width: `${studentHome.progress.percent}%` }}></div>
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-gray-400 mt-1.5">
+                      <span>开课 {studentHome.progress.startDate}</span>
+                      <span>结课 {studentHome.progress.endDate}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1220,17 +1305,16 @@ export default function StudentCourse() {
             {/* 资料列表 */}
             <div className="bg-white rounded-lg border border-gray-200">
               <div className="divide-y divide-gray-100">
-                {[
-                  { id: 'chapter-1-intro', name: '第1章 计算机网络概述.pdf', type: 'pdf', size: '2.3 MB', date: '2024-01-15', views: 156 },
-                  { id: 'chapter-2-physical', name: '第2章 物理层.pptx', type: 'ppt', size: '5.8 MB', date: '2024-01-22', views: 142 },
-                  { id: 'chapter-3-datalink', name: '第3章 数据链路层.pdf', type: 'pdf', size: '3.1 MB', date: '2024-02-12', views: 134 },
-                  { id: 'chapter-4-network', name: '第4章 网络层.pptx', type: 'ppt', size: '6.5 MB', date: '2024-02-28', views: 167 },
-                  { id: 'chapter-5-tcp-congestion', name: '第5章 传输层-TCP拥塞控制.pdf', type: 'pdf', size: '4.2 MB', date: '2024-03-05', views: 189 },
-                  { id: 'tcp-video', name: 'TCP三次握手讲解.mp4', type: 'video', size: '45.2 MB', date: '2024-02-05', views: 189 },
-                  { id: 'network-code', name: '网络层协议分析代码.zip', type: 'code', size: '1.2 MB', date: '2024-02-20', views: 98 }
-                ].map((file, index) => (
+                {courseMaterials.length === 0 && (
+                  <StudentCourseEmptyState
+                    icon="ri-folder-open-line"
+                    title="暂无课程资料"
+                    description="后端返回空资料列表时会显示这里，后续教师上传资料后将自动展示。"
+                  />
+                )}
+                {courseMaterials.map((file) => (
                   <div 
-                    key={index} 
+                    key={file.id} 
                     id={`chapter-${file.id}`}
                     className={`flex items-center gap-4 px-5 py-4 hover:bg-gray-50 cursor-pointer transition-all ${
                       highlightedChapterId === file.id ? 'bg-teal-50 border-l-4 border-teal-500' : ''
@@ -1405,6 +1489,13 @@ export default function StudentCourse() {
                 </div>
               </div>
               <div className="divide-y divide-gray-100">
+                {getFilteredHomeworks().length === 0 && (
+                  <StudentCourseEmptyState
+                    icon="ri-task-line"
+                    title="暂无匹配任务"
+                    description="当前筛选下没有作业、考试或通知，后端返回空数组时页面会保持可用。"
+                  />
+                )}
                 {getFilteredHomeworks().map((homework, index) => (
                   <div 
                     key={index} 
@@ -1429,9 +1520,18 @@ export default function StudentCourse() {
                         {homework.title}
                         {homework.isExam && <span className="ml-2 px-2 py-0.5 text-xs font-medium text-purple-600 bg-purple-50 rounded">考试</span>}
                       </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        截止时间: {homework.deadline}
-                        {homework.score !== null && ` · 得分: ${homework.score}分`}
+                      <div className="text-xs text-gray-500 mt-1 space-x-2">
+                        {homework.isExam && (homework as any).startTime ? (
+                          <span>开放时间：{(homework as any).startTime} ~ {homework.deadline}</span>
+                        ) : (
+                          <span>截止时间: {homework.deadline}</span>
+                        )}
+                        {homework.isExam && (homework as any).duration && (
+                          <span className="inline-flex items-center gap-1 text-purple-600 font-medium">
+                            <i className="ri-timer-line"></i>答题时长 {(homework as any).duration} 分钟
+                          </span>
+                        )}
+                        {homework.score !== null && <span>· 得分: {homework.score}分</span>}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1487,6 +1587,13 @@ export default function StudentCourse() {
                 </div>
               </div>
               <div className="divide-y divide-gray-100">
+                {getFilteredMistakes().length === 0 && (
+                  <StudentCourseEmptyState
+                    icon="ri-bookmark-line"
+                    title="暂无错题记录"
+                    description="普通账号尚未产生错题时会显示这里，后续练习或手动添加后将展示错题。"
+                  />
+                )}
                 {getFilteredMistakes().map((mistake) => (
                   <div key={mistake.id} className="px-5 py-4 hover:bg-gray-50">
                     <div className="flex items-start gap-3">
@@ -1555,6 +1662,13 @@ export default function StudentCourse() {
                     </button>
                   </div>
                   <div className="divide-y divide-gray-100">
+                    {myQuestions.length === 0 && (
+                      <StudentCourseEmptyState
+                        icon="ri-question-answer-line"
+                        title="暂无提问"
+                        description="当前课程还没有提问记录，可以点击添加提问发起答疑。"
+                      />
+                    )}
                     {myQuestions.map((item) => (
                       <div key={item.id} className="px-5 py-4 hover:bg-gray-50">
                         <div className="flex items-start gap-3">
@@ -1683,6 +1797,13 @@ export default function StudentCourse() {
                     </button>
                   </div>
                   <div className="divide-y divide-gray-100">
+                    {discussions.length === 0 && (
+                      <StudentCourseEmptyState
+                        icon="ri-discuss-line"
+                        title="暂无讨论"
+                        description="当前班级还没有讨论帖，发起讨论后会显示在这里。"
+                      />
+                    )}
                     {discussions.map((discussion) => (
                       <div key={discussion.id} className="px-5 py-4 hover:bg-gray-50">
                         <div className="flex items-start gap-3">
@@ -1801,6 +1922,13 @@ export default function StudentCourse() {
                 <div className="bg-white rounded-lg p-5 border border-gray-200">
                   <h2 className="text-base font-semibold text-gray-900 mb-4">集中答疑</h2>
                   <div className="space-y-3">
+                    {faqs.length === 0 && (
+                      <StudentCourseEmptyState
+                        icon="ri-chat-smile-line"
+                        title="暂无集中答疑"
+                        description="教师发布集中答疑后会展示在这里。"
+                      />
+                    )}
                     {faqs.map((faq) => (
                       <div key={faq.id}>
                         <div 
@@ -1864,7 +1992,11 @@ export default function StudentCourse() {
           </div>
         )}
 
-        {activeSection === 'ai' && <AIAssistant />}
+        {activeSection === 'ai' && (
+          <div className="h-[calc(100vh-5.5rem)] min-h-[680px]">
+            <AIAssistant />
+          </div>
+        )}
 
         {activeSection === 'flashcards' && (
           <div className="max-w-6xl mx-auto space-y-5">
@@ -1900,6 +2032,15 @@ export default function StudentCourse() {
 
             {/* 卡组列表 */}
             <div className="grid grid-cols-3 gap-5">
+              {decks.length === 0 && (
+                <div className="col-span-3">
+                  <StudentCourseEmptyState
+                    icon="ri-flashlight-line"
+                    title="暂无闪卡卡组"
+                    description="创建卡组或后端返回推荐卡组后，会显示在这里。"
+                  />
+                </div>
+              )}
               {decks.map((deck) => (
                 <div key={deck.id} className="bg-white rounded-lg p-5 border border-gray-200 hover:shadow-lg transition-shadow">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">{deck.name}</h3>
@@ -1971,174 +2112,7 @@ export default function StudentCourse() {
           </div>
         )}
 
-        {activeSection === 'mylearning' && (
-          <div className="max-w-6xl mx-auto space-y-5">
-            <h1 className="text-xl font-bold text-gray-900">我的学习</h1>
-
-            <div className="grid grid-cols-3 gap-5">
-              {/* 能力雷达图 */}
-              <div className="col-span-2 bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">个人能力雷达图</h2>
-                <div className="flex items-center justify-center py-8">
-                  <div className="relative w-80 h-80">
-                    <svg viewBox="0 0 200 200" className="w-full h-full">
-                      <polygon points="100,20 170,60 170,140 100,180 30,140 30,60" fill="#f0fdfa" stroke="#14b8a6" strokeWidth="1" opacity="0.3"/>
-                      <polygon points="100,50 145,75 145,125 100,150 55,125 55,75" fill="#14b8a6" opacity="0.5"/>
-                      <line x1="100" y1="100" x2="100" y2="20" stroke="#e5e7eb" strokeWidth="1"/>
-                      <line x1="100" y1="100" x2="170" y2="60" stroke="#e5e7eb" strokeWidth="1"/>
-                      <line x1="100" y1="100" x2="170" y2="140" stroke="#e5e7eb" strokeWidth="1"/>
-                      <line x1="100" y1="100" x2="100" y2="180" stroke="#e5e7eb" strokeWidth="1"/>
-                      <line x1="100" y1="100" x2="30" y2="140" stroke="#e5e7eb" strokeWidth="1"/>
-                      <line x1="100" y1="100" x2="30" y2="60" stroke="#e5e7eb" strokeWidth="1"/>
-                      <text x="100" y="15" textAnchor="middle" className="text-xs fill-gray-600">物理层</text>
-                      <text x="175" y="65" textAnchor="start" className="text-xs fill-gray-600">数据链路层</text>
-                      <text x="175" y="145" textAnchor="start" className="text-xs fill-gray-600">网络层</text>
-                      <text x="100" y="195" textAnchor="middle" className="text-xs fill-gray-600">传输层</text>
-                      <text x="20" y="145" textAnchor="end" className="text-xs fill-gray-600">应用层</text>
-                      <text x="20" y="65" textAnchor="end" className="text-xs fill-gray-600">协议分析</text>
-                    </svg>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="text-center p-3 rounded-lg bg-teal-50">
-                    <div className="text-lg font-bold text-teal-600">85</div>
-                    <div className="text-xs text-gray-600 mt-1">物理层</div>
-                  </div>
-                  <div className="text-center p-3 rounded-lg bg-blue-50">
-                    <div className="text-lg font-bold text-blue-600">78</div>
-                    <div className="text-xs text-gray-600 mt-1">数据链路层</div>
-                  </div>
-                  <div className="text-center p-3 rounded-lg bg-green-50">
-                    <div className="text-lg font-bold text-green-600">72</div>
-                    <div className="text-xs text-gray-600 mt-1">网络层</div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 学习统计 */}
-              <div className="space-y-5">
-                <div className="bg-white rounded-lg p-5 border border-gray-200">
-                  <h2 className="text-base font-semibold text-gray-900 mb-4">本周统计</h2>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm text-gray-600">学习时长</span>
-                        <span className="text-sm font-semibold text-gray-900">18.5h</span>
-                      </div>
-                      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-teal-500 rounded-full" style={{ width: '74%' }}></div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm text-gray-600">作业完成</span>
-                        <span className="text-sm font-semibold text-gray-900">92%</span>
-                      </div>
-                      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-green-500 rounded-full" style={{ width: '92%' }}></div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm text-gray-600">AI提问</span>
-                        <span className="text-sm font-semibold text-gray-900">47次</span>
-                      </div>
-                      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-500 rounded-full" style={{ width: '65%' }}></div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-lg p-5 border border-gray-200">
-                  <h2 className="text-base font-semibold text-gray-900 mb-4">学习报告</h2>
-                  <div className="space-y-2">
-                    <button 
-                      onClick={handleGenerateWeeklyReport}
-                      className="w-full px-3 py-2 text-sm font-medium text-gray-700 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                    >
-                      <i className="ri-file-text-line mr-2"></i>生成周报
-                    </button>
-                    <button 
-                      onClick={handleGenerateMonthlyReport}
-                      className="w-full px-3 py-2 text-sm font-medium text-gray-700 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                    >
-                      <i className="ri-file-chart-line mr-2"></i>生成月报
-                    </button>
-                    <button 
-                      onClick={handleExportData}
-                      className="w-full px-3 py-2 text-sm font-medium text-gray-700 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                    >
-                      <i className="ri-download-line mr-2"></i>导出数据
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* 学习日历热力图 */}
-            <div className="bg-white rounded-lg p-5 border border-gray-200">
-              <h2 className="text-base font-semibold text-gray-900 mb-4">学习日历</h2>
-              <div className="space-y-2">
-                {[0, 1, 2, 3, 4, 5, 6].map((week) => (
-                  <div key={week} className="flex items-center gap-1">
-                    {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].map((day) => {
-                      const intensity = Math.floor(Math.random() * 5);
-                      return (
-                        <div key={day} className={`w-3 h-3 rounded-sm cursor-pointer ${
-                          intensity === 0 ? 'bg-gray-100' :
-                          intensity === 1 ? 'bg-teal-100' :
-                          intensity === 2 ? 'bg-teal-200' :
-                          intensity === 3 ? 'bg-teal-400' :
-                          'bg-teal-600'
-                        }`} title={`${intensity}小时`}></div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-              <div className="flex items-center justify-between mt-4 text-xs text-gray-500">
-                <span>最近7个月学习活跃度</span>
-                <div className="flex items-center gap-2">
-                  <span>少</span>
-                  <div className="flex items-center gap-1">
-                    <div className="w-3 h-3 rounded-sm bg-gray-100"></div>
-                    <div className="w-3 h-3 rounded-sm bg-teal-100"></div>
-                    <div className="w-3 h-3 rounded-sm bg-teal-200"></div>
-                    <div className="w-3 h-3 rounded-sm bg-teal-400"></div>
-                    <div className="w-3 h-3 rounded-sm bg-teal-600"></div>
-                  </div>
-                  <span>多</span>
-                </div>
-              </div>
-            </div>
-
-            {/* 提问关键词云 */}
-            <div className="bg-white rounded-lg p-5 border border-gray-200">
-              <h2 className="text-base font-semibold text-gray-900 mb-4">提问历史关键词</h2>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { word: 'TCP', size: 'text-2xl', color: 'text-teal-600' },
-                  { word: '三次握手', size: 'text-xl', color: 'text-blue-600' },
-                  { word: '拥塞控制', size: 'text-lg', color: 'text-green-600' },
-                  { word: '路由算法', size: 'text-base', color: 'text-purple-600' },
-                  { word: 'IP地址', size: 'text-xl', color: 'text-orange-600' },
-                  { word: '子网划分', size: 'text-base', color: 'text-pink-600' },
-                  { word: 'UDP', size: 'text-lg', color: 'text-indigo-600' },
-                  { word: 'HTTP', size: 'text-base', color: 'text-red-600' },
-                  { word: 'DNS', size: 'text-lg', color: 'text-yellow-600' },
-                  { word: '滑动窗口', size: 'text-base', color: 'text-cyan-600' },
-                  { word: 'ARP', size: 'text-sm', color: 'text-gray-600' },
-                  { word: 'ICMP', size: 'text-sm', color: 'text-gray-600' }
-                ].map((keyword, index) => (
-                  <span key={index} className={`${keyword.size} ${keyword.color} font-medium cursor-pointer hover:opacity-70`}>
-                    {keyword.word}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        {activeSection === 'mylearning' && <MyLearning courseId={courseId} />}
 
         {/* 预览文件弹窗 */}
         {showPreviewModal && currentFile && (
@@ -2371,29 +2345,28 @@ export default function StudentCourse() {
                 <div className={`${isGraphFullscreen ? 'h-screen' : 'h-[600px]'} bg-gray-50 rounded-lg overflow-hidden relative`}>
                   <svg className="w-full h-full" viewBox="0 0 1000 300">
                     {/* 绘制连线 */}
-                    {getVisibleGraphNodes().map(node => {
-                      if (node.parent) {
-                        const parentNode = graphNodes.find(n => n.id === node.parent);
-                        if (parentNode && expandedGraphNodes.includes(node.parent)) {
-                          return (
-                            <line
-                              key={`line-${node.id}`}
-                              x1={parentNode.x}
-                              y1={parentNode.y}
-                              x2={node.x}
-                              y2={node.y}
-                              stroke="#d1d5db"
-                              strokeWidth="2"
-                            />
-                          );
-                        }
-                      }
-                      return null;
+                    {getVisibleGraphEdges().map(edge => {
+                      const sourceNode = graphNodes.find(n => n.id === edge.source);
+                      const targetNode = graphNodes.find(n => n.id === edge.target);
+                      if (!sourceNode || !targetNode) return null;
+
+                      return (
+                        <line
+                          key={edge.id}
+                          x1={sourceNode.x}
+                          y1={sourceNode.y}
+                          x2={targetNode.x}
+                          y2={targetNode.y}
+                          stroke={edge.color || '#d1d5db'}
+                          strokeWidth="2"
+                          strokeDasharray={edge.dashed ? '5 4' : undefined}
+                        />
+                      );
                     })}
                     
                     {/* 绘制节点 */}
                     {getVisibleGraphNodes().map(node => {
-                      const hasChildren = graphNodes.some(n => n.parent === node.id);
+                      const hasChildren = graphEdges.some(edge => edge.source === node.id);
                       const isExpanded = expandedGraphNodes.includes(node.id);
                       
                       return (
@@ -2484,17 +2457,47 @@ export default function StudentCourse() {
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">{currentHomework.title}</h2>
-                <button
-                  onClick={() => {
-                    setShowHomeworkModal(false);
-                    setCurrentHomework(null);
-                    setHomeworkAnswers({});
-                  }}
-                  className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
-                >
-                  <i className="ri-close-line text-xl"></i>
-                </button>
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">{currentHomework.title}</h2>
+                  {currentHomework.isExam && (currentHomework as any).startTime && (
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      开放时间：{(currentHomework as any).startTime} ~ {currentHomework.deadline}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-3">
+                  {/* 倒计时显示 */}
+                  {currentHomework.isExam && examCountdown !== null && (
+                    <div className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono font-bold text-sm ${
+                      examCountdown <= 300 ? 'bg-red-100 text-red-600' :
+                      examCountdown <= 600 ? 'bg-orange-100 text-orange-600' :
+                      'bg-teal-50 text-teal-700'
+                    }`}>
+                      <i className={`ri-timer-line text-base ${examCountdown <= 300 ? 'animate-pulse' : ''}`}></i>
+                      {(() => {
+                        const h = Math.floor(examCountdown / 3600);
+                        const m = Math.floor((examCountdown % 3600) / 60);
+                        const s = examCountdown % 60;
+                        return h > 0
+                          ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+                          : `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+                      })()}
+                      {examCountdown === 0 && <span className="ml-1 text-xs font-normal">时间到</span>}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => {
+                      if (examTimerRef.current) clearInterval(examTimerRef.current);
+                      setExamCountdown(null);
+                      setShowHomeworkModal(false);
+                      setCurrentHomework(null);
+                      setHomeworkAnswers({});
+                    }}
+                    className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <i className="ri-close-line text-xl"></i>
+                  </button>
+                </div>
               </div>
               
               <div className="flex-1 overflow-y-auto p-6">
@@ -2538,6 +2541,8 @@ export default function StudentCourse() {
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => {
+                      if (examTimerRef.current) clearInterval(examTimerRef.current);
+                      setExamCountdown(null);
                       setShowHomeworkModal(false);
                       setCurrentHomework(null);
                       setHomeworkAnswers({});
@@ -2812,13 +2817,7 @@ export default function StudentCourse() {
                 <button
                   onClick={() => {
                     setShowAddMistakeModal(false);
-                    setNewMistakeForm({
-                      question: '',
-                      chapter: '',
-                      myAnswer: '',
-                      correctAnswer: '',
-                      analysis: ''
-                    });
+                    setNewMistakeForm(createEmptyMistakeForm());
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
                 >
@@ -2913,7 +2912,7 @@ export default function StudentCourse() {
                 <button
                   onClick={() => {
                     setShowAddQuestionModal(false);
-                    setNewQuestionForm({ title: '', content: '', attachments: [] });
+                    setNewQuestionForm(createEmptyQuestionForm());
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
                 >
@@ -2968,7 +2967,7 @@ export default function StudentCourse() {
                 <button
                   onClick={() => {
                     setShowNewDiscussionModal(false);
-                    setNewDiscussionForm({ title: '', content: '' });
+                    setNewDiscussionForm(createEmptyDiscussionForm());
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
                 >
@@ -3055,7 +3054,7 @@ export default function StudentCourse() {
                 <button
                   onClick={() => {
                     setShowAIToTeacherModal(false);
-                    setAiToTeacherForm({ title: '', content: '', aiAnswer: '', reason: '' });
+                    setAiToTeacherForm(createEmptyAiToTeacherForm());
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
                 >
@@ -3151,7 +3150,7 @@ export default function StudentCourse() {
                 <button
                   onClick={() => {
                     setShowCreateDeckModal(false);
-                    setNewDeckForm({ name: '', cards: [{ front: '', back: '' }] });
+                    setNewDeckForm(createEmptyDeckForm());
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
                 >
@@ -3277,433 +3276,7 @@ export default function StudentCourse() {
           </div>
         )}
 
-        {/* 生成周报弹窗 */}
-        {showWeeklyReportModal && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">学习周报</h2>
-                <button
-                  onClick={() => setShowWeeklyReportModal(false)}
-                  className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
-                >
-                  <i className="ri-close-line text-xl"></i>
-                </button>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto p-6">
-                <div className="space-y-6">
-                  {/* 报告头部 */}
-                  <div className="text-center pb-6 border-b border-gray-200">
-                    <h3 className="text-2xl font-bold text-gray-900 mb-2">计算机网络 - 学习周报</h3>
-                    <div className="text-sm text-gray-600">2024年3月11日 - 2024年3月17日</div>
-                  </div>
 
-                  {/* 总体概览 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">总体概览</h4>
-                    <div className="grid grid-cols-4 gap-4">
-                      <div className="p-4 bg-teal-50 rounded-lg border border-teal-100">
-                        <div className="text-2xl font-bold text-teal-600 mb-1">18.5h</div>
-                        <div className="text-xs text-gray-600">学习时长</div>
-                      </div>
-                      <div className="p-4 bg-green-50 rounded-lg border border-green-100">
-                        <div className="text-2xl font-bold text-green-600 mb-1">92%</div>
-                        <div className="text-xs text-gray-600">作业完成率</div>
-                      </div>
-                      <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                        <div className="text-2xl font-bold text-blue-600 mb-1">47次</div>
-                        <div className="text-xs text-gray-600">AI提问</div>
-                      </div>
-                      <div className="p-4 bg-purple-50 rounded-lg border border-purple-100">
-                        <div className="text-2xl font-bold text-purple-600 mb-1">156张</div>
-                        <div className="text-xs text-gray-600">闪卡复习</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 学习进度 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">学习进度</h4>
-                    <div className="p-4 bg-gray-50 rounded-lg">
-                      <div className="space-y-3">
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm text-gray-700">第5章 传输层</span>
-                            <span className="text-sm font-medium text-teal-600">100%</span>
-                          </div>
-                          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                            <div className="h-full bg-teal-500 rounded-full" style={{ width: '100%' }}></div>
-                          </div>
-                        </div>
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm text-gray-700">第6章 应用层</span>
-                            <span className="text-sm font-medium text-teal-600">65%</span>
-                          </div>
-                          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                            <div className="h-full bg-teal-500 rounded-full" style={{ width: '65%' }}></div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 作业完成情况 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">作业完成情况</h4>
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg">
-                        <div className="flex items-center gap-3">
-                          <i className="ri-checkbox-circle-fill text-green-600 text-lg"></i>
-                          <span className="text-sm text-gray-900">第5章课后作业</span>
-                        </div>
-                        <span className="text-sm font-medium text-green-600">88分</span>
-                      </div>
-                      <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg">
-                        <div className="flex items-center gap-3">
-                          <i className="ri-checkbox-circle-fill text-green-600 text-lg"></i>
-                          <span className="text-sm text-gray-900">第4章图论算法实现</span>
-                        </div>
-                        <span className="text-sm font-medium text-green-600">92分</span>
-                      </div>
-                      <div className="flex items-center justify-between p-3 bg-orange-50 rounded-lg">
-                        <div className="flex items-center gap-3">
-                          <i className="ri-time-line text-orange-600 text-lg"></i>
-                          <span className="text-sm text-gray-900">第6章应用层作业</span>
-                        </div>
-                        <span className="text-sm font-medium text-orange-600">进行中</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 薄弱知识点 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">薄弱知识点</h4>
-                    <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-100">
-                      <div className="space-y-2">
-                        <div className="flex items-start gap-2">
-                          <i className="ri-error-warning-line text-yellow-600 text-base mt-0.5"></i>
-                          <div>
-                            <div className="text-sm font-medium text-gray-900">TCP拥塞控制算法</div>
-                            <div className="text-xs text-gray-600 mt-1">建议：重点复习慢启动和拥塞避免的区别</div>
-                          </div>
-                        </div>
-                        <div className="flex items-start gap-2">
-                          <i className="ri-error-warning-line text-yellow-600 text-base mt-0.5"></i>
-                          <div>
-                            <div className="text-sm font-medium text-gray-900">子网划分计算</div>
-                            <div className="text-xs text-gray-600 mt-1">建议：多做练习题，掌握CIDR表示法</div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* AI建议 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">AI学习建议</h4>
-                    <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                      <div className="text-sm text-gray-700 leading-relaxed space-y-2">
-                        <p>• 本周学习时长充足，保持良好的学习节奏</p>
-                        <p>• 建议加强TCP拥塞控制算法的理解，可以通过动画演示加深印象</p>
-                        <p>• 闪卡复习效果良好，建议继续保持每日复习习惯</p>
-                        <p>• 第6章应用层内容较多，建议分模块学习，逐个击破</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3 flex-shrink-0">
-                <button
-                  onClick={() => {
-                    alert('周报已下载为PDF格式');
-                    console.log('下载周报API调用');
-                  }}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 cursor-pointer whitespace-nowrap"
-                >
-                  <i className="ri-download-line mr-1"></i>下载PDF
-                </button>
-                <button
-                  onClick={() => setShowWeeklyReportModal(false)}
-                  className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  关闭
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 生成月报弹窗 */}
-        {showMonthlyReportModal && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">学习月报</h2>
-                <button
-                  onClick={() => setShowMonthlyReportModal(false)}
-                  className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
-                >
-                  <i className="ri-close-line text-xl"></i>
-                </button>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto p-6">
-                <div className="space-y-6">
-                  {/* 报告头部 */}
-                  <div className="text-center pb-6 border-b border-gray-200">
-                    <h3 className="text-2xl font-bold text-gray-900 mb-2">计算机网络 - 学习月报</h3>
-                    <div className="text-sm text-gray-600">2024年3月</div>
-                  </div>
-
-                  {/* 月度总结 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">月度总结</h4>
-                    <div className="grid grid-cols-4 gap-4">
-                      <div className="p-4 bg-teal-50 rounded-lg border border-teal-100">
-                        <div className="text-2xl font-bold text-teal-600 mb-1">76.5h</div>
-                        <div className="text-xs text-gray-600">总学习时长</div>
-                      </div>
-                      <div className="p-4 bg-green-50 rounded-lg border border-green-100">
-                        <div className="text-2xl font-bold text-green-600 mb-1">15/16</div>
-                        <div className="text-xs text-gray-600">作业完成</div>
-                      </div>
-                      <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                        <div className="text-2xl font-bold text-blue-600 mb-1">189次</div>
-                        <div className="text-xs text-gray-600">AI提问</div>
-                      </div>
-                      <div className="p-4 bg-purple-50 rounded-lg border border-purple-100">
-                        <div className="text-2xl font-bold text-purple-600 mb-1">628张</div>
-                        <div className="text-xs text-gray-600">闪卡复习</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 学习趋势 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">学习时长趋势</h4>
-                    <div className="p-4 bg-gray-50 rounded-lg">
-                      <div className="flex items-end justify-between h-40 gap-2">
-                        {[12, 15, 18, 14, 20, 16, 19, 22, 18, 21, 17, 19, 23, 20, 18, 16, 19, 21, 18, 20, 17, 19, 22, 18, 20, 16, 18, 19, 17, 15].map((hours, i) => (
-                          <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                            <div 
-                              className="w-full bg-teal-500 rounded-t hover:bg-teal-600 cursor-pointer transition-colors"
-                              style={{ height: `${(hours / 25) * 100}%` }}
-                              title={`${hours}小时`}
-                            ></div>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="flex items-center justify-between mt-3 text-xs text-gray-500">
-                        <span>3月1日</span>
-                        <span>3月15日</span>
-                        <span>3月30日</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 成绩分析 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">成绩分析</h4>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-4 bg-gray-50 rounded-lg">
-                        <div className="text-sm text-gray-600 mb-2">平均分</div>
-                        <div className="text-3xl font-bold text-gray-900">89.5</div>
-                        <div className="text-xs text-green-600 mt-1">
-                          <i className="ri-arrow-up-line"></i>较上月提升 5.2分
-                        </div>
-                      </div>
-                      <div className="p-4 bg-gray-50 rounded-lg">
-                        <div className="text-sm text-gray-600 mb-2">班级排名</div>
-                        <div className="text-3xl font-bold text-gray-900">8/45</div>
-                        <div className="text-xs text-green-600 mt-1">
-                          <i className="ri-arrow-up-line"></i>较上月提升 3名
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 知识掌握情况 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">知识掌握情况</h4>
-                    <div className="space-y-3">
-                      {[
-                        { chapter: '第1章 计算机网络概述', progress: 100, color: 'green' },
-                        { chapter: '第2章 物理层', progress: 100, color: 'green' },
-                        { chapter: '第3章 数据链路层', progress: 95, color: 'green' },
-                        { chapter: '第4章 网络层', progress: 88, color: 'teal' },
-                        { chapter: '第5章 传输层', progress: 82, color: 'teal' },
-                        { chapter: '第6章 应用层', progress: 65, color: 'orange' }
-                      ].map((item, i) => (
-                        <div key={i}>
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-sm text-gray-700">{item.chapter}</span>
-                            <span className={`text-sm font-medium text-${item.color}-600`}>{item.progress}%</span>
-                          </div>
-                          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                            <div 
-                              className={`h-full bg-${item.color}-500 rounded-full`}
-                              style={{ width: `${item.progress}%` }}
-                            ></div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* 月度亮点 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">月度亮点</h4>
-                    <div className="space-y-2">
-                      <div className="flex items-start gap-3 p-3 bg-green-50 rounded-lg">
-                        <i className="ri-trophy-line text-green-600 text-lg mt-0.5"></i>
-                        <div>
-                          <div className="text-sm font-medium text-gray-900">获得"学习达人"徽章</div>
-                          <div className="text-xs text-gray-600 mt-1">连续30天保持学习记录</div>
-                        </div>
-                      </div>
-                      <div className="flex items-start gap-3 p-3 bg-blue-50 rounded-lg">
-                        <i className="ri-star-line text-blue-600 text-lg mt-0.5"></i>
-                        <div>
-                          <div className="text-sm font-medium text-gray-900">第5章作业获得满分</div>
-                          <div className="text-xs text-gray-600 mt-1">教师评价：理解深刻，代码规范</div>
-                        </div>
-                      </div>
-                      <div className="flex items-start gap-3 p-3 bg-purple-50 rounded-lg">
-                        <i className="ri-lightbulb-line text-purple-600 text-lg mt-0.5"></i>
-                        <div>
-                          <div className="text-sm font-medium text-gray-900">提出高质量问题3次</div>
-                          <div className="text-xs text-gray-600 mt-1">获得教师和同学点赞</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 下月建议 */}
-                  <div>
-                    <h4 className="text-base font-semibold text-gray-900 mb-3">下月学习建议</h4>
-                    <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                      <div className="text-sm text-gray-700 leading-relaxed space-y-2">
-                        <p>• 继续保持良好的学习习惯，每日学习时长稳定在2-3小时</p>
-                        <p>• 重点攻克第6章应用层内容，建议分HTTP、DNS、FTP等模块逐个学习</p>
-                        <p>• 加强编程实践，多做网络协议分析实验</p>
-                        <p>• 准备期中考试，系统复习前5章内容</p>
-                        <p>• 建议参加班级讨论，与同学交流学习心得</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3 flex-shrink-0">
-                <button
-                  onClick={() => {
-                    alert('月报已下载为PDF格式');
-                    console.log('下载月报API调用');
-                  }}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 cursor-pointer whitespace-nowrap"
-                >
-                  <i className="ri-download-line mr-1"></i>下载PDF
-                </button>
-                <button
-                  onClick={() => setShowMonthlyReportModal(false)}
-                  className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  关闭
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 导出数据弹窗 */}
-        {showExportDataModal && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl w-full max-w-lg overflow-hidden flex flex-col">
-              <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">导出学习数据</h2>
-              </div>
-              
-              <div className="p-6">
-                <div className="space-y-5">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-3">导出格式</label>
-                    <div className="flex gap-3">
-                      <label className="flex-1 flex items-center gap-3 p-3 border-2 rounded-lg cursor-pointer transition-colors hover:border-teal-300">
-                        <input
-                          type="radio"
-                          name="format"
-                          value="csv"
-                          checked={exportFormat === 'csv'}
-                          onChange={(e) => setExportFormat(e.target.value)}
-                          className="w-4 h-4 accent-teal-600"
-                        />
-                        <div className="flex-1">
-                          <div className="text-sm font-medium text-gray-900">CSV</div>
-                          <div className="text-xs text-gray-500">适合Excel打开</div>
-                        </div>
-                      </label>
-                      <label className="flex-1 flex items-center gap-3 p-3 border-2 rounded-lg cursor-pointer transition-colors hover:border-teal-300">
-                        <input
-                          type="radio"
-                          name="format"
-                          value="excel"
-                          checked={exportFormat === 'excel'}
-                          onChange={(e) => setExportFormat(e.target.value)}
-                          className="w-4 h-4 accent-teal-600"
-                        />
-                        <div className="flex-1">
-                          <div className="text-sm font-medium text-gray-900">Excel</div>
-                          <div className="text-xs text-gray-500">包含格式和图表</div>
-                        </div>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-3">选择导出字段</label>
-                    <div className="space-y-2">
-                      {[
-                        { key: 'studyTime', label: '学习时长记录' },
-                        { key: 'homework', label: '作业完成情况' },
-                        { key: 'aiQuestions', label: 'AI提问历史' },
-                        { key: 'attendance', label: '出勤记录' },
-                        { key: 'grades', label: '成绩记录' }
-                      ].map((field) => (
-                        <label key={field.key} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100">
-                          <input
-                            type="checkbox"
-                            checked={exportFields[field.key as keyof typeof exportFields]}
-                            onChange={(e) => setExportFields({ ...exportFields, [field.key]: e.target.checked })}
-                            className="w-4 h-4 accent-teal-600"
-                          />
-                          <span className="text-sm text-gray-900">{field.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3 flex-shrink-0">
-                <button
-                  onClick={() => setShowExportDataModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
-                >
-                  取消
-                </button>
-                <button
-                  onClick={handleConfirmExport}
-                  className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  确认导出
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </main>
     </div>
   );

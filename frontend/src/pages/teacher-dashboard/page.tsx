@@ -1,8 +1,59 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, useRef, useEffect } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import ProductSidePanel from '../../components/ProductSidePanel';
+import TeacherSettings from './components/TeacherSettings';
+import { authService } from '@/services/auth';
+import { courseService } from '@/services/course';
+import { dashboardService } from '@/services/dashboard';
+import { notificationService } from '@/services/notifications';
+import type { DashboardNotification, TeacherDashboardData } from '@/types/dashboard';
 
 export default function TeacherDashboard() {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('overview');
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [dashboardData, setDashboardData] = useState<TeacherDashboardData | null>(null);
+  const [dashboardError, setDashboardError] = useState('');
+  const [notificationFilter, setNotificationFilter] = useState('all');
+  const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    dashboardService
+      .getTeacherDashboard()
+      .then((data) => {
+        if (!mounted) return;
+        setDashboardData(data);
+        setNotifications(data.notifications);
+        setDashboardError('');
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setDashboardError(error instanceof Error ? error.message : 'Dashboard data failed to load');
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleLogout = () => {
+    authService.logout();
+    setShowUserMenu(false);
+    navigate('/login');
+  };
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [createStep, setCreateStep] = useState(1);
@@ -14,20 +65,12 @@ export default function TeacherDashboard() {
     coverColor: '#3b82f6'
   });
   const [inviteCode, setInviteCode] = useState('');
+  const [createCoursePending, setCreateCoursePending] = useState(false);
 
   // 新增：教学日历相关状态
   const [calendarView, setCalendarView] = useState<'week' | 'month'>('week');
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
-  // 新增：通知中心相关状态
-  const [notificationFilter, setNotificationFilter] = useState('all');
-  const [notifications, setNotifications] = useState([
-    { id: 1, type: 'question', title: '学生提问待审核', content: '张三在"计算机网络"课程中提问:TCP三次握手的第三次握手可以携带数据吗?', time: '10分钟前', unread: true },
-    { id: 2, type: 'dislike', title: 'AI回答被点踩', content: '"数据结构"课程中关于"红黑树旋转"的AI回答被3名学生点踩', time: '1小时前', unread: true },
-    { id: 3, type: 'deadline', title: '作业截止提醒', content: '"操作系统"课程作业将在3小时后截止,当前还有12名学生未提交', time: '2小时前', unread: false },
-    { id: 4, type: 'system', title: '知识库更新完成', content: '"数据库系统"课程新上传的3份资料已完成知识图谱构建', time: '5小时前', unread: false },
-    { id: 5, type: 'question', title: '高频疑问提示', content: '"计算机网络"课程中"子网划分"相关问题本周被问询23次,建议集中答疑', time: '1天前', unread: false }
-  ]);
 
   // 新增：个人设置相关状态
   const [profileForm, setProfileForm] = useState({
@@ -48,11 +91,22 @@ export default function TeacherDashboard() {
   const [showDevicesModal, setShowDevicesModal] = useState(false);
   const [avatarPreview, setAvatarPreview] = useState('');
 
-  const handleCreateCourse = () => {
-    // 生成6位随机邀请码
-    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-    setInviteCode(code);
-    setCreateStep(2);
+  const handleCreateCourse = async () => {
+    setCreateCoursePending(true);
+
+    try {
+      const result = await courseService.createCourse(newCourse);
+      setInviteCode(result.inviteCode);
+      setCreateStep(2);
+      const data = await dashboardService.getTeacherDashboard();
+      setDashboardData(data);
+      setNotifications(data.notifications);
+      setDashboardError('');
+    } catch (error) {
+      setDashboardError(error instanceof Error ? error.message : 'Failed to create course');
+    } finally {
+      setCreateCoursePending(false);
+    }
   };
 
   const handleCopyInviteCode = () => {
@@ -114,6 +168,9 @@ export default function TeacherDashboard() {
   // 新增：标记所有通知为已读
   const markAllAsRead = () => {
     setNotifications(prev => prev.map(n => ({ ...n, unread: false })));
+    void notificationService
+      .markAllAsRead('teacher')
+      .catch((error) => setDashboardError(error instanceof Error ? error.message : 'Failed to mark notifications as read'));
   };
 
   // 新增：获取过滤后的通知
@@ -165,8 +222,29 @@ export default function TeacherDashboard() {
     }
   };
 
+  const teacherCourses = dashboardData?.courses ?? [];
+  const teacherStats = dashboardData?.stats;
+  const weeklyStudentTrend = teacherStats?.weeklyStudentTrend ?? [60, 72, 65, 80, 70, 88, 75];
+  const calendarEvents = dashboardData?.calendarEvents ?? [];
+  const aiWeeklyMetrics = (dashboardData?.aiWeeklyMetrics ?? []).map((item) => ({
+    label: item.title,
+    value: item.content,
+    change: item.meta || '',
+    icon: item.icon || 'ri-line-chart-line',
+    color: item.tone,
+    good: item.id.includes('dislike'),
+  }));
+  const hotQuestionTopics = dashboardData?.hotQuestionTopics ?? [];
+  const teacherTodoItems = (dashboardData?.todoItems ?? []).map((item) => ({
+    title: item.title,
+    desc: item.content,
+    urgency: item.tone === 'red' ? 'high' : 'mid',
+    icon: item.icon || 'ri-checkbox-circle-line',
+    action: item.meta || '',
+  }));
+
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="soft-dash soft-dash-teacher min-h-screen bg-gray-50">
       {/* 固定导航栏 */}
       <nav className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 z-50">
         <div className="px-6 py-3">
@@ -192,7 +270,41 @@ export default function TeacherDashboard() {
               <button className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 cursor-pointer">
                 <i className="ri-notification-3-line text-lg"></i>
               </button>
-              <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium cursor-pointer">王</div>
+              <div className="relative" ref={userMenuRef}>
+                <button
+                  onClick={() => setShowUserMenu(v => !v)}
+                  className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
+                >
+                  <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium">王</div>
+                  <span className="text-sm text-gray-700 font-medium">王教授</span>
+                  <i className={`ri-arrow-down-s-line text-gray-400 text-base transition-transform ${showUserMenu ? 'rotate-180' : ''}`}></i>
+                </button>
+                {showUserMenu && (
+                  <div className="absolute right-0 bottom-full mb-1.5 w-44 origin-bottom-right bg-white border border-gray-200 rounded-xl overflow-hidden z-50">
+                    <div className="px-4 py-3 border-b border-gray-100">
+                      <div className="text-sm font-semibold text-gray-900">王教授</div>
+                      <div className="text-xs text-gray-500 mt-0.5">wang@university.edu.cn</div>
+                    </div>
+                    <div className="py-1">
+                      <button
+                        onClick={() => { setActiveTab('settings'); setShowUserMenu(false); }}
+                        className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
+                      >
+                        <i className="ri-user-settings-line text-gray-400 text-base"></i>
+                        个人设置
+                      </button>
+                      <div className="my-1 border-t border-gray-100"></div>
+                      <button
+                        onClick={handleLogout}
+                        className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 cursor-pointer"
+                      >
+                        <i className="ri-logout-box-r-line text-red-500 text-base"></i>
+                        退出登录
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -200,249 +312,332 @@ export default function TeacherDashboard() {
 
       {/* 主内容区 */}
       <div className="pt-16 px-6 py-6">
+        {dashboardError && (
+          <div className="max-w-7xl mx-auto mb-4 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+            {dashboardError}
+          </div>
+        )}
         {activeTab === 'overview' && (
           <div className="max-w-7xl mx-auto">
-            <h1 className="text-2xl font-bold text-gray-900 mb-6">工作台</h1>
-            
-            {/* 数据概览 */}
-            <div className="grid grid-cols-5 gap-4 mb-6">
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600">活跃课程</span>
-                  <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-blue-50">
-                    <i className="ri-book-open-line text-blue-600 text-base"></i>
-                  </div>
-                </div>
-                <div className="text-2xl font-bold text-gray-900">8</div>
-                <div className="text-xs text-gray-500 mt-1">本学期</div>
+            {/* 欢迎横幅 */}
+            <div className="bg-gradient-to-r from-teal-600 to-teal-500 rounded-xl p-6 mb-6 relative overflow-hidden">
+              <div className="absolute inset-0 opacity-10">
+                <div className="absolute -right-12 -top-12 w-48 h-48 rounded-full bg-white"></div>
+                <div className="absolute -right-4 -bottom-16 w-64 h-64 rounded-full bg-white"></div>
               </div>
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600">学生总数</span>
-                  <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-green-50">
-                    <i className="ri-group-line text-green-600 text-base"></i>
+              <div className="relative flex items-center justify-between">
+                <div>
+                  <div className="text-white/80 text-sm mb-1">早上好，王教授 👋</div>
+                  <h1 className="text-2xl font-bold text-white mb-2">今日工作台</h1>
+                  <div className="flex items-center gap-4 text-white/80 text-sm">
+                    <span className="flex items-center gap-1"><i className="ri-calendar-line"></i>2026年4月10日 周五</span>
+                    <span className="flex items-center gap-1"><i className="ri-time-line"></i>本学期第12周</span>
                   </div>
                 </div>
-                <div className="text-2xl font-bold text-gray-900">342</div>
-                <div className="text-xs text-green-600 mt-1">+23 本周</div>
-              </div>
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600">待审核疑问</span>
-                  <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-orange-50 relative">
-                    <i className="ri-question-line text-orange-600 text-base"></i>
-                    <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></span>
+                <div className="flex items-center gap-3">
+                  <div className="bg-white/15 rounded-xl px-5 py-4 text-center backdrop-blur-sm border border-white/20">
+                    <div className="text-2xl font-bold text-white">{teacherStats?.todayTodo ?? 3}</div>
+                    <div className="text-xs text-white/80 mt-0.5">今日待处理</div>
+                  </div>
+                  <div className="bg-white/15 rounded-xl px-5 py-4 text-center backdrop-blur-sm border border-white/20">
+                    <div className="text-2xl font-bold text-white">{teacherStats?.pendingQuestions ?? 15}</div>
+                    <div className="text-xs text-white/80 mt-0.5">待审核疑问</div>
+                  </div>
+                  <div className="bg-white/15 rounded-xl px-5 py-4 text-center backdrop-blur-sm border border-white/20">
+                    <div className="text-2xl font-bold text-white">{teacherStats?.dueSoon ?? 2}</div>
+                    <div className="text-xs text-white/80 mt-0.5">即将截止</div>
                   </div>
                 </div>
-                <div className="text-2xl font-bold text-gray-900">15</div>
-                <div className="text-xs text-orange-600 mt-1">需处理</div>
-              </div>
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600">AI答疑分担率</span>
-                  <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-purple-50">
-                    <i className="ri-robot-line text-purple-600 text-base"></i>
-                  </div>
-                </div>
-                <div className="text-2xl font-bold text-gray-900">78%</div>
-                <div className="text-xs text-gray-500 mt-1">较上周 +5%</div>
-              </div>
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600">平均满意度</span>
-                  <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-teal-50">
-                    <i className="ri-star-line text-teal-600 text-base"></i>
-                  </div>
-                </div>
-                <div className="text-2xl font-bold text-gray-900">4.6</div>
-                <div className="text-xs text-gray-500 mt-1">满分 5.0</div>
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-6">
-              {/* 教学日历 */}
-              <div className="col-span-2 bg-white rounded-lg p-5 border border-gray-200">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-base font-semibold text-gray-900">教学日历</h2>
-                  <div className="flex items-center gap-2">
-                    <button 
-                      onClick={() => setCalendarView('month')}
-                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${calendarView === 'month' ? 'text-teal-600 bg-teal-50' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'}`}
-                    >
-                      月视图
-                    </button>
-                    <button 
-                      onClick={() => setCalendarView('week')}
-                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${calendarView === 'week' ? 'text-teal-600 bg-teal-50' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'}`}
-                    >
-                      周视图
-                    </button>
+            {/* 数据概览卡片 */}
+            <div className="grid grid-cols-4 gap-4 mb-6">
+              <div className="bg-white rounded-xl p-5 border border-gray-200 hover:border-teal-200 transition-colors">
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1">活跃课程</div>
+                    <div className="text-3xl font-bold text-gray-900">{teacherStats?.activeCourses ?? 8}</div>
+                  </div>
+                  <div className="w-10 h-10 flex items-center justify-center rounded-xl bg-teal-50">
+                    <i className="ri-book-open-line text-teal-600 text-lg"></i>
                   </div>
                 </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">本学期开设</span>
+                  <span className="text-xs font-medium text-teal-600 bg-teal-50 px-2 py-0.5 rounded-full">进行中</span>
+                </div>
+                {/* 迷你进度条 */}
+                <div className="mt-3 flex gap-1">
+                  {[1,1,1,1,1,1,1,1,0,0].map((v, i) => (
+                    <div key={i} className={`flex-1 h-1 rounded-full ${v ? 'bg-teal-500' : 'bg-gray-100'}`}></div>
+                  ))}
+                </div>
+                <div className="text-xs text-gray-400 mt-1">8/10 课程配置完成</div>
+              </div>
 
-                {calendarView === 'week' ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3 p-3 rounded-lg bg-blue-50 border border-blue-100">
-                      <div className="text-center">
-                        <div className="text-xs text-blue-600 font-medium">周一</div>
-                        <div className="text-lg font-bold text-blue-600">15</div>
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-sm font-medium text-gray-900">计算机网络 - 第5章授课</div>
-                        <div className="text-xs text-gray-600 mt-1">10:00-11:40 · 教学楼A301</div>
-                      </div>
+              <div className="bg-white rounded-xl p-5 border border-gray-200 hover:border-green-200 transition-colors">
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1">学生总数</div>
+                    <div className="text-3xl font-bold text-gray-900">{teacherStats?.totalStudents ?? 342}</div>
+                  </div>
+                  <div className="w-10 h-10 flex items-center justify-center rounded-xl bg-green-50">
+                    <i className="ri-group-line text-green-600 text-lg"></i>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">跨6门课程</span>
+                  <span className="text-xs font-medium text-green-600">↑ +23 本周</span>
+                </div>
+                {/* 迷你柱状图 */}
+                <div className="mt-3 flex items-end gap-1 h-8">
+                  {weeklyStudentTrend.map((h, i) => (
+                    <div key={i} className="flex-1 bg-green-100 rounded-sm" style={{ height: `${h}%` }}>
+                      <div className="w-full bg-green-400 rounded-sm" style={{ height: i === 6 ? '100%' : '70%' }}></div>
                     </div>
-                    <div className="flex items-center gap-3 p-3 rounded-lg bg-orange-50 border border-orange-100">
-                      <div className="text-center">
-                        <div className="text-xs text-orange-600 font-medium">周三</div>
-                        <div className="text-lg font-bold text-orange-600">17</div>
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-sm font-medium text-gray-900">数据结构作业截止</div>
-                        <div className="text-xs text-gray-600 mt-1">23:59 截止 · 已提交 45/68</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3 p-3 rounded-lg bg-green-50 border border-green-100">
-                      <div className="text-center">
-                        <div className="text-xs text-green-600 font-medium">周五</div>
-                        <div className="text-lg font-bold text-green-600">19</div>
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-sm font-medium text-gray-900">在线答疑时段</div>
-                        <div className="text-xs text-gray-600 mt-1">19:00-21:00 · 线上</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3 p-3 rounded-lg bg-purple-50 border border-purple-100">
-                      <div className="text-center">
-                        <div className="text-xs text-purple-600 font-medium">周日</div>
-                        <div className="text-lg font-bold text-purple-600">21</div>
-                      </div>
-                      <div className="flex-1">
-                        <div className="text-sm font-medium text-gray-900">操作系统期中考试</div>
-                        <div className="text-xs text-gray-600 mt-1">14:00-16:00 · 教学楼B201</div>
-                      </div>
+                  ))}
+                </div>
+                <div className="text-xs text-gray-400 mt-1">近7周活跃学生趋势</div>
+              </div>
+
+              <div className="bg-white rounded-xl p-5 border border-gray-200 hover:border-orange-200 transition-colors">
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1">AI答疑分担率</div>
+                    <div className="text-3xl font-bold text-gray-900">{teacherStats?.aiAnswerRate ?? 78}<span className="text-lg text-gray-500">%</span></div>
+                  </div>
+                  <div className="w-10 h-10 flex items-center justify-center rounded-xl bg-orange-50">
+                    <i className="ri-robot-line text-orange-500 text-lg"></i>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">本周均值</span>
+                  <span className="text-xs font-medium text-orange-500">↑ +5% vs 上周</span>
+                </div>
+                {/* 环形进度简化版 */}
+                <div className="mt-3 w-full bg-gray-100 rounded-full h-1.5">
+                  <div className="bg-gradient-to-r from-orange-400 to-orange-500 h-1.5 rounded-full" style={{ width: `${teacherStats?.aiAnswerRate ?? 78}%` }}></div>
+                </div>
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>AI自动回复</span>
+                  <span>人工处理 22%</span>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl p-5 border border-gray-200 hover:border-amber-200 transition-colors">
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1">平均满意度</div>
+                    <div className="text-3xl font-bold text-gray-900">{teacherStats?.satisfactionScore ?? 4.6}<span className="text-sm text-gray-400 ml-0.5">/5</span></div>
+                  </div>
+                  <div className="w-10 h-10 flex items-center justify-center rounded-xl bg-amber-50">
+                    <i className="ri-star-fill text-amber-500 text-lg"></i>
+                  </div>
+                </div>
+                <div className="flex items-center gap-0.5 mb-3">
+                  {[1,2,3,4].map(i => <i key={i} className="ri-star-fill text-amber-400 text-sm"></i>)}
+                  <i className="ri-star-half-fill text-amber-400 text-sm"></i>
+                </div>
+                <div className="flex items-center gap-1 text-xs">
+                  <span className="text-amber-500 font-medium">72%</span><span className="text-gray-400">满意</span>
+                  <span className="text-gray-200 mx-1">·</span>
+                  <span className="text-gray-400 font-medium">20%</span><span className="text-gray-400">一般</span>
+                  <span className="text-gray-200 mx-1">·</span>
+                  <span className="text-red-400 font-medium">8%</span><span className="text-gray-400">不满意</span>
+                </div>
+                <div className="mt-2 w-full h-1.5 rounded-full overflow-hidden flex gap-px">
+                  <div className="bg-amber-400 rounded-l-full" style={{ width: '72%' }}></div>
+                  <div className="bg-gray-200" style={{ width: '20%' }}></div>
+                  <div className="bg-red-300 rounded-r-full" style={{ width: '8%' }}></div>
+                </div>
+              </div>
+            </div>
+
+            {/* 主体三列布局 */}
+            <div className="grid grid-cols-12 gap-5">
+              {/* 左侧：日程 + AI表现 */}
+              <div className="col-span-8 space-y-5">
+                {/* 本周日程 */}
+                <div className="bg-white rounded-xl border border-gray-200 p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-base font-semibold text-gray-900">本周教学日程</h2>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setCalendarView('week')}
+                        className={`px-3 py-1 text-xs font-medium rounded-full transition-colors cursor-pointer whitespace-nowrap ${calendarView === 'week' ? 'bg-teal-100 text-teal-700' : 'text-gray-500 hover:text-gray-700'}`}
+                      >周视图</button>
+                      <button
+                        onClick={() => setCalendarView('month')}
+                        className={`px-3 py-1 text-xs font-medium rounded-full transition-colors cursor-pointer whitespace-nowrap ${calendarView === 'month' ? 'bg-teal-100 text-teal-700' : 'text-gray-500 hover:text-gray-700'}`}
+                      >月视图</button>
                     </div>
                   </div>
-                ) : (
-                  <div>
-                    {/* 月历头部 */}
-                    <div className="flex items-center justify-between mb-4">
-                      <button
-                        onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1))}
-                        className="w-7 h-7 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded cursor-pointer"
-                      >
-                        <i className="ri-arrow-left-s-line"></i>
-                      </button>
-                      <div className="text-sm font-semibold text-gray-900">
-                        {currentMonth.getFullYear()}年{currentMonth.getMonth() + 1}月
-                      </div>
-                      <button
-                        onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1))}
-                        className="w-7 h-7 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded cursor-pointer"
-                      >
-                        <i className="ri-arrow-right-s-line"></i>
-                      </button>
-                    </div>
 
-                    {/* 星期标题 */}
-                    <div className="grid grid-cols-7 gap-1 mb-2">
-                      {['日', '一', '二', '三', '四', '五', '六'].map((day, i) => (
-                        <div key={i} className="text-center text-xs font-medium text-gray-500 py-1">
-                          {day}
+                  {calendarView === 'week' ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      {calendarEvents.map((item, idx) => (
+                        <div key={idx} className={`flex items-start gap-3 p-4 rounded-xl border transition-colors cursor-pointer hover:border-gray-300 ${
+                          item.tagColor === 'teal' ? 'bg-teal-50/50 border-teal-100' :
+                          item.tagColor === 'orange' ? 'bg-orange-50/50 border-orange-100' :
+                          item.tagColor === 'green' ? 'bg-green-50/50 border-green-100' :
+                          'bg-red-50/50 border-red-100'
+                        }`}>
+                          <div className={`w-10 h-10 flex items-center justify-center rounded-xl flex-shrink-0 ${
+                            item.tagColor === 'teal' ? 'bg-teal-100' :
+                            item.tagColor === 'orange' ? 'bg-orange-100' :
+                            item.tagColor === 'green' ? 'bg-green-100' : 'bg-red-100'
+                          }`}>
+                            <i className={`${item.icon} text-base ${
+                              item.tagColor === 'teal' ? 'text-teal-600' :
+                              item.tagColor === 'orange' ? 'text-orange-600' :
+                              item.tagColor === 'green' ? 'text-green-600' : 'text-red-600'
+                            }`}></i>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                                item.tagColor === 'teal' ? 'bg-teal-100 text-teal-700' :
+                                item.tagColor === 'orange' ? 'bg-orange-100 text-orange-700' :
+                                item.tagColor === 'green' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                              }`}>{item.tag}</span>
+                              <span className="text-xs text-gray-500">{item.day} · {item.date}日</span>
+                            </div>
+                            <div className="text-sm font-medium text-gray-900 leading-snug">{item.title}</div>
+                            <div className="text-xs text-gray-500 mt-0.5">{item.sub}</div>
+                          </div>
                         </div>
                       ))}
                     </div>
-
-                    {/* 日期格子 */}
-                    <div className="grid grid-cols-7 gap-1">
-                      {generateMonthCalendar().map((week, weekIndex) => (
-                        week.map((date, dayIndex) => {
-                          const isCurrentMonth = date.getMonth() === currentMonth.getMonth();
-                          const isToday = date.toDateString() === new Date().toDateString();
-                          const events = getDateEvents(date);
-                          
-                          return (
-                            <div
-                              key={`${weekIndex}-${dayIndex}`}
-                              className={`min-h-[60px] p-1 border border-gray-100 rounded cursor-pointer transition-colors ${
-                                isCurrentMonth ? 'bg-white hover:bg-gray-50' : 'bg-gray-50'
-                              } ${isToday ? 'ring-2 ring-teal-500' : ''}`}
-                            >
-                              <div className={`text-xs font-medium mb-1 ${
-                                isCurrentMonth ? 'text-gray-900' : 'text-gray-400'
-                              } ${isToday ? 'text-teal-600' : ''}`}>
-                                {date.getDate()}
-                              </div>
-                              <div className="space-y-0.5">
-                                {events.map((event, i) => (
-                                  <div
-                                    key={i}
-                                    className={`text-xs px-1 py-0.5 rounded truncate ${
-                                      event.color === 'blue' ? 'bg-blue-100 text-blue-700' :
-                                      event.color === 'orange' ? 'bg-orange-100 text-orange-700' :
-                                      event.color === 'green' ? 'bg-green-100 text-green-700' :
-                                      'bg-purple-100 text-purple-700'
-                                    }`}
-                                    title={event.title}
-                                  >
-                                    {event.title}
-                                  </div>
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1))} className="w-7 h-7 flex items-center justify-center text-gray-500 hover:bg-gray-100 rounded cursor-pointer"><i className="ri-arrow-left-s-line"></i></button>
+                        <div className="text-sm font-semibold text-gray-900">{currentMonth.getFullYear()}年{currentMonth.getMonth() + 1}月</div>
+                        <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1))} className="w-7 h-7 flex items-center justify-center text-gray-500 hover:bg-gray-100 rounded cursor-pointer"><i className="ri-arrow-right-s-line"></i></button>
+                      </div>
+                      <div className="grid grid-cols-7 gap-1 mb-1">
+                        {['日','一','二','三','四','五','六'].map((d, i) => (
+                          <div key={i} className="text-center text-xs text-gray-400 py-1">{d}</div>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {generateMonthCalendar().map((week, wi) =>
+                          week.map((date, di) => {
+                            const isCurMonth = date.getMonth() === currentMonth.getMonth();
+                            const isToday = date.toDateString() === new Date().toDateString();
+                            const evts = getDateEvents(date);
+                            return (
+                              <div key={`${wi}-${di}`} className={`min-h-[52px] p-1 rounded-lg border transition-colors cursor-pointer ${isCurMonth ? 'hover:bg-gray-50 border-gray-100' : 'border-transparent'} ${isToday ? 'ring-1 ring-teal-400 bg-teal-50/30' : ''}`}>
+                                <div className={`text-xs font-medium mb-0.5 ${isCurMonth ? 'text-gray-800' : 'text-gray-300'} ${isToday ? 'text-teal-600' : ''}`}>{date.getDate()}</div>
+                                {evts.map((ev, ei) => (
+                                  <div key={ei} className={`text-xs px-1 py-0.5 rounded truncate leading-tight mb-0.5 ${ev.color === 'blue' ? 'bg-teal-100 text-teal-700' : ev.color === 'orange' ? 'bg-orange-100 text-orange-700' : ev.color === 'green' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{ev.title}</div>
                                 ))}
                               </div>
-                            </div>
-                          );
-                        })
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* AI助教本周表现 */}
+                <div className="bg-white rounded-xl border border-gray-200 p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-base font-semibold text-gray-900">AI助教本周表现</h2>
+                    <button
+                      onClick={() => setActiveTab('courses')}
+                      className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap"
+                    >查看各课程详情 →</button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-4 mb-4">
+                    {aiWeeklyMetrics.map((item, idx) => (
+                      <div key={idx} className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className={`w-7 h-7 flex items-center justify-center rounded-lg ${item.color === 'teal' ? 'bg-teal-100' : item.color === 'red' ? 'bg-red-100' : 'bg-green-100'}`}>
+                            <i className={`${item.icon} text-sm ${item.color === 'teal' ? 'text-teal-600' : item.color === 'red' ? 'text-red-500' : 'text-green-600'}`}></i>
+                          </div>
+                          <span className="text-xs text-gray-500">{item.label}</span>
+                        </div>
+                        <div className="text-xl font-bold text-gray-900">{item.value}</div>
+                        <div className={`text-xs mt-1 font-medium ${
+                          item.good ? 'text-green-600' :
+                          item.change.startsWith('+') ? 'text-teal-600' : 'text-gray-400'
+                        }`}>{item.change} 较上周</div>
+                      </div>
+                    ))}
+                  </div>
+                  {/* 高频疑问热点：精简为标签行 */}
+                  <div className="border-t border-gray-100 pt-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs text-gray-400 whitespace-nowrap">高频疑问：</span>
+                      {hotQuestionTopics.map((item, idx) => (
+                        <span key={idx} className="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 text-teal-700 text-xs rounded-full cursor-pointer hover:bg-teal-100 transition-colors whitespace-nowrap">
+                          {item.topic}
+                          <span className="text-teal-400 font-medium">{item.count}</span>
+                        </span>
                       ))}
                     </div>
                   </div>
-                )}
+                </div>
               </div>
 
-              {/* 近期动态 */}
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">近期动态</h2>
-                <div className="space-y-4">
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-red-50 flex-shrink-0">
-                      <i className="ri-alert-line text-red-600 text-base"></i>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-900">系统预警</div>
-                      <div className="text-xs text-gray-600 mt-1">计算机网络课程有12名学生连续3周未登录</div>
-                      <div className="text-xs text-gray-400 mt-1">2小时前</div>
-                    </div>
+              {/* 右侧：待处理 + 预警 + 快速入口 */}
+              <div className="col-span-4 space-y-5">
+                {/* 待处理事项 */}
+                <div className="bg-white rounded-xl border border-gray-200 p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm font-semibold text-gray-900">待处理事项</h2>
+                    <span className="text-xs bg-red-100 text-red-600 font-semibold px-2 py-0.5 rounded-full">3 项</span>
                   </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-blue-50 flex-shrink-0">
-                      <i className="ri-line-chart-line text-blue-600 text-base"></i>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-900">提问趋势</div>
-                      <div className="text-xs text-gray-600 mt-1">TCP拥塞控制相关问题激增,建议补充资料</div>
-                      <div className="text-xs text-gray-400 mt-1">5小时前</div>
-                    </div>
+                  <div className="space-y-2">
+                    {teacherTodoItems.map((item, idx) => (
+                      <div key={idx} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer hover:border-gray-300 transition-colors ${item.urgency === 'high' ? 'border-red-100 bg-red-50/40' : 'border-gray-100'}`}>
+                        <div className={`w-8 h-8 flex items-center justify-center rounded-lg flex-shrink-0 ${item.urgency === 'high' ? 'bg-red-100' : 'bg-orange-100'}`}>
+                          <i className={`${item.icon} text-sm ${item.urgency === 'high' ? 'text-red-600' : 'text-orange-600'}`}></i>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-semibold text-gray-900">{item.title}</div>
+                          <div className="text-xs text-gray-500 mt-0.5 truncate">{item.desc}</div>
+                        </div>
+                        <span className="text-xs text-teal-600 whitespace-nowrap font-medium">{item.action}</span>
+                      </div>
+                    ))}
                   </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-green-50 flex-shrink-0">
-                      <i className="ri-download-line text-green-600 text-base"></i>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-900">资料热度</div>
-                      <div className="text-xs text-gray-600 mt-1">第5章PPT下载量达156次,为本周最高</div>
-                      <div className="text-xs text-gray-400 mt-1">1天前</div>
-                    </div>
+                </div>
+
+                {/* 学生预警 */}
+                <div className="bg-white rounded-xl border border-gray-200 p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm font-semibold text-gray-900">学生学习预警</h2>
+                    <span className="text-xs text-orange-600 bg-orange-50 font-medium px-2 py-0.5 rounded-full">2 条</span>
                   </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-purple-50 flex-shrink-0">
-                      <i className="ri-thumb-up-line text-purple-600 text-base"></i>
+                  <div className="space-y-3">
+                    <div className="p-3 rounded-lg bg-orange-50/60 border border-orange-100">
+                      <div className="flex items-start gap-2">
+                        <i className="ri-alert-line text-orange-500 text-sm mt-0.5"></i>
+                        <div>
+                          <div className="text-xs font-semibold text-gray-900">连续缺勤预警</div>
+                          <div className="text-xs text-gray-600 mt-0.5">计算机网络：12名学生连续3周未登录，建议主动联系</div>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-900">AI表现优秀</div>
-                      <div className="text-xs text-gray-600 mt-1">数据结构课程AI助教满意度达92%</div>
-                      <div className="text-xs text-gray-400 mt-1">2天前</div>
+                    <div className="p-3 rounded-lg bg-amber-50/60 border border-amber-100">
+                      <div className="flex items-start gap-2">
+                        <i className="ri-line-chart-line text-amber-500 text-sm mt-0.5"></i>
+                        <div>
+                          <div className="text-xs font-semibold text-gray-900">成绩下滑预警</div>
+                          <div className="text-xs text-gray-600 mt-0.5">数据结构：6名学生近两次作业得分骤降 &gt;30%</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
+
+
+
+
               </div>
             </div>
           </div>
@@ -461,14 +656,7 @@ export default function TeacherDashboard() {
             </div>
 
             <div className="grid grid-cols-3 gap-5">
-              {[
-                { id: 1, name: '计算机网络', code: 'CS301', students: 68, unread: 5, color: 'blue', image: 'https://readdy.ai/api/search-image?query=Modern%20computer%20network%20technology%20illustration%20with%20routers%20switches%20and%20data%20packets%20flowing%20through%20network%20infrastructure%2C%20clean%20minimalist%20background%20with%20soft%20blue%20tones%2C%20professional%20educational%20style%2C%20high%20quality%20digital%20art&width=400&height=240&seq=teacher-course-1&orientation=landscape' },
-                { id: 2, name: '数据结构与算法', code: 'CS205', students: 82, unread: 12, color: 'green', image: 'https://readdy.ai/api/search-image?query=Abstract%20data%20structure%20visualization%20showing%20trees%20graphs%20and%20algorithms%20with%20geometric%20shapes%20and%20connecting%20lines%2C%20clean%20minimalist%20background%20with%20soft%20green%20tones%2C%20educational%20technology%20style%2C%20modern%20digital%20illustration&width=400&height=240&seq=teacher-course-2&orientation=landscape' },
-                { id: 3, name: '操作系统原理', code: 'CS302', students: 56, unread: 3, color: 'purple', image: 'https://readdy.ai/api/search-image?query=Operating%20system%20concept%20illustration%20with%20process%20scheduling%20memory%20management%20and%20system%20architecture%20elements%2C%20clean%20minimalist%20background%20with%20soft%20purple%20tones%2C%20professional%20educational%20design%2C%20high%20quality%20digital%20art&width=400&height=240&seq=teacher-course-3&orientation=landscape' },
-                { id: 4, name: '数据库系统', code: 'CS401', students: 74, unread: 8, color: 'orange', image: 'https://readdy.ai/api/search-image?query=Database%20system%20visualization%20with%20tables%20relationships%20and%20query%20processing%20elements%2C%20clean%20minimalist%20background%20with%20soft%20orange%20tones%2C%20modern%20educational%20technology%20style%2C%20professional%20digital%20illustration&width=400&height=240&seq=teacher-course-4&orientation=landscape' },
-                { id: 5, name: '软件工程', code: 'CS403', students: 91, unread: 0, color: 'teal', image: 'https://readdy.ai/api/search-image?query=Software%20engineering%20concept%20with%20development%20lifecycle%20agile%20methodology%20and%20project%20management%20elements%2C%20clean%20minimalist%20background%20with%20soft%20teal%20tones%2C%20professional%20educational%20style%2C%20high%20quality%20digital%20art&width=400&height=240&seq=teacher-course-5&orientation=landscape' },
-                { id: 6, name: '人工智能基础', code: 'CS501', students: 63, unread: 15, color: 'pink', image: 'https://readdy.ai/api/search-image?query=Artificial%20intelligence%20illustration%20with%20neural%20networks%20machine%20learning%20algorithms%20and%20AI%20technology%20elements%2C%20clean%20minimalist%20background%20with%20soft%20pink%20tones%2C%20modern%20educational%20design%2C%20professional%20digital%20art&width=400&height=240&seq=teacher-course-6&orientation=landscape' }
-              ].map((course, index) => (
+              {teacherCourses.map((course, index) => (
                 <div key={index} className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow cursor-pointer">
                   <div className="relative h-36 w-full">
                     <img src={course.image} alt={course.name} className="w-full h-full object-cover object-top" />
@@ -561,6 +749,9 @@ export default function TeacherDashboard() {
                       setNotifications(prev => prev.map(n => 
                         n.id === notif.id ? { ...n, unread: false } : n
                       ));
+                      void notificationService
+                        .markAsRead('teacher', notif.id)
+                        .catch((error) => setDashboardError(error instanceof Error ? error.message : 'Failed to mark notification as read'));
                     }}
                   >
                     <div className="flex items-start gap-3">
@@ -594,199 +785,8 @@ export default function TeacherDashboard() {
         )}
 
         {activeTab === 'settings' && (
-          <div className="max-w-3xl mx-auto">
-            <h1 className="text-2xl font-bold text-gray-900 mb-6">个人设置</h1>
-            
-            <div className="space-y-5">
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">基本信息</h2>
-                <div className="space-y-4">
-                  <div className="flex items-center gap-4">
-                    <div className="relative">
-                      {avatarPreview ? (
-                        <img src={avatarPreview} alt="头像" className="w-16 h-16 rounded-full object-cover" />
-                      ) : (
-                        <div className="w-16 h-16 rounded-full bg-teal-500 flex items-center justify-center text-white text-xl font-medium">王</div>
-                      )}
-                      <input
-                        type="file"
-                        id="avatar-upload"
-                        accept="image/*"
-                        onChange={handleAvatarUpload}
-                        className="hidden"
-                      />
-                    </div>
-                    <label
-                      htmlFor="avatar-upload"
-                      className="px-4 py-2 text-sm font-medium text-teal-600 border border-teal-600 rounded-lg hover:bg-teal-50 transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      更换头像
-                    </label>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">姓名</label>
-                    <input 
-                      type="text" 
-                      value={profileForm.name}
-                      onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">教学简介</label>
-                    <textarea 
-                      rows={3} 
-                      value={profileForm.bio}
-                      onChange={(e) => setProfileForm({ ...profileForm, bio: e.target.value })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" 
-                      placeholder="介绍您的教学经历和研究方向..."
-                    ></textarea>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">联系方式</label>
-                    <input type="text" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">手机号码</label>
-                    <input 
-                      type="text" 
-                      value={profileForm.phone}
-                      onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
-                      placeholder="请输入手机号码"
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" 
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">学校背景</h2>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">所在学校</label>
-                    <input 
-                      type="text" 
-                      value={profileForm.school}
-                      onChange={(e) => setProfileForm({ ...profileForm, school: e.target.value })}
-                      placeholder="请输入学校名称"
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">所在学院</label>
-                    <input 
-                      type="text" 
-                      value={profileForm.department}
-                      onChange={(e) => setProfileForm({ ...profileForm, department: e.target.value })}
-                      placeholder="请输入学院名称"
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" 
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">职称</label>
-                    <select 
-                      value={profileForm.title}
-                      onChange={(e) => setProfileForm({ ...profileForm, title: e.target.value })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 cursor-pointer"
-                    >
-                      <option value="">请选择职称</option>
-                      <option value="助教">助教</option>
-                      <option value="讲师">讲师</option>
-                      <option value="副教授">副教授</option>
-                      <option value="教授">教授</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">安全设置</h2>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between py-2">
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">修改密码</div>
-                      <div className="text-xs text-gray-500 mt-1">定期更换密码以保护账号安全</div>
-                    </div>
-                    <button 
-                      onClick={() => setShowPasswordModal(true)}
-                      className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      修改
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between py-2">
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">登录设备管理</div>
-                      <div className="text-xs text-gray-500 mt-1">查看和管理已登录的设备</div>
-                    </div>
-                    <button 
-                      onClick={() => setShowDevicesModal(true)}
-                      className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      查看
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-lg p-5 border border-gray-200">
-                <h2 className="text-base font-semibold text-gray-900 mb-4">偏好设置</h2>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">默认AI对话风格</label>
-                    <select className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 cursor-pointer">
-                      <option>严谨学术型</option>
-                      <option>启发引导型</option>
-                      <option>Debug调试型</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">消息提醒方式</label>
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" defaultChecked className="w-4 h-4 text-teal-600 border-gray-300 rounded focus:ring-teal-500" />
-                        <span className="text-sm text-gray-700">站内通知</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" defaultChecked className="w-4 h-4 text-teal-600 border-gray-300 rounded focus:ring-teal-500" />
-                        <span className="text-sm text-gray-700">邮件提醒</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" className="w-4 h-4 text-teal-600 border-gray-300 rounded focus:ring-teal-500" />
-                        <span className="text-sm text-gray-700">微信推送</span>
-                      </label>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 保存按钮 */}
-              <div className="flex items-center justify-end gap-3">
-                <button 
-                  onClick={() => {
-                    setProfileForm({
-                      name: '王教授',
-                      bio: '',
-                      email: 'wang@university.edu.cn',
-                      phone: '',
-                      school: '',
-                      department: '',
-                      title: ''
-                    });
-                    setAvatarPreview('');
-                  }}
-                  className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
-                >
-                  重置
-                </button>
-                <button 
-                  onClick={handleSaveProfile}
-                  className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  保存修改
-                </button>
-              </div>
-            </div>
+          <div className="px-0">
+            <TeacherSettings />
           </div>
         )}
       </div>
@@ -870,7 +870,7 @@ export default function TeacherDashboard() {
                   </button>
                   <button 
                     onClick={handleCreateCourse}
-                    disabled={!newCourse.name || !newCourse.code || !newCourse.semester}
+                    disabled={!newCourse.name || !newCourse.code || !newCourse.semester || createCoursePending}
                     className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     创建课程
@@ -1075,6 +1075,7 @@ export default function TeacherDashboard() {
           </div>
         </div>
       )}
+      <ProductSidePanel role="teacher" />
     </div>
   );
 }

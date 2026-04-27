@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { authService } from '@/services/auth';
+import type { RegisterRequest, RegisterRole } from '@/types/auth';
 
-type Role = 'student' | 'teacher';
+type Role = RegisterRole;
 
 type StudentForm = {
   realName: string;
@@ -76,20 +78,66 @@ export default function RegisterPage() {
 
   const currentEmail = role === 'student' ? studentForm.email : teacherForm.email;
 
-  const handleSendCode = () => {
+  const buildRegisterPayload = (): RegisterRequest => {
+    if (role === 'student') {
+      return {
+        role: 'student',
+        realName: studentForm.realName.trim(),
+        studentId: studentForm.studentId.trim(),
+        email: studentForm.email.trim(),
+        phone: studentForm.phone.trim(),
+        school: studentForm.school.trim(),
+        college: studentForm.college.trim(),
+        major: studentForm.major.trim(),
+        grade: studentForm.grade,
+        classNo: studentForm.classNo.trim(),
+        password: studentForm.password,
+        verifyCode: studentForm.verifyCode.trim(),
+      };
+    }
+
+    return {
+      role: 'teacher',
+      realName: teacherForm.realName.trim(),
+      teacherId: teacherForm.teacherId.trim(),
+      email: teacherForm.email.trim(),
+      phone: teacherForm.phone.trim(),
+      school: teacherForm.school.trim(),
+      college: teacherForm.college.trim(),
+      department: teacherForm.department.trim(),
+      title: teacherForm.title,
+      idCardNo: teacherForm.idCardNo.trim(),
+      certFile: teacherForm.certFile.trim(),
+      password: teacherForm.password,
+      verifyCode: teacherForm.verifyCode.trim(),
+    };
+  };
+
+  const handleSendCode = async () => {
     if (!currentEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(currentEmail)) {
       setErrors(prev => ({ ...prev, verifyCode: '请先在第一步填写正确的邮箱地址' }));
       return;
     }
-    // TODO: POST /api/auth/send-verify-code { email: currentEmail }
-    setCodeSent(true);
-    setCodeCountdown(60);
-    const timer = setInterval(() => {
-      setCodeCountdown(prev => {
-        if (prev <= 1) { clearInterval(timer); return 0; }
-        return prev - 1;
+    try {
+      const result = await authService.sendVerificationCode({
+        role,
+        channel: 'email',
+        target: currentEmail.trim(),
       });
-    }, 1000);
+      setCodeSent(true);
+      setCodeCountdown(result.cooldownSeconds);
+      const timer = setInterval(() => {
+        setCodeCountdown(prev => {
+          if (prev <= 1) { clearInterval(timer); return 0; }
+          return prev - 1;
+        });
+      }, 1000);
+    } catch (codeError) {
+      setErrors(prev => ({
+        ...prev,
+        verifyCode: codeError instanceof Error ? codeError.message : '验证码发送失败，请稍后重试',
+      }));
+    }
   };
 
   const validateStep1 = () => {
@@ -165,45 +213,13 @@ export default function RegisterPage() {
     if (!validateStep3()) return;
     setLoading(true);
 
-    // TODO: POST /api/auth/register
-    const formData = new URLSearchParams();
-    if (role === 'student') {
-      formData.append('role', '学生');
-      formData.append('realName', studentForm.realName);
-      formData.append('studentId', studentForm.studentId);
-      formData.append('email', studentForm.email);
-      formData.append('phone', studentForm.phone);
-      formData.append('school', studentForm.school);
-      formData.append('college', studentForm.college);
-      formData.append('major', studentForm.major);
-      formData.append('grade', studentForm.grade);
-      formData.append('classNo', studentForm.classNo);
-    } else {
-      formData.append('role', '教师');
-      formData.append('realName', teacherForm.realName);
-      formData.append('teacherId', teacherForm.teacherId);
-      formData.append('email', teacherForm.email);
-      formData.append('phone', teacherForm.phone);
-      formData.append('school', teacherForm.school);
-      formData.append('college', teacherForm.college);
-      formData.append('department', teacherForm.department);
-      formData.append('title', teacherForm.title);
-      formData.append('idCardNo', teacherForm.idCardNo);
-    }
-
-    const submitUrl = role === 'student'
-      ? 'https://readdy.ai/api/form/d6pvo36a739gopmlh1ag'
-      : 'https://readdy.ai/api/form/d6pvo3ma739gopmlh1b0';
-
     try {
-      await fetch(submitUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: formData.toString(),
-      });
+      await authService.register(buildRegisterPayload());
       setSubmitted(true);
-    } catch {
-      setErrors({ submit: '提交失败，请稍后重试' });
+    } catch (submitError) {
+      setErrors({
+        submit: submitError instanceof Error ? submitError.message : '提交失败，请稍后重试',
+      });
     } finally {
       setLoading(false);
     }
@@ -235,7 +251,7 @@ export default function RegisterPage() {
 
   if (submitted) {
     return (
-      <div className="min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
+      <div className="auth-soft min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
         <div className="hidden lg:flex lg:w-[52%] relative flex-col justify-between overflow-hidden">
           <img
             src="https://readdy.ai/api/search-image?query=Beautiful%20Chinese%20university%20campus%20cherry%20blossom%20trees%20in%20full%20bloom%20along%20a%20serene%20pathway%20with%20modern%20academic%20buildings%20in%20the%20background%2C%20soft%20warm%20spring%20light%20filtering%20through%20pink%20petals%2C%20elegant%20and%20peaceful%20atmosphere%2C%20high%20quality%20photography%20style%20with%20shallow%20depth%20of%20field%2C%20pastel%20pink%20and%20white%20tones%2C%20professional%20educational%20institution%20aesthetic&width=900&height=1080&seq=login-bg-1&orientation=portrait"
@@ -252,8 +268,8 @@ export default function RegisterPage() {
             </div>
           </div>
           <div className="relative z-10 px-10 pb-16">
-            <h2 className="text-3xl font-bold text-white mb-3">注册申请已提交</h2>
-            <p className="text-white/75 text-sm leading-relaxed">管理员将在1-3个工作日内完成审核，审核结果将通过邮件通知您。</p>
+            <h2 className="text-3xl font-bold text-white mb-3">注册成功</h2>
+            <p className="text-white/75 text-sm leading-relaxed">验证码校验已完成，账号已创建成功。您现在可以直接返回登录页开始使用平台。</p>
           </div>
         </div>
         <div className="flex-1 flex flex-col justify-center items-center bg-white px-8">
@@ -261,19 +277,19 @@ export default function RegisterPage() {
             <div className={`w-20 h-20 rounded-full ${bgAccent} flex items-center justify-center mx-auto mb-6`}>
               <i className={`ri-checkbox-circle-line text-4xl ${textAccent}`}></i>
             </div>
-            <h3 className="text-2xl font-bold text-gray-900 mb-2">申请已提交！</h3>
+            <h3 className="text-2xl font-bold text-gray-900 mb-2">注册成功！</h3>
             <p className="text-sm text-gray-500 mb-2">
-              您的<span className="font-medium text-gray-700">{role === 'student' ? '学生' : '教师'}</span>注册申请已成功提交
+              您的<span className="font-medium text-gray-700">{role === 'student' ? '学生' : '教师'}</span>账号已创建完成
             </p>
-            <p className="text-sm text-gray-400 mb-8">管理员审核通过后，您将收到邮件通知，届时即可登录使用。</p>
+            <p className="text-sm text-gray-400 mb-8">当前注册流程不需要管理员审核，您可以立即返回登录页，使用刚刚完成验证的账号登录。</p>
             <div className={`rounded-xl border ${borderAccentColor} ${bgAccent} p-4 mb-8 text-left`}>
               <div className="flex items-start gap-3">
                 <i className={`ri-information-line text-base mt-0.5 ${textAccent}`}></i>
                 <div className="text-xs text-gray-600 leading-relaxed">
                   <p className="font-medium text-gray-700 mb-1">温馨提示</p>
-                  <p>· 审核周期：1-3个工作日</p>
-                  <p>· 审核结果将发送至您填写的邮箱</p>
-                  {role === 'teacher' && <p>· 教师资质审核需核验工号及证件，请确保信息真实</p>}
+                  <p>· 本次注册已完成验证码校验并即时生效</p>
+                  <p>· 管理员端可以查看注册记录，但不会阻塞您的登录</p>
+                  {role === 'teacher' && <p>· 教师账号后续可在后台继续补充或维护个人资料</p>}
                   <p>· 如有疑问请联系：support@luoying.edu.cn</p>
                 </div>
               </div>
@@ -291,7 +307,7 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
+    <div className="auth-soft min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
       {/* 左侧品牌区 */}
       <div className="hidden lg:flex lg:w-[52%] relative flex-col justify-between overflow-hidden">
         <img
@@ -313,7 +329,7 @@ export default function RegisterPage() {
             加入珞樱学堂<br />开启智能学习
           </h1>
           <p className="text-white/80 text-base leading-relaxed mb-8">
-            填写注册信息，等待管理员审核<br />即可享受AI助教全功能服务
+            填写注册信息并完成验证码校验<br />即可立即开通账号并使用平台服务
           </p>
           <div className="flex flex-col gap-4">
             {[
@@ -464,7 +480,7 @@ export default function RegisterPage() {
                       name="email"
                       value={role === 'student' ? studentForm.email : teacherForm.email}
                       onChange={e => role === 'student' ? updateStudent('email', e.target.value) : updateTeacher('email', e.target.value)}
-                      placeholder="请输入常用邮箱（用于接收审核通知）"
+                      placeholder="请输入常用邮箱（用于接收验证码与登录通知）"
                       className={inputClass}
                     />
                   </div>
@@ -736,7 +752,7 @@ export default function RegisterPage() {
                   <div className="flex items-start gap-2">
                     <i className="ri-information-line text-sm mt-0.5 text-orange-500"></i>
                     <p className="text-xs text-gray-600 leading-relaxed">
-                      教师注册需经管理员人工审核，核验工号与身份证信息，审核周期约1-3个工作日。
+                      教师账号完成验证码校验后即可注册成功，管理员端可查看注册记录与资料信息。
                     </p>
                   </div>
                 </div>
@@ -963,7 +979,7 @@ export default function RegisterPage() {
                   ) : (
                     <span className="flex items-center justify-center gap-1.5">
                       <i className="ri-send-plane-line text-sm"></i>
-                      提交注册申请
+                      完成注册
                     </span>
                   )}
                 </button>

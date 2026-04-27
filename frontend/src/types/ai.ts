@@ -1,0 +1,112 @@
+export type AiRole = "student" | "teacher";
+export type AiMessageRole = "user" | "ai";
+export type AiFeedback = "like" | "dislike";
+export type AiKnowledgeBase = "course" | "personal" | "global";
+export type AiResponseStyle = "academic" | "inspire" | "debug";
+
+export interface AiMessageSource {
+  name: string;
+  page: number;
+  type: string;
+}
+
+export interface AiAttachment {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  fileType: "image" | "pdf" | "docx" | "md" | "code" | "other";
+  preview?: string;
+}
+
+export interface AiMessage {
+  id: number;
+  role: AiMessageRole;
+  content: string;
+  time: string;
+  attachments?: AiAttachment[];
+  sources?: AiMessageSource[];
+  feedback?: AiFeedback;
+  isWelcome?: boolean;
+}
+
+export interface AiConversation {
+  id: number;
+  title: string;
+  createdAt: string;
+  lastMessage: string;
+  messages: AiMessage[];
+}
+
+export interface AiResourceRecommendation {
+  id: number;
+  title: string;
+  type: "pdf" | "video" | "ppt" | "exercise" | "report" | "template";
+  chapter: string;
+  relevance: number;
+  reason: string;
+  matchKeywords: string[];
+}
+
+export interface AiTeacherQuestion {
+  id: number;
+  student: string;
+  avatar: string;
+  question: string;
+  aiAnswer: string;
+  confidence: number;
+  confidenceLevel: "high" | "medium" | "low";
+  sources: Array<{ name: string; page: number }>;
+  time: string;
+  status: "pending" | "adopted" | "replied";
+  teacherReply?: string;
+}
+
+export interface AiFeedbackItem {
+  id: string;
+  studentName: string;
+  conversationTitle: string;
+  questionContent: string;
+  aiAnswer: string;
+  reason: string;
+  timestamp: string;
+  status: "pending" | "resolved";
+  courseId?: string;
+}
+
+export interface CreateConversationPayload {
+  title?: string;
+}
+
+export interface SendMessagePayload {
+  conversationId?: number;
+  content: string;
+  attachments?: AiAttachment[];
+}
+
+export interface ConversationContextPayload {
+  conversationId: number;
+  knowledgeBase: AiKnowledgeBase;
+}
+
+export interface ConversationStylePayload {
+  conversationId: number;
+  style: AiResponseStyle;
+}
+
+export interface SubmitFeedbackPayload {
+  conversationId: number;
+  messageId: number;
+  reason: string;
+  questionContent?: string;
+  aiAnswer: string;
+}
+
+export interface ReplyAiQuestionPayload {
+  questionId: number;
+  reply: string;
+}
+
+export interface GenerateTeacherToolPayload {
+  prompt: string;
+}

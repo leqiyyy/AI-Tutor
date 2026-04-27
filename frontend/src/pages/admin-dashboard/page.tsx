@@ -1,11 +1,248 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, useRef, useEffect } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import ProductSidePanel from '../../components/ProductSidePanel';
+import { authService } from '@/services/auth';
+import { adminService } from '@/services/admin';
+import { dashboardService } from '@/services/dashboard';
+import type {
+  AdminAuditAnswer,
+  AdminAuditReport,
+  AdminCourseRow,
+  AdminDashboardData,
+  AdminUserReview,
+  AdminUserRow,
+} from '@/types/dashboard';
 
 export default function AdminDashboard() {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('overview');
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [dashboardData, setDashboardData] = useState<AdminDashboardData | null>(null);
+  const [dashboardError, setDashboardError] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
+  const [actionPending, setActionPending] = useState(false);
+  const [userReviews, setUserReviews] = useState<AdminUserReview[]>([]);
+  const [users, setUsers] = useState<AdminUserRow[]>([]);
+  const [courses, setCourses] = useState<AdminCourseRow[]>([]);
+  const [auditAnswers, setAuditAnswers] = useState<AdminAuditAnswer[]>([]);
+  const [auditReports, setAuditReports] = useState<AdminAuditReport[]>([]);
+  const [sensitiveWords, setSensitiveWords] = useState<string[]>([]);
+  const [newSensitiveWord, setNewSensitiveWord] = useState('');
+  const [systemSettings, setSystemSettings] = useState({
+    maintenanceMode: false,
+    examWeekLimit: true,
+    backupSchedule: '每天 23:00',
+    announcementTitle: '',
+    announcementContent: '',
+    announcementAudience: '全校师生',
+  });
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    dashboardService
+      .getAdminDashboard()
+      .then((data) => {
+        if (!mounted) return;
+        setDashboardData(data);
+        setUserReviews(data.userReviews);
+        setUsers(data.users);
+        setCourses(data.courses);
+        setAuditAnswers(data.auditAnswers);
+        setAuditReports(data.auditReports);
+        setSensitiveWords(data.sensitiveWords);
+        setDashboardError('');
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setDashboardError(error instanceof Error ? error.message : 'Dashboard data failed to load');
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleLogout = () => {
+    authService.logout();
+    setShowUserMenu(false);
+    navigate('/login');
+  };
+
+  const showActionMessage = (message: string) => {
+    setActionMessage(message);
+    window.setTimeout(() => setActionMessage(''), 2500);
+  };
+
+  const runAdminAction = async (action: () => Promise<void>, successMessage: string) => {
+    try {
+      setActionPending(true);
+      setDashboardError('');
+      await action();
+      showActionMessage(successMessage);
+    } catch (error) {
+      setDashboardError(error instanceof Error ? error.message : '操作失败，请稍后重试');
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const handleReviewRegistration = async (userId: string, decision: 'approve' | 'reject') => {
+    await runAdminAction(
+      async () => {
+        await adminService.reviewRegistration({ userId, decision });
+        setUserReviews((prev) => prev.filter((item) => item.id !== userId));
+      },
+      decision === 'approve' ? '已通过注册申请' : '已拒绝注册申请',
+    );
+  };
+
+  const handleBatchReviewRegistrations = async (decision: 'approve' | 'reject') => {
+    if (userReviews.length === 0) {
+      return;
+    }
+
+    await runAdminAction(
+      async () => {
+        await Promise.all(
+          userReviews.map((item) =>
+            adminService.reviewRegistration({ userId: item.id, decision }),
+          ),
+        );
+        setUserReviews([]);
+      },
+      decision === 'approve' ? '已批量通过注册申请' : '已批量拒绝注册申请',
+    );
+  };
+
+  const handleToggleUserStatus = async (user: AdminUserRow) => {
+    const nextStatus = user.status === 'disabled' ? 'enabled' : 'disabled';
+
+    await runAdminAction(
+      async () => {
+        await adminService.updateUserStatus({ userId: user.id, status: nextStatus });
+        setUsers((prev) =>
+          prev.map((item) =>
+            item.id === user.id
+              ? {
+                  ...item,
+                  status: nextStatus === 'disabled' ? 'disabled' : 'offline',
+                  statusLabel: nextStatus === 'disabled' ? '已禁用' : '离线',
+                }
+              : item,
+          ),
+        );
+      },
+      nextStatus === 'disabled' ? '用户已禁用' : '用户已恢复启用',
+    );
+  };
+
+  const handleArchiveCourse = async (courseId: string) => {
+    await runAdminAction(
+      async () => {
+        await adminService.updateCourseStatus({ courseId, status: 'archived' });
+        setCourses((prev) => prev.filter((item) => item.id !== courseId));
+      },
+      '课程已归档',
+    );
+  };
+
+  const handleReviewAnswer = async (itemId: string) => {
+    await runAdminAction(
+      async () => {
+        await adminService.reviewContent({ itemId, decision: 'markIncorrect' });
+        setAuditAnswers((prev) => prev.filter((item) => item.id !== itemId));
+      },
+      '已标记 AI 回答错误',
+    );
+  };
+
+  const handleResolveReport = async (reportId: string, decision: 'delete' | 'reject') => {
+    await runAdminAction(
+      async () => {
+        await adminService.reviewContent({ itemId: reportId, decision });
+        setAuditReports((prev) => prev.filter((item) => item.id !== reportId));
+      },
+      decision === 'delete' ? '已删除被举报内容' : '已驳回举报',
+    );
+  };
+
+  const handleSaveSystemSettings = async () => {
+    await runAdminAction(
+      async () => {
+        await adminService.updateSystemSettings({
+          maintenanceMode: systemSettings.maintenanceMode,
+          examWeekLimit: systemSettings.examWeekLimit,
+          backupSchedule: systemSettings.backupSchedule,
+          announcement: systemSettings.announcementTitle || systemSettings.announcementContent
+            ? {
+                title: systemSettings.announcementTitle,
+                content: systemSettings.announcementContent,
+                audience: systemSettings.announcementAudience,
+              }
+            : undefined,
+        });
+      },
+      '系统设置已保存',
+    );
+  };
+
+  const handlePublishAnnouncement = async () => {
+    if (!systemSettings.announcementTitle.trim() || !systemSettings.announcementContent.trim()) {
+      setDashboardError('请填写完整的公告标题和内容');
+      return;
+    }
+
+    await runAdminAction(
+      async () => {
+        await adminService.updateSystemSettings({
+          announcement: {
+            title: systemSettings.announcementTitle.trim(),
+            content: systemSettings.announcementContent.trim(),
+            audience: systemSettings.announcementAudience,
+          },
+        });
+        setSystemSettings((prev) => ({
+          ...prev,
+          announcementTitle: '',
+          announcementContent: '',
+        }));
+      },
+      '系统公告已发布',
+    );
+  };
+
+  const handleAddSensitiveWord = () => {
+    const value = newSensitiveWord.trim();
+    if (!value || sensitiveWords.includes(value)) {
+      return;
+    }
+    setSensitiveWords((prev) => [...prev, value]);
+    setNewSensitiveWord('');
+  };
+
+  const handleRemoveSensitiveWord = (word: string) => {
+    setSensitiveWords((prev) => prev.filter((item) => item !== word));
+  };
+
+  const adminStats = dashboardData?.stats ?? [];
+  const adminActivities = dashboardData?.activities ?? [];
+  const adminTodoReminders = dashboardData?.todoReminders ?? [];
+  const adminSystemStatus = dashboardData?.systemStatus ?? [];
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="soft-dash soft-dash-admin min-h-screen bg-gray-50">
       {/* 固定导航栏 */}
       <nav className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 z-50">
         <div className="px-6 py-3">
@@ -30,7 +267,41 @@ export default function AdminDashboard() {
               <button className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 cursor-pointer">
                 <i className="ri-notification-3-line text-lg"></i>
               </button>
-              <div className="w-8 h-8 rounded-full bg-purple-500 flex items-center justify-center text-white text-sm font-medium cursor-pointer">管</div>
+              <div className="relative" ref={userMenuRef}>
+                <button
+                  onClick={() => setShowUserMenu(v => !v)}
+                  className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
+                >
+                  <div className="w-8 h-8 rounded-full bg-teal-600 flex items-center justify-center text-white text-sm font-medium">管</div>
+                  <span className="text-sm text-gray-700 font-medium">超级管理员</span>
+                  <i className={`ri-arrow-down-s-line text-gray-400 text-base transition-transform ${showUserMenu ? 'rotate-180' : ''}`}></i>
+                </button>
+                {showUserMenu && (
+                  <div className="absolute right-0 bottom-full mb-1.5 w-44 origin-bottom-right bg-white border border-gray-200 rounded-xl overflow-hidden z-50">
+                    <div className="px-4 py-3 border-b border-gray-100">
+                      <div className="text-sm font-semibold text-gray-900">超级管理员</div>
+                      <div className="text-xs text-gray-500 mt-0.5">admin@university.edu.cn</div>
+                    </div>
+                    <div className="py-1">
+                      <button
+                        onClick={() => { setActiveTab('settings'); setShowUserMenu(false); }}
+                        className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
+                      >
+                        <i className="ri-settings-3-line text-gray-400 text-base"></i>
+                        系统设置
+                      </button>
+                      <div className="my-1 border-t border-gray-100"></div>
+                      <button
+                        onClick={handleLogout}
+                        className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 cursor-pointer"
+                      >
+                        <i className="ri-logout-box-r-line text-red-500 text-base"></i>
+                        退出登录
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -38,6 +309,16 @@ export default function AdminDashboard() {
 
       {/* 主内容区 */}
       <div className="pt-16 px-6 py-6">
+        {dashboardError && (
+          <div className="max-w-7xl mx-auto mb-4 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+            {dashboardError}
+          </div>
+        )}
+        {actionMessage && (
+          <div className="max-w-7xl mx-auto mb-4 rounded-lg border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700">
+            {actionMessage}
+          </div>
+        )}
         {activeTab === 'overview' && (
           <div className="max-w-7xl mx-auto">
             <h1 className="text-2xl font-bold text-gray-900 mb-6">系统概览</h1>
@@ -51,7 +332,7 @@ export default function AdminDashboard() {
                     <i className="ri-user-star-line text-blue-600 text-base"></i>
                   </div>
                 </div>
-                <div className="text-2xl font-bold text-gray-900">156</div>
+                <div className="text-2xl font-bold text-gray-900">{adminStats[0]?.value ?? '156'}</div>
                 <div className="text-xs text-green-600 mt-1">+8 本月</div>
               </div>
               <div className="bg-white rounded-lg p-5 border border-gray-200">
@@ -61,7 +342,7 @@ export default function AdminDashboard() {
                     <i className="ri-group-line text-green-600 text-base"></i>
                   </div>
                 </div>
-                <div className="text-2xl font-bold text-gray-900">3,842</div>
+                <div className="text-2xl font-bold text-gray-900">{adminStats[1]?.value ?? '3,842'}</div>
                 <div className="text-xs text-green-600 mt-1">+127 本月</div>
               </div>
               <div className="bg-white rounded-lg p-5 border border-gray-200">
@@ -71,7 +352,7 @@ export default function AdminDashboard() {
                     <i className="ri-book-open-line text-purple-600 text-base"></i>
                   </div>
                 </div>
-                <div className="text-2xl font-bold text-gray-900">284</div>
+                <div className="text-2xl font-bold text-gray-900">{adminStats[2]?.value ?? '284'}</div>
                 <div className="text-xs text-gray-500 mt-1">本学期</div>
               </div>
               <div className="bg-white rounded-lg p-5 border border-gray-200">
@@ -81,7 +362,7 @@ export default function AdminDashboard() {
                     <i className="ri-team-line text-orange-600 text-base"></i>
                   </div>
                 </div>
-                <div className="text-2xl font-bold text-gray-900">218</div>
+                <div className="text-2xl font-bold text-gray-900">{adminStats[3]?.value ?? '218'}</div>
                 <div className="text-xs text-gray-500 mt-1">近7天活跃</div>
               </div>
             </div>
@@ -92,27 +373,27 @@ export default function AdminDashboard() {
               <div className="grid grid-cols-3 gap-4">
                 <div className="p-4 rounded-lg bg-red-50 border border-red-100">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-900">待审核注册</span>
-                    <div className="w-7 h-7 flex items-center justify-center rounded-full bg-red-500 text-white text-xs font-bold">12</div>
+                    <span className="text-sm font-medium text-gray-900">{adminTodoReminders[0]?.title ?? '待审核注册'}</span>
+                    <div className="w-7 h-7 flex items-center justify-center rounded-full bg-red-500 text-white text-xs font-bold">{adminTodoReminders[0]?.count ?? 0}</div>
                   </div>
-                  <div className="text-xs text-gray-600">教师资质审核 8 人 · 学生学籍核验 4 人</div>
-                  <button className="mt-3 w-full px-3 py-1.5 text-xs font-medium text-red-600 bg-red-100 rounded-md hover:bg-red-200 cursor-pointer whitespace-nowrap">立即处理</button>
+                  <div className="text-xs text-gray-600">{adminTodoReminders[0]?.content ?? '教师资质审核 8 人 · 学生学籍核验 4 人'}</div>
+                  <button onClick={() => setActiveTab('users')} className="mt-3 w-full px-3 py-1.5 text-xs font-medium text-red-600 bg-red-100 rounded-md hover:bg-red-200 cursor-pointer whitespace-nowrap">{adminTodoReminders[0]?.actionLabel ?? '立即处理'}</button>
                 </div>
                 <div className="p-4 rounded-lg bg-orange-50 border border-orange-100">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-900">知识库异常</span>
-                    <div className="w-7 h-7 flex items-center justify-center rounded-full bg-orange-500 text-white text-xs font-bold">5</div>
+                    <span className="text-sm font-medium text-gray-900">{adminTodoReminders[1]?.title ?? '知识库异常'}</span>
+                    <div className="w-7 h-7 flex items-center justify-center rounded-full bg-orange-500 text-white text-xs font-bold">{adminTodoReminders[1]?.count ?? 0}</div>
                   </div>
-                  <div className="text-xs text-gray-600">索引构建失败 3 个 · 资料解析错误 2 个</div>
-                  <button className="mt-3 w-full px-3 py-1.5 text-xs font-medium text-orange-600 bg-orange-100 rounded-md hover:bg-orange-200 cursor-pointer whitespace-nowrap">查看详情</button>
+                  <div className="text-xs text-gray-600">{adminTodoReminders[1]?.content ?? '索引构建失败 3 个 · 资料解析错误 2 个'}</div>
+                  <button onClick={() => setActiveTab('courses')} className="mt-3 w-full px-3 py-1.5 text-xs font-medium text-orange-600 bg-orange-100 rounded-md hover:bg-orange-200 cursor-pointer whitespace-nowrap">{adminTodoReminders[1]?.actionLabel ?? '查看详情'}</button>
                 </div>
                 <div className="p-4 rounded-lg bg-blue-50 border border-blue-100">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-900">待处理举报</span>
-                    <div className="w-7 h-7 flex items-center justify-center rounded-full bg-blue-500 text-white text-xs font-bold">3</div>
+                    <span className="text-sm font-medium text-gray-900">{adminTodoReminders[2]?.title ?? '待处理举报'}</span>
+                    <div className="w-7 h-7 flex items-center justify-center rounded-full bg-blue-500 text-white text-xs font-bold">{adminTodoReminders[2]?.count ?? 0}</div>
                   </div>
-                  <div className="text-xs text-gray-600">内容举报 2 条 · AI回答错误 1 条</div>
-                  <button className="mt-3 w-full px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-100 rounded-md hover:bg-blue-200 cursor-pointer whitespace-nowrap">前往审核</button>
+                  <div className="text-xs text-gray-600">{adminTodoReminders[2]?.content ?? '内容举报 2 条 · AI回答错误 1 条'}</div>
+                  <button onClick={() => setActiveTab('audit')} className="mt-3 w-full px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-100 rounded-md hover:bg-blue-200 cursor-pointer whitespace-nowrap">{adminTodoReminders[2]?.actionLabel ?? '前往审核'}</button>
                 </div>
               </div>
             </div>
@@ -122,13 +403,7 @@ export default function AdminDashboard() {
               <div className="bg-white rounded-lg p-5 border border-gray-200">
                 <h2 className="text-base font-semibold text-gray-900 mb-4">近期动态</h2>
                 <div className="space-y-3">
-                  {[
-                    { type: 'user', title: '新用户注册', content: '计算机学院 8 名教师完成注册', time: '10分钟前', color: 'green' },
-                    { type: 'course', title: '课程创建', content: '王教授创建了"深度学习基础"课程', time: '1小时前', color: 'blue' },
-                    { type: 'announcement', title: '系统公告', content: '发布了"期末考试安排"全校公告', time: '3小时前', color: 'purple' },
-                    { type: 'backup', title: '数据备份', content: '系统自动备份已完成', time: '5小时前', color: 'teal' },
-                    { type: 'user', title: '学生注册', content: '软件学院 23 名学生完成学籍核验', time: '1天前', color: 'green' }
-                  ].map((activity, index) => (
+                  {adminActivities.map((activity, index) => (
                     <div key={index} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50">
                       <div className={`w-8 h-8 flex items-center justify-center rounded-lg bg-${activity.color}-50 flex-shrink-0`}>
                         <i className={`text-base ${
@@ -154,44 +429,44 @@ export default function AdminDashboard() {
                 <div className="space-y-4">
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-gray-600">服务器负载</span>
-                      <span className="text-sm font-semibold text-green-600">正常</span>
+                      <span className="text-sm text-gray-600">{adminSystemStatus[0]?.label ?? '服务器负载'}</span>
+                      <span className="text-sm font-semibold text-green-600">{adminSystemStatus[0]?.status ?? '正常'}</span>
                     </div>
                     <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-green-500 rounded-full" style={{ width: '35%' }}></div>
+                      <div className="h-full bg-green-500 rounded-full" style={{ width: `${adminSystemStatus[0]?.progress ?? 35}%` }}></div>
                     </div>
-                    <div className="text-xs text-gray-500 mt-1">CPU: 35% · 内存: 42%</div>
+                    <div className="text-xs text-gray-500 mt-1">{adminSystemStatus[0]?.detail ?? 'CPU: 35% · 内存: 42%'}</div>
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-gray-600">数据库状态</span>
-                      <span className="text-sm font-semibold text-green-600">运行中</span>
+                      <span className="text-sm text-gray-600">{adminSystemStatus[1]?.label ?? '数据库状态'}</span>
+                      <span className="text-sm font-semibold text-green-600">{adminSystemStatus[1]?.status ?? '运行中'}</span>
                     </div>
-                    <div className="text-xs text-gray-500">连接数: 156/500 · 响应时间: 12ms</div>
+                    <div className="text-xs text-gray-500">{adminSystemStatus[1]?.detail ?? '连接数: 156/500 · 响应时间: 12ms'}</div>
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-gray-600">AI服务状态</span>
-                      <span className="text-sm font-semibold text-green-600">正常</span>
+                      <span className="text-sm text-gray-600">{adminSystemStatus[2]?.label ?? 'AI服务状态'}</span>
+                      <span className="text-sm font-semibold text-green-600">{adminSystemStatus[2]?.status ?? '正常'}</span>
                     </div>
-                    <div className="text-xs text-gray-500">今日调用: 8,234 次 · 平均响应: 1.2s</div>
+                    <div className="text-xs text-gray-500">{adminSystemStatus[2]?.detail ?? '今日调用: 8,234 次 · 平均响应: 1.2s'}</div>
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-gray-600">存储空间</span>
-                      <span className="text-sm font-semibold text-orange-600">68%</span>
+                      <span className="text-sm text-gray-600">{adminSystemStatus[3]?.label ?? '存储空间'}</span>
+                      <span className="text-sm font-semibold text-orange-600">{adminSystemStatus[3]?.status ?? '68%'}</span>
                     </div>
                     <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-orange-500 rounded-full" style={{ width: '68%' }}></div>
+                      <div className="h-full bg-orange-500 rounded-full" style={{ width: `${adminSystemStatus[3]?.progress ?? 68}%` }}></div>
                     </div>
-                    <div className="text-xs text-gray-500 mt-1">已用 680GB / 总计 1TB</div>
+                    <div className="text-xs text-gray-500 mt-1">{adminSystemStatus[3]?.detail ?? '已用 680GB / 总计 1TB'}</div>
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-gray-600">最近备份</span>
-                      <span className="text-sm font-semibold text-gray-900">5小时前</span>
+                      <span className="text-sm text-gray-600">{adminSystemStatus[4]?.label ?? '最近备份'}</span>
+                      <span className="text-sm font-semibold text-gray-900">{adminSystemStatus[4]?.status ?? '5小时前'}</span>
                     </div>
-                    <div className="text-xs text-gray-500">下次自动备份: 今天 23:00</div>
+                    <div className="text-xs text-gray-500">{adminSystemStatus[4]?.detail ?? '下次自动备份: 今天 23:00'}</div>
                   </div>
                 </div>
               </div>
@@ -208,8 +483,8 @@ export default function AdminDashboard() {
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-base font-semibold text-gray-900">注册审核</h2>
                 <div className="flex items-center gap-2">
-                  <button className="px-3 py-1.5 text-sm font-medium text-green-600 border border-green-600 rounded-lg hover:bg-green-50 cursor-pointer whitespace-nowrap">批量通过</button>
-                  <button className="px-3 py-1.5 text-sm font-medium text-red-600 border border-red-600 rounded-lg hover:bg-red-50 cursor-pointer whitespace-nowrap">批量拒绝</button>
+                  <button onClick={() => handleBatchReviewRegistrations('approve')} disabled={actionPending || userReviews.length === 0} className="px-3 py-1.5 text-sm font-medium text-green-600 border border-green-600 rounded-lg hover:bg-green-50 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">批量通过</button>
+                  <button onClick={() => handleBatchReviewRegistrations('reject')} disabled={actionPending || userReviews.length === 0} className="px-3 py-1.5 text-sm font-medium text-red-600 border border-red-600 rounded-lg hover:bg-red-50 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">批量拒绝</button>
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -228,29 +503,24 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {[
-                      { name: '张伟', role: '教师', dept: '计算机学院', id: 'T2024001', time: '2小时前' },
-                      { name: '李娜', role: '教师', dept: '软件学院', id: 'T2024002', time: '3小时前' },
-                      { name: '王强', role: '学生', dept: '计算机学院', id: '2024301001', time: '5小时前' },
-                      { name: '刘芳', role: '学生', dept: '软件学院', id: '2024302001', time: '1天前' }
-                    ].map((user, index) => (
-                      <tr key={index} className="hover:bg-gray-50">
+                    {userReviews.map((user) => (
+                      <tr key={user.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3">
                           <input type="checkbox" className="w-4 h-4 text-teal-600 border-gray-300 rounded" />
                         </td>
                         <td className="px-4 py-3 font-medium text-gray-900">{user.name}</td>
                         <td className="px-4 py-3">
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${user.role === '教师' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'}`}>
-                            {user.role}
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${user.role === 'teacher' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'}`}>
+                            {user.roleLabel}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-gray-600">{user.dept}</td>
-                        <td className="px-4 py-3 text-gray-600 font-mono text-xs">{user.id}</td>
-                        <td className="px-4 py-3 text-gray-500">{user.time}</td>
+                        <td className="px-4 py-3 text-gray-600">{user.department}</td>
+                        <td className="px-4 py-3 text-gray-600 font-mono text-xs">{user.accountNo}</td>
+                        <td className="px-4 py-3 text-gray-500">{user.appliedAt}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <button className="px-3 py-1 text-xs font-medium text-green-600 bg-green-50 rounded-md hover:bg-green-100 cursor-pointer whitespace-nowrap">通过</button>
-                            <button className="px-3 py-1 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap">拒绝</button>
+                            <button onClick={() => handleReviewRegistration(user.id, 'approve')} disabled={actionPending} className="px-3 py-1 text-xs font-medium text-green-600 bg-green-50 rounded-md hover:bg-green-100 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">通过</button>
+                            <button onClick={() => handleReviewRegistration(user.id, 'reject')} disabled={actionPending} className="px-3 py-1 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">拒绝</button>
                           </div>
                         </td>
                       </tr>
@@ -290,33 +560,27 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {[
-                      { name: '王教授', role: '教师', dept: '计算机学院', date: '2023-09-01', status: '在线' },
-                      { name: '李教授', role: '教师', dept: '软件学院', date: '2023-09-01', status: '离线' },
-                      { name: '李明', role: '学生', dept: '计算机学院', date: '2023-09-15', status: '在线' },
-                      { name: '张华', role: '学生', dept: '软件学院', date: '2023-09-15', status: '在线' },
-                      { name: '刘洋', role: '学生', dept: '计算机学院', date: '2023-09-16', status: '离线' }
-                    ].map((user, index) => (
-                      <tr key={index} className="hover:bg-gray-50">
+                    {users.map((user) => (
+                      <tr key={user.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 font-medium text-gray-900">{user.name}</td>
                         <td className="px-4 py-3">
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${user.role === '教师' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'}`}>
-                            {user.role}
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${user.role === 'teacher' ? 'bg-blue-50 text-blue-600' : user.role === 'admin' ? 'bg-purple-50 text-purple-600' : 'bg-green-50 text-green-600'}`}>
+                            {user.roleLabel}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-gray-600">{user.dept}</td>
-                        <td className="px-4 py-3 text-gray-600">{user.date}</td>
+                        <td className="px-4 py-3 text-gray-600">{user.department}</td>
+                        <td className="px-4 py-3 text-gray-600">{user.registeredAt}</td>
                         <td className="px-4 py-3">
-                          <span className={`inline-flex items-center gap-1 text-xs ${user.status === '在线' ? 'text-green-600' : 'text-gray-500'}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${user.status === '在线' ? 'bg-green-500' : 'bg-gray-400'}`}></span>
-                            {user.status}
+                          <span className={`inline-flex items-center gap-1 text-xs ${user.status === 'online' ? 'text-green-600' : user.status === 'disabled' ? 'text-red-600' : 'text-gray-500'}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${user.status === 'online' ? 'bg-green-500' : user.status === 'disabled' ? 'bg-red-500' : 'bg-gray-400'}`}></span>
+                            {user.statusLabel}
                           </span>
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <button className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap">查看</button>
                             <button className="text-xs text-gray-600 hover:text-gray-700 cursor-pointer whitespace-nowrap">重置密码</button>
-                            <button className="text-xs text-red-600 hover:text-red-700 cursor-pointer whitespace-nowrap">禁用</button>
+                            <button onClick={() => handleToggleUserStatus(user)} disabled={actionPending} className={`text-xs cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed ${user.status === 'disabled' ? 'text-green-600 hover:text-green-700' : 'text-red-600 hover:text-red-700'}`}>{user.status === 'disabled' ? '启用' : '禁用'}</button>
                           </div>
                         </td>
                       </tr>
@@ -366,32 +630,25 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {[
-                      { name: '计算机网络', teacher: '王教授', students: 68, kb: '正常', docs: 45, active: '2小时前' },
-                      { name: '数据结构与算法', teacher: '李教授', students: 82, kb: '正常', docs: 62, active: '1小时前' },
-                      { name: '操作系统原理', teacher: '张教授', students: 56, kb: '异常', docs: 28, active: '5小时前' },
-                      { name: '数据库系统', teacher: '刘教授', students: 74, kb: '正常', docs: 51, active: '3小时前' },
-                      { name: '软件工程', teacher: '陈教授', students: 91, kb: '正常', docs: 38, active: '1天前' },
-                      { name: '人工智能基础', teacher: '赵教授', students: 63, kb: '正常', docs: 72, active: '4小时前' }
-                    ].map((course, index) => (
-                      <tr key={index} className="hover:bg-gray-50">
+                    {courses.map((course) => (
+                      <tr key={course.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 font-medium text-gray-900">{course.name}</td>
                         <td className="px-4 py-3 text-gray-600">{course.teacher}</td>
                         <td className="px-4 py-3 text-gray-600">{course.students} 人</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${course.kb === '正常' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
-                              {course.kb}
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${course.knowledgeBaseStatus === 'normal' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
+                              {course.knowledgeBaseStatusLabel}
                             </span>
-                            <span className="text-xs text-gray-500">{course.docs} 份资料</span>
+                            <span className="text-xs text-gray-500">{course.documentCount} 份资料</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-gray-500">{course.active}</td>
+                        <td className="px-4 py-3 text-gray-500">{course.lastActive}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <button className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap">查看详情</button>
                             <button className="text-xs text-gray-600 hover:text-gray-700 cursor-pointer whitespace-nowrap">转移负责人</button>
-                            <button className="text-xs text-orange-600 hover:text-orange-700 cursor-pointer whitespace-nowrap">归档</button>
+                            <button onClick={() => handleArchiveCourse(course.id)} disabled={actionPending} className="text-xs text-orange-600 hover:text-orange-700 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">归档</button>
                           </div>
                         </td>
                       </tr>
@@ -412,26 +669,22 @@ export default function AdminDashboard() {
               <div className="bg-white rounded-lg p-5 border border-gray-200">
                 <h2 className="text-base font-semibold text-gray-900 mb-4">AI回答抽检</h2>
                 <div className="space-y-3">
-                  {[
-                    { question: 'TCP三次握手的第三次可以携带数据吗?', answer: '可以。第三次握手时,客户端已经处于ESTABLISHED状态...', dislike: 3, course: '计算机网络' },
-                    { question: '红黑树的旋转操作有哪些?', answer: '红黑树有四种旋转操作:左旋、右旋、左右旋、右左旋...', dislike: 2, course: '数据结构' },
-                    { question: '进程和线程的区别是什么?', answer: '进程是资源分配的基本单位,线程是CPU调度的基本单位...', dislike: 5, course: '操作系统' }
-                  ].map((item, index) => (
-                    <div key={index} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300">
+                  {auditAnswers.map((item) => (
+                    <div key={item.id} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300">
                       <div className="flex items-start justify-between mb-2">
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-medium text-gray-900 mb-1">{item.question}</div>
                           <div className="text-xs text-gray-600 line-clamp-2">{item.answer}</div>
                         </div>
                         <span className="ml-3 px-2 py-1 text-xs font-medium bg-red-50 text-red-600 rounded-full flex-shrink-0">
-                          {item.dislike} 次点踩
+                          {item.dislikeCount} 次点踩
                         </span>
                       </div>
                       <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
                         <span className="text-xs text-gray-500">{item.course}</span>
                         <div className="flex items-center gap-2">
                           <button className="px-3 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 cursor-pointer whitespace-nowrap">查看完整</button>
-                          <button className="px-3 py-1 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap">标记错误</button>
+                          <button onClick={() => handleReviewAnswer(item.id)} disabled={actionPending} className="px-3 py-1 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">标记错误</button>
                         </div>
                       </div>
                     </div>
@@ -443,12 +696,8 @@ export default function AdminDashboard() {
               <div className="bg-white rounded-lg p-5 border border-gray-200">
                 <h2 className="text-base font-semibold text-gray-900 mb-4">举报处理</h2>
                 <div className="space-y-3">
-                  {[
-                    { type: '版权侵权', content: '课程资料"深度学习PPT"疑似侵权', reporter: '学生A', time: '2小时前' },
-                    { type: '知识错误', content: 'AI回答关于"快速排序时间复杂度"存在错误', reporter: '教师B', time: '5小时前' },
-                    { type: '不当内容', content: '讨论区存在不当言论', reporter: '学生C', time: '1天前' }
-                  ].map((report, index) => (
-                    <div key={index} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300">
+                  {auditReports.map((report) => (
+                    <div key={report.id} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300">
                       <div className="flex items-start justify-between mb-2">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1">
@@ -461,8 +710,8 @@ export default function AdminDashboard() {
                       </div>
                       <div className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-100">
                         <button className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 cursor-pointer whitespace-nowrap">查看详情</button>
-                        <button className="flex-1 px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap">删除内容</button>
-                        <button className="flex-1 px-3 py-1.5 text-xs font-medium text-green-600 bg-green-50 rounded-md hover:bg-green-100 cursor-pointer whitespace-nowrap">驳回举报</button>
+                        <button onClick={() => handleResolveReport(report.id, 'delete')} disabled={actionPending} className="flex-1 px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">删除内容</button>
+                        <button onClick={() => handleResolveReport(report.id, 'reject')} disabled={actionPending} className="flex-1 px-3 py-1.5 text-xs font-medium text-green-600 bg-green-50 rounded-md hover:bg-green-100 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">驳回举报</button>
                       </div>
                     </div>
                   ))}
@@ -474,15 +723,18 @@ export default function AdminDashboard() {
             <div className="bg-white rounded-lg p-5 border border-gray-200 mt-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-base font-semibold text-gray-900">敏感词配置</h2>
-                <button className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap">
+                <div className="flex items-center gap-2">
+                  <input value={newSensitiveWord} onChange={(e) => setNewSensitiveWord(e.target.value)} placeholder="输入敏感词..." className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <button onClick={handleAddSensitiveWord} className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap">
                   <i className="ri-add-line mr-1"></i>添加敏感词
-                </button>
+                  </button>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                {['病毒编写', '系统攻击', '密码破解', '数据窃取', '恶意代码', '黑客工具', '漏洞利用', 'SQL注入'].map((word, index) => (
-                  <div key={index} className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-100 rounded-lg">
+                {sensitiveWords.map((word) => (
+                  <div key={word} className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-100 rounded-lg">
                     <span className="text-sm text-red-600">{word}</span>
-                    <button className="w-4 h-4 flex items-center justify-center text-red-600 hover:text-red-700 cursor-pointer">
+                    <button onClick={() => handleRemoveSensitiveWord(word)} className="w-4 h-4 flex items-center justify-center text-red-600 hover:text-red-700 cursor-pointer">
                       <i className="ri-close-line text-xs"></i>
                     </button>
                   </div>
@@ -507,7 +759,7 @@ export default function AdminDashboard() {
                       <div className="text-xs text-gray-600 mt-1">开启后将暂停服务并显示维护公告</div>
                     </div>
                     <label className="relative inline-flex items-center cursor-pointer">
-                      <input type="checkbox" className="sr-only peer" />
+                      <input type="checkbox" checked={systemSettings.maintenanceMode} onChange={(e) => setSystemSettings((prev) => ({ ...prev, maintenanceMode: e.target.checked }))} className="sr-only peer" />
                       <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-teal-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-teal-600"></div>
                     </label>
                   </div>
@@ -517,7 +769,7 @@ export default function AdminDashboard() {
                       <div className="text-xs text-gray-600 mt-1">限制AI调用频次,防止服务器卡顿</div>
                     </div>
                     <label className="relative inline-flex items-center cursor-pointer">
-                      <input type="checkbox" checked className="sr-only peer" />
+                      <input type="checkbox" checked={systemSettings.examWeekLimit} onChange={(e) => setSystemSettings((prev) => ({ ...prev, examWeekLimit: e.target.checked }))} className="sr-only peer" />
                       <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-teal-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-teal-600"></div>
                     </label>
                   </div>
@@ -530,14 +782,14 @@ export default function AdminDashboard() {
                 <div className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">自动备份周期</label>
-                    <select className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    <select value={systemSettings.backupSchedule} onChange={(e) => setSystemSettings((prev) => ({ ...prev, backupSchedule: e.target.value }))} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
                       <option>每天 23:00</option>
                       <option>每周日 23:00</option>
                       <option>每月1日 23:00</option>
                     </select>
                   </div>
                   <div className="flex items-center gap-3">
-                    <button className="flex-1 px-4 py-2 text-sm font-medium text-teal-600 border border-teal-600 rounded-lg hover:bg-teal-50 transition-colors cursor-pointer whitespace-nowrap">立即备份</button>
+                    <button onClick={handleSaveSystemSettings} disabled={actionPending} className="flex-1 px-4 py-2 text-sm font-medium text-teal-600 border border-teal-600 rounded-lg hover:bg-teal-50 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">立即保存</button>
                     <button className="flex-1 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap">查看备份历史</button>
                   </div>
                   <div className="p-3 rounded-lg bg-blue-50 border border-blue-100">
@@ -558,22 +810,22 @@ export default function AdminDashboard() {
                 <div className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">公告标题</label>
-                    <input type="text" placeholder="输入公告标题..." className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                    <input type="text" value={systemSettings.announcementTitle} onChange={(e) => setSystemSettings((prev) => ({ ...prev, announcementTitle: e.target.value }))} placeholder="输入公告标题..." className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">公告内容</label>
-                    <textarea rows={4} placeholder="输入公告内容..." className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"></textarea>
+                    <textarea rows={4} value={systemSettings.announcementContent} onChange={(e) => setSystemSettings((prev) => ({ ...prev, announcementContent: e.target.value }))} placeholder="输入公告内容..." className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"></textarea>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">发送范围</label>
-                    <select className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    <select value={systemSettings.announcementAudience} onChange={(e) => setSystemSettings((prev) => ({ ...prev, announcementAudience: e.target.value }))} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
                       <option>全校师生</option>
                       <option>全体教师</option>
                       <option>全体学生</option>
                       <option>指定学院</option>
                     </select>
                   </div>
-                  <button className="w-full px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap">发布公告</button>
+                  <button onClick={handlePublishAnnouncement} disabled={actionPending} className="w-full px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">发布公告</button>
                 </div>
               </div>
 
@@ -601,6 +853,7 @@ export default function AdminDashboard() {
           </div>
         )}
       </div>
+      <ProductSidePanel role="admin" />
     </div>
   );
 }

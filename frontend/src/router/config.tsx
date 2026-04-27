@@ -1,7 +1,7 @@
 import { lazy } from 'react';
 import { RouteObject } from 'react-router-dom';
+import { PublicOnlyRoute, RequireAuth } from './guards';
 
-const Home = lazy(() => import('../pages/home/page'));
 const Login = lazy(() => import('../pages/login/page'));
 const Register = lazy(() => import('../pages/register/page'));
 const TeacherDashboard = lazy(() => import('../pages/teacher-dashboard/page'));
@@ -13,36 +13,56 @@ const NotFound = lazy(() => import('../pages/NotFound'));
 
 const routes: RouteObject[] = [
   {
-    path: '/',
-    element: <Login />,
+    element: <PublicOnlyRoute />,
+    children: [
+      {
+        path: '/',
+        element: <Login />,
+      },
+      {
+        path: '/login',
+        element: <Login />,
+      },
+      {
+        path: '/register',
+        element: <Register />,
+      },
+    ],
   },
   {
-    path: '/login',
-    element: <Login />,
+    element: <RequireAuth allowedRoles={['teacher']} />,
+    children: [
+      {
+        path: '/teacher-dashboard',
+        element: <TeacherDashboard />,
+      },
+      {
+        path: '/teacher-course/:id',
+        element: <TeacherCourse />,
+      },
+    ],
   },
   {
-    path: '/register',
-    element: <Register />,
+    element: <RequireAuth allowedRoles={['student']} />,
+    children: [
+      {
+        path: '/student-dashboard',
+        element: <StudentDashboard />,
+      },
+      {
+        path: '/student-course/:id',
+        element: <StudentCourse />,
+      },
+    ],
   },
   {
-    path: '/teacher-dashboard',
-    element: <TeacherDashboard />,
-  },
-  {
-    path: '/student-dashboard',
-    element: <StudentDashboard />,
-  },
-  {
-    path: '/admin-dashboard',
-    element: <AdminDashboard />,
-  },
-  {
-    path: '/teacher-course/:id',
-    element: <TeacherCourse />,
-  },
-  {
-    path: '/student-course/:id',
-    element: <StudentCourse />,
+    element: <RequireAuth allowedRoles={['admin']} />,
+    children: [
+      {
+        path: '/admin-dashboard',
+        element: <AdminDashboard />,
+      },
+    ],
   },
   {
     path: '*',

@@ -1,7 +1,10 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getDefaultRouteForRole } from '@/lib/role-routes';
+import { authService } from '@/services/auth';
+import type { AppRole } from '@/types/auth';
 
-type Role = 'student' | 'teacher' | 'admin';
+type Role = AppRole;
 
 const roles = [
   {
@@ -56,7 +59,7 @@ export default function LoginPage() {
 
   const currentRole = roles.find((r) => r.key === selectedRole)!;
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     if (!account.trim()) {
@@ -68,14 +71,22 @@ export default function LoginPage() {
       return;
     }
     setLoading(true);
-    setTimeout(() => {
+    try {
+      const result = await authService.login({
+        role: selectedRole,
+        account: account.trim(),
+        password,
+      });
+      navigate(result.redirectTo || getDefaultRouteForRole(result.user.role));
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : '登录失败，请稍后重试');
+    } finally {
       setLoading(false);
-      navigate(currentRole.path);
-    }, 900);
+    }
   };
 
   return (
-    <div className="min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
+    <div className="auth-soft min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
       {/* 左侧品牌区 */}
       <div className="hidden lg:flex lg:w-[52%] relative flex-col justify-between overflow-hidden">
         <img
