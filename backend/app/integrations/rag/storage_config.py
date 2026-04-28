@@ -121,9 +121,9 @@ def build_lightrag_storage_plan(
         _cfg(
             config,
             "graph_db_database",
-            getattr(settings, "GRAPH_DB_DATABASE", "neo4j"),
+            getattr(settings, "GRAPH_DB_DATABASE", ""),
         )
-        or "neo4j"
+        or ""
     ).strip()
     graph_username = str(
         _cfg(
@@ -165,7 +165,8 @@ def build_lightrag_storage_plan(
     if effective_backend in {"neo4j", "qdrant-neo4j"}:
         lightrag_kwargs["graph_storage"] = "Neo4JStorage"
         env_overrides["NEO4J_URI"] = graph_url
-        env_overrides["NEO4J_DATABASE"] = graph_database
+        if graph_database:
+            env_overrides["NEO4J_DATABASE"] = graph_database
         if graph_username:
             env_overrides["NEO4J_USERNAME"] = graph_username
         if graph_password:
@@ -197,7 +198,7 @@ def build_external_storage_bootstrap_plan(target_backend: str = "qdrant-neo4j") 
     graph_provider = "neo4j" if graph_enabled else "auto"
     vector_url = str(getattr(settings, "VECTOR_DB_URL", "") or "http://localhost:6333").strip()
     graph_url = str(getattr(settings, "GRAPH_DB_URL", "") or "bolt://localhost:7687").strip()
-    graph_database = str(getattr(settings, "GRAPH_DB_DATABASE", "neo4j") or "neo4j").strip()
+    graph_database = str(getattr(settings, "GRAPH_DB_DATABASE", "") or "").strip()
     graph_username = str(getattr(settings, "GRAPH_DB_USERNAME", "neo4j") or "neo4j").strip()
     vector_collection = str(getattr(settings, "VECTOR_DB_COLLECTION", "raganything_chunks") or "raganything_chunks").strip()
 
@@ -284,7 +285,7 @@ def _build_graph_db_snapshot(config: dict[str, Any], *, include_connectivity: bo
     package_name = _graph_provider_package(provider)
     package_available = _package_available(package_name) if package_name else True
     parsed = _parse_url(graph_url)
-    database = str(_cfg(config, "graph_db_database", getattr(settings, "GRAPH_DB_DATABASE", "neo4j")) or "neo4j").strip()
+    database = str(_cfg(config, "graph_db_database", getattr(settings, "GRAPH_DB_DATABASE", "")) or "").strip()
     username = str(_cfg(config, "graph_db_username", getattr(settings, "GRAPH_DB_USERNAME", "")) or "").strip()
     password = str(_cfg(config, "graph_db_password", getattr(settings, "GRAPH_DB_PASSWORD", "")) or "").strip()
     password_configured = bool(password)

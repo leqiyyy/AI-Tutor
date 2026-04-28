@@ -1,23 +1,27 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class CreateCourseRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     code: Optional[str] = None
     description: Optional[str] = None
-    cover_color: Optional[str] = "#3b82f6"
+    cover_color: Optional[str] = Field(default="#3b82f6", validation_alias=AliasChoices("cover_color", "coverColor"))
 
 
 class CreateClassRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
-    course_id: Optional[str] = None
+    course_id: Optional[str] = Field(default=None, validation_alias=AliasChoices("course_id", "courseId"))
     code: Optional[str] = None
     semester: Optional[str] = None
     description: Optional[str] = None
-    cover_color: Optional[str] = "#3b82f6"
+    cover_color: Optional[str] = Field(default="#3b82f6", validation_alias=AliasChoices("cover_color", "coverColor"))
 
 
 class CourseOut(BaseModel):
@@ -69,7 +73,9 @@ class UpdateClassRequest(BaseModel):
 
 
 class JoinClassRequest(BaseModel):
-    invite_code: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    invite_code: str = Field(validation_alias=AliasChoices("invite_code", "inviteCode"))
 
 
 class MaterialOut(BaseModel):

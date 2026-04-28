@@ -1,0 +1,43 @@
+services:
+  backend-api:
+    volumes:
+      - ./backend:/app
+      - backend_uploads:/app/uploads
+      - backend_rag_storage:/app/rag_storage
+      - backend_rag_output:/app/rag_output
+      - backend_runtime_tmp:/app/runtime_tmp
+      - modelscope_cache:/root/.cache/modelscope
+      - huggingface_cache:/root/.cache/huggingface
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery-worker:
+    volumes:
+      - ./backend:/app
+      - backend_uploads:/app/uploads
+      - backend_rag_storage:/app/rag_storage
+      - backend_rag_output:/app/rag_output
+      - backend_runtime_tmp:/app/runtime_tmp
+      - modelscope_cache:/root/.cache/modelscope
+      - huggingface_cache:/root/.cache/huggingface
+
+  frontend-dev:
+    image: node:22-alpine
+    working_dir: /app
+    environment:
+      VITE_API_MODE: live
+      VITE_API_BASE_URL: /api/v1
+      VITE_API_PROXY_TARGET: http://backend-api:8000
+      VITE_AUTH_STORAGE_KEY: luoying.session
+      VITE_BASE_PATH: /
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 3000"
+    depends_on:
+      backend-api:
+        condition: service_healthy
+
+volumes:
+  frontend_node_modules:

@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -20,6 +20,7 @@ def _build_engine() -> Engine:
 
     if settings.DATABASE_IS_SQLITE:
         connect_args["check_same_thread"] = False
+        connect_args["timeout"] = 30
     else:
         engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
         engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
@@ -32,6 +33,18 @@ def _build_engine() -> Engine:
 
 
 engine = _build_engine()
+
+
+if settings.DATABASE_IS_SQLITE:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useParams } from 'react-router-dom';
 import { aiService } from '@/services/ai';
 import type {
   AiAttachment as AttachedFile,
@@ -130,6 +131,7 @@ type RightTab = 'quick' | 'recommend' | 'source';
 type RightPanelMode = 'closed' | 'standard' | 'wide';
 
 export default function AIAssistant() {
+  const { id: classId } = useParams<{ id: string }>();
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
   const [activeConvId, setActiveConvId] = useState<number>(0);
@@ -219,7 +221,7 @@ export default function AIAssistant() {
           reader.readAsDataURL(file);
         });
       }
-      newFiles.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name, size: file.size, mimeType: file.type, fileType, preview });
+      newFiles.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name, size: file.size, mimeType: file.type, fileType, preview, rawFile: file });
     }
     if (newFiles.length > 0) setAttachedFiles(prev => [...prev, ...newFiles]);
   }, []);
@@ -318,6 +320,7 @@ export default function AIAssistant() {
     try {
       const { conversation, reply } = await aiService.sendMessage('student', {
         conversationId: activeConvId || undefined,
+        classId,
         content: text,
         attachments: userMsg.attachments,
       });

@@ -17,6 +17,8 @@ export interface AiAttachment {
   mimeType: string;
   fileType: "image" | "pdf" | "docx" | "md" | "code" | "other";
   preview?: string;
+  rawFile?: File;
+  storageKey?: string;
 }
 
 export interface AiMessage {
@@ -32,6 +34,7 @@ export interface AiMessage {
 
 export interface AiConversation {
   id: number;
+  backendSessionId?: string;
   title: string;
   createdAt: string;
   lastMessage: string;
@@ -80,6 +83,8 @@ export interface CreateConversationPayload {
 
 export interface SendMessagePayload {
   conversationId?: number;
+  classId?: string;
+  courseId?: string;
   content: string;
   attachments?: AiAttachment[];
 }

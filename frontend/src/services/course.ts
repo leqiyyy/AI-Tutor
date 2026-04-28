@@ -254,6 +254,7 @@ export const courseService = {
     await http<void>(`/teacher/courses/${courseId}/files`, {
       method: "POST",
       body: buildFormData(files),
+      query: { async_index: true },
     });
   },
 

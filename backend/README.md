@@ -97,6 +97,22 @@ From the repository root:
 docker compose up --build
 ```
 
+For the full thesis/demo server stack with:
+
+- API container
+- Celery worker
+- PostgreSQL
+- Redis
+- Qdrant
+- Neo4j
+- MinIO
+
+use the dedicated server deployment files:
+
+- root compose: [`../docker-compose.server.yml`](../docker-compose.server.yml)
+- env template: [`.env.server.example`](./.env.server.example)
+- guide: [`deploy/SERVER_DEPLOYMENT.md`](./deploy/SERVER_DEPLOYMENT.md)
+
 ## Tests
 
 Run smoke tests from the repository root:

@@ -1,0 +1,11 @@
+.env
+.env.server
+ai_tutor.db*
+__pycache__
+*.pyc
+.pytest_cache
+uploads
+rag_storage
+rag_output
+runtime_tmp
+tests/.pytest_cache

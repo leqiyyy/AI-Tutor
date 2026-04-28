@@ -179,6 +179,7 @@ class RAGAnythingAdapter:
 
             endpoint = base_url.rstrip("/") + "/responses"
             headers = {
+                "Authorization": f"Bearer {api_key}",
                 "x-api-key": api_key,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -240,23 +241,61 @@ class RAGAnythingAdapter:
             await client.close()
 
     def _build_llm_func(self, routing_snapshot: dict[str, Any]):
-        _ = routing_snapshot
+        generation = routing_snapshot.get("generation") or {}
         extract_model = settings.EFFECTIVE_EXTRACT_MODEL
         extract_base = settings.EFFECTIVE_EXTRACT_API_BASE
         extract_api_key = settings.EFFECTIVE_EXTRACT_API_KEY
+        generation_model = str(generation.get("model") or settings.LLM_MODEL)
+        generation_base = str(generation.get("api_base") or settings.EFFECTIVE_LLM_API_BASE)
+        generation_api_key = settings.EFFECTIVE_LLM_API_KEY
 
         async def _llm(prompt, system_prompt=None, history_messages=None, keyword_extraction=False, **kwargs):
+            use_generation_model = self._is_answer_generation_prompt(prompt, system_prompt, keyword_extraction)
+            model = generation_model if use_generation_model else extract_model
+            base_url = generation_base if use_generation_model else extract_base
+            api_key = generation_api_key if use_generation_model else extract_api_key
+            wire_api = settings.LLM_WIRE_API if use_generation_model else settings.EXTRACT_WIRE_API
             return await self._call_llm_api(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 history_messages=history_messages,
-                model=extract_model,
-                base_url=extract_base,
-                api_key=extract_api_key,
-                wire_api=settings.EXTRACT_WIRE_API,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                wire_api=wire_api,
             )
 
         return _llm
+
+    def _is_answer_generation_prompt(
+        self,
+        prompt: Any,
+        system_prompt: Any,
+        keyword_extraction: bool,
+    ) -> bool:
+        if keyword_extraction:
+            return False
+        text = f"{system_prompt or ''}\n{prompt or ''}".lower()
+        answer_markers = (
+            "generate a comprehensive",
+            "provided **context**",
+            "document chunks",
+            "knowledge graph data",
+            "answer user queries",
+            "answer the user query",
+        )
+        extraction_markers = (
+            "entity_extraction",
+            "extract entities",
+            "entity_types",
+            "relationship",
+            "gleaning",
+            "tuple_delimiter",
+            "record_delimiter",
+        )
+        return any(marker in text for marker in answer_markers) and not any(
+            marker in text for marker in extraction_markers
+        )
 
     def _build_embedding_func(self, routing_snapshot: dict[str, Any]):
         embedding = routing_snapshot.get("embedding") or {}
@@ -1923,7 +1962,7 @@ class RAGAnythingAdapter:
             return "", [], 0.0
 
         if isinstance(raw, str):
-            return raw.strip(), [], 0.0
+            return self._sanitize_answer_text(raw), [], 0.0
 
         if isinstance(raw, dict):
             answer = (
@@ -1955,18 +1994,53 @@ class RAGAnythingAdapter:
                 source_candidates = raw["context"].get("sources") or raw["context"].get("chunks") or []
             sources = self._normalize_sources(source_candidates)
             confidence = self._safe_float(raw.get("confidence")) or self._safe_float(raw.get("score")) or 0.0
-            return str(answer).strip(), sources, confidence
+            return self._sanitize_answer_text(answer), sources, confidence
 
         if isinstance(raw, (list, tuple)):
             if all(isinstance(item, str) for item in raw):
-                return "\n".join(item for item in raw if item).strip(), [], 0.0
+                return self._sanitize_answer_text("\n".join(item for item in raw if item)), [], 0.0
             sources = self._normalize_sources(list(raw))
             return "", sources, 0.0
 
         answer = getattr(raw, "answer", None) or getattr(raw, "response", None) or str(raw)
         sources = self._normalize_sources(getattr(raw, "sources", []))
         confidence = self._safe_float(getattr(raw, "confidence", 0.0)) or 0.0
-        return str(answer).strip(), sources, confidence
+        return self._sanitize_answer_text(answer), sources, confidence
+
+    def _sanitize_answer_text(self, answer: Any) -> str:
+        text = str(answer or "").strip()
+        if not text:
+            return ""
+
+        text = text.replace("\x00", "")
+        text = re.sub(r"[ \t]{3,}", " ", text)
+        text = re.sub(r"\n{4,}", "\n\n", text)
+
+        # Some provider/model combinations can emit a long tail of repeated
+        # quote-like tokens after the useful answer. Trim that tail before it
+        # reaches the UI, while leaving normal quoted text intact.
+        repeated_tail = re.search(r'(?s)(["“”]\s*){24,}.*$', text)
+        if repeated_tail:
+            text = text[: repeated_tail.start()].rstrip()
+
+        repeated_token_tail = re.search(r"(?s)(\b[\w\u4e00-\u9fff]{1,8}\b[\s，。,.、]*)\1{12,}.*$", text)
+        if repeated_token_tail:
+            text = text[: repeated_token_tail.start()].rstrip()
+
+        text = text.replace("�", "")
+
+        # Do not expose local workspace paths in student-facing answers. The
+        # structured sources list still carries the citation metadata.
+        text = re.sub(
+            r"(?P<path>[A-Za-z]:\\[^\s\]\)\r\n]+)",
+            lambda match: Path(match.group("path")).name,
+            text,
+        )
+
+        max_chars = 6000
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "\n\n[答案过长，已截断。]"
+        return text.strip()
 
     def _normalize_sources(self, source_candidates: Any) -> list[dict]:
         if not isinstance(source_candidates, list):
@@ -2589,10 +2663,11 @@ class RAGAnythingAdapter:
         return round(min(0.99, max(0.4, blended)), 4)
 
     def _suggestions(self, question: str) -> list[str]:
+        topic = question.strip().replace("\n", " ")[:30] or "这个问题"
         return [
-            "Can you explain this with an example?",
-            "Which source should I read next?",
-            f"What is the key concept behind: {question[:30]}?",
+            "可以结合一个例子再解释一遍吗？",
+            "我接下来应该优先阅读哪份课程资料？",
+            f"关于“{topic}”，最核心的知识点是什么？",
         ]
 
     def _build_processing_quality(self, status: dict[str, Any]) -> dict[str, Any]:

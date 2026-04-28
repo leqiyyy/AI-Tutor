@@ -49,17 +49,155 @@ function conversationBasePath(role: ConversationRole) {
   return role === "student" ? "/student/ai" : "/teacher/ai";
 }
 
+type BackendSession = {
+  id: string;
+  title?: string;
+  created_at?: string;
+  updated_at?: string;
+  last_message?: string;
+};
+
+type BackendMessage = {
+  id: string;
+  role: "user" | "assistant" | "ai";
+  content: string;
+  created_at?: string;
+  attachments?: AiAttachment[];
+  sources?: Array<{
+    name?: string;
+    file_name?: string;
+    page?: number;
+    type?: string;
+    source_type?: string;
+  }>;
+  feedback?: "like" | "dislike";
+};
+
+type BackendQueryResult = {
+  session_id?: string;
+  message_id?: string;
+  content?: string;
+  sources?: BackendMessage["sources"];
+};
+
+type BackendAttachment = {
+  id?: string;
+  storage_key?: string;
+  name?: string;
+  size?: number;
+  mime_type?: string;
+  file_type?: AiAttachment["fileType"];
+};
+
+const sessionIdMap = new Map<number, string>();
+const reverseSessionIdMap = new Map<string, number>();
+const messageIdMap = new Map<number, string>();
+
+function numericConversationId(backendId: string) {
+  const existing = reverseSessionIdMap.get(backendId);
+  if (existing) {
+    return existing;
+  }
+  const next = Date.now() + reverseSessionIdMap.size;
+  reverseSessionIdMap.set(backendId, next);
+  sessionIdMap.set(next, backendId);
+  return next;
+}
+
+function normalizeSource(source: NonNullable<BackendMessage["sources"]>[number]): AiMessageSource {
+  return {
+    name: source.name || source.file_name || "课程资料",
+    page: Number(source.page || 0),
+    type: source.type || source.source_type || "document",
+  };
+}
+
+function normalizeMessage(message: BackendMessage): AiMessage {
+  const id = Math.abs(hashString(message.id));
+  messageIdMap.set(id, message.id);
+  return {
+    id,
+    role: message.role === "user" ? "user" : "ai",
+    content: message.content,
+    time: message.created_at || new Date().toISOString(),
+    attachments: message.attachments,
+    sources: message.sources?.map(normalizeSource),
+    feedback: message.feedback,
+  };
+}
+
+function normalizeConversation(session: BackendSession, messages: AiMessage[] = []): AiConversation {
+  const id = numericConversationId(session.id);
+  return {
+    id,
+    backendSessionId: session.id,
+    title: session.title || "新对话",
+    createdAt: session.created_at || new Date().toISOString(),
+    lastMessage: session.last_message || "",
+    messages,
+  };
+}
+
+function hashString(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return hash || Date.now();
+}
+
+async function uploadLiveAttachments(
+  attachments: AiAttachment[] | undefined,
+  classId?: string,
+): Promise<AiAttachment[]> {
+  if (!attachments?.length) {
+    return [];
+  }
+
+  const uploaded: AiAttachment[] = [];
+  for (const attachment of attachments) {
+    if (!attachment.rawFile) {
+      uploaded.push(attachment);
+      continue;
+    }
+
+    const formData = new FormData();
+    formData.append("file", attachment.rawFile);
+    if (classId) {
+      formData.append("class_id", classId);
+    }
+    const result = await http<BackendAttachment>("/chat/attachments/upload", {
+      method: "POST",
+      body: formData,
+    });
+
+    uploaded.push({
+      ...attachment,
+      id: result.id || result.storage_key || attachment.id,
+      storageKey: result.storage_key,
+      rawFile: undefined,
+    });
+  }
+
+  return uploaded;
+}
+
 export const aiService = {
   async getStudentConversations(): Promise<AiConversation[]> {
     return shouldUseMockApi
       ? getMockConversations("student")
-      : http<AiConversation[]>("/student/ai/conversations");
+      : (await http<BackendSession[]>("/chat/sessions")).map((item) =>
+          normalizeConversation(item),
+        );
   },
 
   async getTeacherConversations(): Promise<AiConversation[]> {
     return shouldUseMockApi
       ? getMockConversations("teacher")
-      : http<AiConversation[]>("/teacher/ai/conversations");
+      : (await http<BackendSession[]>("/chat/sessions")).map((item) =>
+          normalizeConversation(item),
+        );
   },
 
   async getConversationMessages(
@@ -68,9 +206,11 @@ export const aiService = {
   ): Promise<AiMessage[]> {
     return shouldUseMockApi
       ? getMockConversationMessages(role, conversationId)
-      : http<AiMessage[]>(
-          `${conversationBasePath(role)}/conversations/${conversationId}/messages`,
-        );
+      : (
+          await http<BackendMessage[]>(
+            `/chat/sessions/${sessionIdMap.get(conversationId) || conversationId}/messages`,
+          )
+        ).map(normalizeMessage);
   },
 
   async createConversation(
@@ -79,10 +219,13 @@ export const aiService = {
   ): Promise<AiConversation> {
     return shouldUseMockApi
       ? mockCreateConversation(role, payload)
-      : http<AiConversation>(`${conversationBasePath(role)}/conversations`, {
-          method: "POST",
-          body: payload,
-        });
+      : {
+          id: Date.now(),
+          title: payload.title || "新对话",
+          createdAt: new Date().toISOString(),
+          lastMessage: "",
+          messages: [],
+        };
   },
 
   async deleteConversation(
@@ -106,24 +249,71 @@ export const aiService = {
     role: ConversationRole,
     payload: SendMessagePayload,
   ): Promise<{ conversation: AiConversation; reply: AiMessage }> {
-    return shouldUseMockApi
-      ? mockSendMessage(role, payload)
-      : http<{ conversation: AiConversation; reply: AiMessage }>(
-          `${conversationBasePath(role)}/messages`,
-          {
-            method: "POST",
-            body: payload,
-          },
-        );
+    if (shouldUseMockApi) {
+      return mockSendMessage(role, payload);
+    }
+
+    const localConversationId = payload.conversationId || Date.now();
+    const backendSessionId = payload.conversationId
+      ? sessionIdMap.get(payload.conversationId)
+      : undefined;
+    const attachments = await uploadLiveAttachments(payload.attachments, payload.classId);
+    const result = await http<BackendQueryResult>("/chat/query", {
+      method: "POST",
+      body: {
+        class_id: payload.classId,
+        course_id: payload.courseId,
+        session_id: backendSessionId,
+        message: payload.content,
+        attachments: attachments.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          size: attachment.size,
+          mime_type: attachment.mimeType,
+          file_type: attachment.fileType,
+          storage_key: attachment.storageKey || attachment.id,
+        })),
+      },
+    });
+
+    if (result.session_id) {
+      sessionIdMap.set(localConversationId, result.session_id);
+      reverseSessionIdMap.set(result.session_id, localConversationId);
+    }
+
+    const userMessage: AiMessage = {
+      id: Date.now(),
+      role: "user",
+      content: payload.content,
+      time: new Date().toISOString(),
+      attachments,
+    };
+    const reply: AiMessage = {
+      id: Math.abs(hashString(result.message_id || `${Date.now()}`)),
+      role: "ai",
+      content: result.content || "",
+      time: new Date().toISOString(),
+      sources: result.sources?.map(normalizeSource),
+    };
+    if (result.message_id) {
+      messageIdMap.set(reply.id, result.message_id);
+    }
+    const conversation: AiConversation = {
+      id: localConversationId,
+      backendSessionId: result.session_id,
+      title: payload.content.slice(0, 24) || "附件问答",
+      createdAt: new Date().toISOString(),
+      lastMessage: reply.content.slice(0, 40),
+      messages: [userMessage, reply],
+    };
+
+    return { conversation, reply };
   },
 
   async uploadAttachment(file: AiAttachment): Promise<AiAttachment> {
     return shouldUseMockApi
       ? mockUploadAttachment(file)
-      : http<AiAttachment>("/ai/attachments", {
-          method: "POST",
-          body: file,
-        });
+      : (await uploadLiveAttachments([file]))[0];
   },
 
   async likeMessage(messageId: number): Promise<void> {
@@ -132,7 +322,10 @@ export const aiService = {
       return;
     }
 
-    await http<void>(`/ai/messages/${messageId}/like`, { method: "POST" });
+    await http<void>(`/chat/messages/${messageIdMap.get(messageId) || messageId}/feedback`, {
+      method: "POST",
+      body: { feedback: "like" },
+    });
   },
 
   async dislikeMessage(messageId: number): Promise<void> {
@@ -141,7 +334,10 @@ export const aiService = {
       return;
     }
 
-    await http<void>(`/ai/messages/${messageId}/dislike`, { method: "POST" });
+    await http<void>(`/chat/messages/${messageIdMap.get(messageId) || messageId}/feedback`, {
+      method: "POST",
+      body: { feedback: "dislike" },
+    });
   },
 
   async submitFeedback(payload: SubmitFeedbackPayload): Promise<void> {

@@ -70,6 +70,7 @@ pnpm-debug.log*
 
 # Local databases
 *.db
+*.db-*
 *.db-journal
 *.sqlite
 *.sqlite3

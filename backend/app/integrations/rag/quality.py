@@ -57,7 +57,18 @@ def build_review_context(
     quality = build_evidence_quality(sources, confidence)
     reasons = _review_reasons(quality, feedback=feedback)
     priority = _review_priority(quality, reasons=reasons, trigger=trigger)
-    needs_teacher_review = trigger == "manual" or bool(reasons)
+    severe_reasons = {
+        "confidence_below_threshold",
+        "no_supporting_sources",
+        "low_evidence_score",
+        "weak_grounding",
+        "negative_user_feedback",
+    }
+    needs_teacher_review = (
+        trigger == "manual"
+        or bool(quality.get("needs_teacher_review"))
+        or any(reason in severe_reasons for reason in reasons)
+    )
     return {
         "trigger": trigger,
         "feedback": feedback,

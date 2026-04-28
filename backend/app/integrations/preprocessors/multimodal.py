@@ -72,7 +72,10 @@ def preprocess_for_raganything(file_path: str, mime_type: str, file_name: str) -
     file_type = detect_material_file_type(file_name, mime_type)
     path = Path(file_path)
 
-    if file_type in {"pdf", "docx", "ppt", "md", "txt", "image"}:
+    if file_type in {"md", "txt"}:
+        return _preprocess_text_document(path=path, mime_type=mime_type, file_name=file_name, file_type=file_type)
+
+    if file_type in {"pdf", "docx", "ppt", "image"}:
         return PreprocessResult(
             mode="direct_document",
             modality="image" if file_type == "image" else "document",
@@ -102,6 +105,52 @@ def preprocess_for_raganything(file_path: str, mime_type: str, file_name: str) -
             "raganything_entrypoint": "process_document_complete",
         },
         warnings=["unsupported_file_type_direct_attempt"],
+    )
+
+
+def _preprocess_text_document(
+    *,
+    path: Path,
+    mime_type: str,
+    file_name: str,
+    file_type: str,
+) -> PreprocessResult:
+    warnings: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        warnings.append("text_decoded_with_ignored_errors")
+
+    if not text.strip():
+        warnings.append("empty_text_document")
+
+    content_list = [{
+        "type": "text",
+        "text": text,
+        "page_idx": 0,
+        "metadata": {
+            "source_name": file_name,
+            "source_path": str(path),
+            "source_type": file_type,
+            "mime_type": mime_type,
+            "preprocess_quality": "native_text",
+        },
+    }]
+
+    return PreprocessResult(
+        mode="content_list",
+        modality="document",
+        source_file=str(path),
+        file_name=file_name,
+        content_list=content_list,
+        metadata={
+            "file_type": file_type,
+            "mime_type": mime_type,
+            "raganything_entrypoint": "insert_content_list",
+            "preprocess_quality": "native_text",
+        },
+        warnings=warnings,
     )
 
 
