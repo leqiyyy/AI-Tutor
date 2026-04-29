@@ -29,6 +29,46 @@ def test_audio_preprocessor_uses_sidecar_transcript(tmp_path: Path):
     assert result.metadata["preprocess_quality"] == "transcript"
 
 
+def test_markdown_preprocessor_extracts_table_and_formula(tmp_path: Path):
+    material = tmp_path / "lesson.md"
+    material.write_text(
+        "# Lesson\n\n"
+        "| metric | value | unit |\n"
+        "| --- | --- | --- |\n"
+        "| throughput | 125 | Mbps |\n\n"
+        "We estimate speed with $v = d / t$.\n",
+        encoding="utf-8",
+    )
+
+    result = preprocess_for_raganything(str(material), "text/markdown", "lesson.md")
+
+    assert result.mode == "content_list"
+    item_types = [item["type"] for item in result.content_list]
+    assert "text" in item_types
+    assert "table" in item_types
+    assert "equation" in item_types
+    table = next(item for item in result.content_list if item["type"] == "table")
+    equation = next(item for item in result.content_list if item["type"] == "equation")
+    assert "throughput" in table["table_markdown"]
+    assert equation["formula_latex"] == "v = d / t"
+
+
+def test_image_preprocessor_uses_content_list_anchor(tmp_path: Path):
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"fake-image")
+
+    result = preprocess_for_raganything(str(image), "image/png", "diagram.png")
+
+    assert result.mode == "content_list"
+    assert result.modality == "image"
+    assert result.metadata["raganything_entrypoint"] == "insert_content_list"
+    item_types = [item["type"] for item in result.content_list]
+    assert item_types == ["text", "image"]
+    image_item = result.content_list[1]
+    assert image_item["img_path"] == str(image)
+    assert image_item["image_path"] == str(image)
+
+
 def test_video_preprocessor_collects_transcript_and_keyframes(tmp_path: Path):
     video = tmp_path / "demo.mp4"
     video.write_bytes(b"fake-video")

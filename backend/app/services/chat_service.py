@@ -19,7 +19,7 @@ from app.models.course import Class
 from app.models.chat import ChatCitation, ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
 from app.models.knowledge import KBSpace
 from app.models.user import User
-from app.services import admin_service, analytics_service, model_routing_service, rag_metrics_service
+from app.services import admin_service, analytics_service, conversation_context_service, model_routing_service, rag_metrics_service
 
 log = get_logger(__name__)
 _fallback_attachment_parser = SimpleParserProvider()
@@ -138,6 +138,13 @@ async def send_message(
 ) -> dict:
     session = get_or_create_session(db, class_id, user_id, session_id)
     prepared_attachments = prepare_chat_attachments(attachments)
+    conversation_context = conversation_context_service.build_conversation_context(
+        db,
+        session,
+        content,
+        max_recent_turns=10,
+    )
+    retrieval_question = conversation_context.standalone_question or content
 
     if not session.title:
         session.title = content[:50]
@@ -161,11 +168,7 @@ async def send_message(
     )
     analytics_service.record_question_topics(db, class_id, content)
 
-    history_msgs = db.query(ChatMessage).filter(
-        ChatMessage.session_id == session.id,
-        ChatMessage.id != user_msg.id,
-    ).order_by(ChatMessage.created_at.asc()).all()
-    history = [{"role": message.role, "content": message.content} for message in history_msgs[-10:]]
+    history = conversation_context.recent_turns[-10:]
 
     persisted_model_config = admin_service.get_model_config(db)
     rag = get_rag_engine(requested_engine=persisted_model_config.get("rag_engine"))
@@ -175,7 +178,7 @@ async def send_message(
     rag_latency_ms = None
     try:
         result = await rag.query(
-            question=content,
+            question=retrieval_question,
             class_id=class_id,
             history=history,
             attachments=prepared_attachments,
@@ -225,6 +228,7 @@ async def send_message(
                 "query_rewrite_enabled": bool(result_meta.get("query_rewrite_enabled", settings.RAG_QUERY_REWRITE_ENABLED)),
                 "query_rewrite_mode": result_meta.get("query_rewrite_mode") or settings.RAG_QUERY_REWRITE_MODE,
                 "query_variant_count": result_meta.get("query_variant_count"),
+                "conversation_context": conversation_context.to_rag_meta(),
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -270,6 +274,7 @@ async def send_message(
                 "query_rewrite_enabled": bool(settings.RAG_QUERY_REWRITE_ENABLED),
                 "query_rewrite_mode": settings.RAG_QUERY_REWRITE_MODE,
                 "query_variant_count": 1,
+                "conversation_context": conversation_context.to_rag_meta(),
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),

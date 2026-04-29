@@ -26,6 +26,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
+      backend-migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -43,10 +45,29 @@ services:
       - huggingface_cache:/root/.cache/huggingface
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health/ready || exit 1"]
       interval: 20s
       timeout: 10s
       retries: 5
+
+  backend-migrate:
+    image: ai-tutor-backend:server
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env.server
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      neo4j:
+        condition: service_started
+    command: python scripts/init_database.py
+    restart: "no"
 
   celery-worker:
     image: ai-tutor-backend:server
@@ -54,6 +75,8 @@ services:
     env_file:
       - ./backend/.env.server
     depends_on:
+      backend-migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:

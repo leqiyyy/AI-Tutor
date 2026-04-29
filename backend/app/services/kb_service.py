@@ -1,5 +1,7 @@
 import hashlib
 import math
+import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -310,10 +312,29 @@ def search_course_content(db: Session, course_id: str, query: str, user: User) -
                 "page": chunk.get("page"),
                 "chunk_id": chunk.get("chunk_id"),
                 "score": round(overlap / max(len(query_terms), 1), 3),
-                "snippet": chunk_text[:280],
+                "snippet": _search_snippet(chunk_text),
             })
     results.sort(key=lambda item: item["score"], reverse=True)
     return results[:10]
+
+
+def _search_snippet(text: str, limit: int = 360) -> str:
+    value = str(text or "")
+    value = re.sub(r"Image Path:\s*/app/[^\n\r]+", "", value)
+    value = re.sub(r"/app/(?:uploads|rag_storage|rag_output|runtime_tmp)/[^\s\]\)\r\n]+", "[系统内部路径]", value)
+    marker = "Visual Analysis:"
+    if marker in value:
+        value = value.split(marker, 1)[1]
+    elif "Analysis:" in value:
+        prefix, suffix = value.split("Analysis:", 1)
+        if "Table Analysis:" in prefix and "Structure:" in prefix:
+            structure = prefix.split("Structure:", 1)[1]
+            value = f"Structure: {structure} Analysis: {suffix}"
+        else:
+            value = suffix
+    value = re.sub(r"^\s*(Image Content Analysis:|Table Analysis:|Captions?:\s*None|Footnotes:\s*None)\s*", "", value, flags=re.I)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
 
 
 def get_parse_task_for_user(db: Session, task_id: str, user: User) -> dict | None:
@@ -409,20 +430,29 @@ def enqueue_parse_task(
     from app.workers.tasks.kb_index import index_parse_task
 
     task_id = parse_task.id
+    queue_task_id = f"kb-index-{uuid.uuid4().hex}"
+    queue_status = "queued"
     _upsert_ingest_meta(
         parse_task,
         retry_available=True,
+        queue_task_id=queue_task_id,
+        queue_status=queue_status,
         append_event={
             "type": "queue_submit",
             "force": force,
+            "queue_task_id": queue_task_id,
+            "queue_status": queue_status,
             "at": _utc_now_iso(),
         },
     )
     db.add(parse_task)
     db.commit()
 
-    async_result = index_parse_task.delay(task_id, force=force)
-    queue_task_id = getattr(async_result, "id", None) or f"local-{task_id}"
+    async_result = index_parse_task.apply_async(
+        args=(task_id,),
+        kwargs={"force": force},
+        task_id=queue_task_id,
+    )
     queue_status = getattr(async_result, "status", None) or "queued"
 
     db.expire_all()
@@ -1078,12 +1108,13 @@ def _schedule_auto_retry_if_needed(
 
     from app.workers.tasks.kb_index import index_parse_task
 
+    queue_task_id = f"kb-auto-{task.id}-{current_round + 1}-{uuid.uuid4().hex}"
     async_result = index_parse_task.apply_async(
         args=(task.id,),
         kwargs={"force": True},
         countdown=cooldown_seconds,
+        task_id=queue_task_id,
     )
-    queue_task_id = getattr(async_result, "id", None) or f"auto-{task.id}-{current_round + 1}"
     queue_status = getattr(async_result, "status", None) or "queued"
 
     task.status = "pending"

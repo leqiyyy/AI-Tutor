@@ -406,6 +406,47 @@ def test_raganything_text_query_disables_vlm_enhancement(monkeypatch):
     assert captured["kwargs"]["vlm_enhanced"] is False
 
 
+def test_lightrag_reference_query_uses_stable_hybrid_for_mix(monkeypatch):
+    adapter = RAGAnythingAdapter()
+    calls = []
+
+    lightrag_module = ModuleType("lightrag")
+
+    class FakeQueryParam:
+        def __init__(self, **kwargs):
+            self.mode = kwargs["mode"]
+            self.include_references = kwargs["include_references"]
+
+    class FakeLightRAG:
+        async def aquery_llm(self, query, param=None):
+            calls.append(param.mode)
+            return {
+                "llm_response": {"content": f"answer for {query}"},
+                "data": {"chunks": [{"content": "stable hybrid source"}]},
+            }
+
+    lightrag_module.QueryParam = FakeQueryParam
+    monkeypatch.setattr(
+        "app.integrations.rag.raganything_adapter.importlib.import_module",
+        lambda name: lightrag_module if name == "lightrag" else __import__(name),
+    )
+
+    raw, method = asyncio.run(
+        adapter._invoke_lightrag_query_with_references(
+            rag=SimpleNamespace(lightrag=FakeLightRAG()),
+            query_text="Explain teacher reviewed answer",
+            query_mode="mix",
+            history=[],
+            class_id="class-demo",
+        )
+    )
+
+    assert calls == ["hybrid"]
+    assert method == "lightrag_aquery_llm:hybrid"
+    assert raw["metadata"]["adapter_requested_mode"] == "mix"
+    assert raw["metadata"]["adapter_effective_mode"] == "hybrid"
+
+
 def test_raganything_processing_quality_labels():
     adapter = RAGAnythingAdapter()
 

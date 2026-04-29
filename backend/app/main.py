@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -120,8 +120,10 @@ def root():
 
 
 @app.get("/health", tags=["system"])
-def health():
+def health(response: Response):
     snapshot = get_system_health_payload()
+    if not snapshot["ready"]:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return ok(data=snapshot, message=snapshot["status"])
 
 
@@ -131,6 +133,8 @@ def health_live():
 
 
 @app.get("/health/ready", tags=["system"])
-def health_ready():
+def health_ready(response: Response):
     snapshot = get_readiness_payload()
+    if not snapshot["ready"]:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return ok(data=snapshot, message=snapshot["status"])

@@ -24,7 +24,13 @@ class KnowledgeSource(BaseModel):
     page: Optional[int] = None
     type: Optional[str] = None
     score: Optional[float] = None
+    retrieval_score: Optional[float] = None
+    rerank_score: Optional[float] = None
+    relevance_score: Optional[float] = None
+    confidence: Optional[float] = None
     chunk_id: Optional[str] = None
+    snippet: Optional[str] = None
+    raw_text: Optional[str] = None
 
 
 class ChatMessageOut(BaseModel):

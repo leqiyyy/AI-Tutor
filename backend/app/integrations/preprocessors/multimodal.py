@@ -75,10 +75,13 @@ def preprocess_for_raganything(file_path: str, mime_type: str, file_name: str) -
     if file_type in {"md", "txt"}:
         return _preprocess_text_document(path=path, mime_type=mime_type, file_name=file_name, file_type=file_type)
 
-    if file_type in {"pdf", "docx", "ppt", "image"}:
+    if file_type == "image":
+        return _preprocess_image(path=path, mime_type=mime_type, file_name=file_name)
+
+    if file_type in {"pdf", "docx", "ppt"}:
         return PreprocessResult(
             mode="direct_document",
-            modality="image" if file_type == "image" else "document",
+            modality="document",
             source_file=str(path),
             file_name=file_name,
             metadata={
@@ -105,6 +108,54 @@ def preprocess_for_raganything(file_path: str, mime_type: str, file_name: str) -
             "raganything_entrypoint": "process_document_complete",
         },
         warnings=["unsupported_file_type_direct_attempt"],
+    )
+
+
+def _preprocess_image(*, path: Path, mime_type: str, file_name: str) -> PreprocessResult:
+    caption = (
+        f"Image material: {file_name}. "
+        "The original image is attached as a multimodal content item for visual analysis."
+    )
+    content_list = [
+        {
+            "type": "text",
+            "text": caption,
+            "page_idx": 0,
+            "metadata": {
+                "source_name": file_name,
+                "source_path": str(path),
+                "source_type": "image_anchor",
+                "mime_type": mime_type,
+                "preprocess_quality": "image_content_list",
+            },
+        },
+        {
+            "type": "image",
+            "img_path": str(path),
+            "image_path": str(path),
+            "caption": caption,
+            "page_idx": 0,
+            "metadata": {
+                "source_name": file_name,
+                "source_path": str(path),
+                "source_type": "image",
+                "mime_type": mime_type,
+                "preprocess_quality": "image_content_list",
+            },
+        },
+    ]
+    return PreprocessResult(
+        mode="content_list",
+        modality="image",
+        source_file=str(path),
+        file_name=file_name,
+        content_list=content_list,
+        metadata={
+            "file_type": "image",
+            "mime_type": mime_type,
+            "raganything_entrypoint": "insert_content_list",
+            "preprocess_quality": "image_content_list",
+        },
     )
 
 
@@ -137,6 +188,7 @@ def _preprocess_text_document(
             "preprocess_quality": "native_text",
         },
     }]
+    content_list.extend(_extract_structured_markdown_items(text, path=path, file_name=file_name, file_type=file_type))
 
     return PreprocessResult(
         mode="content_list",
@@ -152,6 +204,102 @@ def _preprocess_text_document(
         },
         warnings=warnings,
     )
+
+
+def _extract_structured_markdown_items(
+    text: str,
+    *,
+    path: Path,
+    file_name: str,
+    file_type: str,
+) -> list[dict[str, Any]]:
+    if file_type not in {"md", "txt"}:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for index, table_markdown in enumerate(_extract_markdown_tables(text), start=1):
+        items.append({
+            "type": "table",
+            "text": f"Markdown table extracted from {file_name}:\n{table_markdown}",
+            "table_markdown": table_markdown,
+            "page_idx": 0,
+            "metadata": {
+                "source_name": file_name,
+                "source_path": str(path),
+                "source_type": "table",
+                "origin": "markdown_table",
+                "content_index": index,
+            },
+        })
+
+    for index, formula in enumerate(_extract_markdown_formulas(text), start=1):
+        items.append({
+            "type": "equation",
+            "text": f"Formula extracted from {file_name}: {formula}",
+            "equation": formula,
+            "formula_latex": formula,
+            "page_idx": 0,
+            "metadata": {
+                "source_name": file_name,
+                "source_path": str(path),
+                "source_type": "formula",
+                "origin": "markdown_formula",
+                "content_index": index,
+            },
+        })
+
+    return items
+
+
+def _extract_markdown_tables(text: str) -> list[str]:
+    tables: list[str] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        if not _looks_like_table_row(lines[index]):
+            index += 1
+            continue
+        start = index
+        block: list[str] = []
+        while index < len(lines) and _looks_like_table_row(lines[index]):
+            block.append(lines[index].rstrip())
+            index += 1
+        if len(block) >= 2 and any(_looks_like_table_separator(row) for row in block[1:3]):
+            tables.append("\n".join(block).strip())
+        if index == start:
+            index += 1
+    return tables
+
+
+def _looks_like_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.count("|") >= 2 and not stripped.startswith("```")
+
+
+def _looks_like_table_separator(line: str) -> bool:
+    stripped = line.strip().strip("|")
+    if not stripped:
+        return False
+    cells = [cell.strip() for cell in stripped.split("|")]
+    return all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+
+def _extract_markdown_formulas(text: str) -> list[str]:
+    formulas: list[str] = []
+    patterns = [
+        r"\$\$(.+?)\$\$",
+        r"\\\[(.+?)\\\]",
+        r"\\\((.+?)\\\)",
+        r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.DOTALL):
+            formula = re.sub(r"\s+", " ", match.group(1)).strip()
+            if not formula or len(formula) > 500:
+                continue
+            if formula not in formulas:
+                formulas.append(formula)
+    return formulas
 
 
 def _preprocess_audio(*, path: Path, mime_type: str, file_name: str) -> PreprocessResult:

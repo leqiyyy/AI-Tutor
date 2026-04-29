@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import math
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
@@ -11,6 +12,7 @@ from app.core.exceptions import ForbiddenException
 from app.core.response import ok
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Task
+from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
 from app.services import course_service, kb_service
@@ -631,23 +633,115 @@ def teacher_course_knowledge_graph(
 def _knowledge_graph_payload(db: Session, cls: Class):
     course = _get_course(db, cls.course_id)
     root_id = cls.course_id
+    entities = (
+        db.query(KnowledgeEntity)
+        .filter(KnowledgeEntity.class_id == cls.id)
+        .filter(KnowledgeEntity.status != "rejected")
+        .order_by(KnowledgeEntity.confidence.desc(), KnowledgeEntity.created_at.desc())
+        .limit(80)
+        .all()
+    )
+    entity_ids = {entity.id for entity in entities}
+    relations = (
+        db.query(KnowledgeRelation)
+        .filter(KnowledgeRelation.class_id == cls.id)
+        .filter(KnowledgeRelation.source_id.in_(entity_ids))
+        .filter(KnowledgeRelation.target_id.in_(entity_ids))
+        .order_by(KnowledgeRelation.confidence.desc(), KnowledgeRelation.created_at.desc())
+        .limit(160)
+        .all()
+        if entity_ids
+        else []
+    )
+
+    preferred_kinds = {"material", "raganything_entity", "raganything_relation", "content_item", "entity_material_link"}
+    has_explicit_entities = any((entity.source_span or {}).get("kind") == "raganything_entity" for entity in entities)
+    if has_explicit_entities:
+        entities = [
+            entity for entity in entities
+            if (entity.source_span or {}).get("kind") in preferred_kinds
+        ]
+        entity_ids = {entity.id for entity in entities}
+        relations = [
+            relation for relation in relations
+            if relation.source_id in entity_ids
+            and relation.target_id in entity_ids
+            and (relation.source_span or {}).get("kind") in preferred_kinds
+        ]
+
+    nodes = [
+        {
+            "id": root_id,
+            "label": course.name if course else cls.name,
+            "x": 0,
+            "y": 0,
+            "color": "#2563eb",
+            "type": "course",
+            "description": "课程知识图谱根节点。RAG-Anything 索引完成后将同步更多实体与关系。",
+            "expandable": True,
+        }
+    ]
+    type_colors = {
+        "material": "#64748b",
+        "algorithm": "#7c3aed",
+        "formula": "#dc2626",
+        "table": "#059669",
+        "image": "#ea580c",
+        "concept": "#0891b2",
+        "conception": "#0891b2",
+        "category": "#0f766e",
+    }
+    for index, entity in enumerate(entities, start=1):
+        angle = (2 * math.pi * index) / max(len(entities), 1)
+        radius = 180 + 30 * (index % 3)
+        nodes.append({
+            "id": entity.id,
+            "label": entity.name,
+            "x": round(math.cos(angle) * radius, 2),
+            "y": round(math.sin(angle) * radius, 2),
+            "color": type_colors.get((entity.entity_type or "").lower(), "#475569"),
+            "type": entity.entity_type or "concept",
+            "description": entity.description or "",
+            "confidence": entity.confidence,
+            "sourceSpan": entity.source_span or {},
+            "provenance": entity.provenance or {},
+            "expandable": False,
+        })
+
+    edges = [
+        {
+            "id": f"{root_id}->{entity.id}",
+            "source": root_id,
+            "target": entity.id,
+            "label": "includes",
+            "weight": 0.3,
+        }
+        for entity in entities
+        if (entity.source_span or {}).get("kind") == "material"
+    ]
+    edges.extend([
+        {
+            "id": relation.id,
+            "source": relation.source_id,
+            "target": relation.target_id,
+            "label": relation.relation_type or "related_to",
+            "weight": relation.weight or 1.0,
+            "confidence": relation.confidence,
+            "sourceSpan": relation.source_span or {},
+            "provenance": relation.provenance or {},
+        }
+        for relation in relations
+    ])
+
     return ok(data={
-        "nodes": [
-            {
-                "id": root_id,
-                "label": course.name if course else cls.name,
-                "x": 0,
-                "y": 0,
-                "color": "#2563eb",
-                "type": "course",
-                "description": "课程知识图谱根节点。RAG-Anything 索引完成后将同步更多实体与关系。",
-                "expandable": True,
-            }
-        ],
-        "edges": [],
+        "nodes": nodes,
+        "edges": edges,
         "meta": {
             "rootNodeId": root_id,
             "layout": "force",
+            "entityCount": len(entities),
+            "relationCount": len(relations),
+            "source": "knowledge_entities",
         },
     })
 

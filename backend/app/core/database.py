@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -119,6 +119,39 @@ def check_database_connection() -> tuple[bool, str]:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+        return True, "ok"
+    except Exception as exc:  # pragma: no cover - defensive health path
+        return False, str(exc)
+
+
+def check_database_schema() -> tuple[bool, str]:
+    """Confirm the runtime database has the minimum schema needed by the app."""
+    try:
+        import app.models  # noqa: F401
+
+        inspector = inspect(engine)
+        required_tables = {
+            "users",
+            "courses",
+            "classes",
+            "class_members",
+            "materials",
+            "chat_sessions",
+            "chat_messages",
+            "kb_spaces",
+            "file_parse_tasks",
+            "student_profiles",
+            "review_items",
+            "review_sync_records",
+        }
+        existing_tables = set(inspector.get_table_names())
+        missing_tables = sorted(required_tables - existing_tables)
+        if missing_tables:
+            return False, f"missing tables: {', '.join(missing_tables)}"
+
+        if not settings.DATABASE_IS_SQLITE and "alembic_version" not in existing_tables:
+            return False, "missing alembic_version; run database initialization"
+
         return True, "ok"
     except Exception as exc:  # pragma: no cover - defensive health path
         return False, str(exc)

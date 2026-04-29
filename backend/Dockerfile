@@ -27,10 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt requirements-raganything.txt ./
 
-RUN python -m pip install --upgrade pip && \
-    python -m pip install -r requirements-raganything.txt
+RUN python -m pip install --timeout 120 --retries 5 --prefer-binary -r requirements-raganything.txt
 
 COPY . .
+
+RUN python scripts/patch_mineru_transformers_cache_position.py
 
 RUN mkdir -p \
     /app/uploads \

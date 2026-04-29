@@ -115,7 +115,9 @@ docker compose --env-file backend/.env.server -f docker-compose.server.yml ps
 
 ## 6. 初始化数据库
 
-第一次启动后执行：
+当前 `docker-compose.server.yml` 会先运行 `backend-migrate`，自动执行 Alembic 迁移，并在 `SEED_DEMO_DATA=true` 时写入演示账号和基础课程。正常情况下不需要手动初始化。
+
+如果需要手动修复或重新执行迁移：
 
 ```bash
 docker compose --env-file backend/.env.server -f docker-compose.server.yml exec backend-api alembic upgrade head
@@ -318,4 +320,3 @@ docker compose --env-file backend/.env.server -f docker-compose.server.yml logs 
 - `MULTIMODAL_AUTO_PREPROCESS_ENABLED=false`
 - 优先使用 API embedding、API reranker、API VLM。
 - 长视频先人工生成字幕或转写文本，再作为 `.md/.txt` 上传。
-

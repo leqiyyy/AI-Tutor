@@ -107,12 +107,14 @@ def _admin_kb_failure_alerts(client, admin_headers: dict, parse_task_id: str) ->
 
 def test_kb_upload_idempotent_and_task_retry(client, teacher_headers):
     course_id = client.get("/api/v1/courses", headers=teacher_headers).json()["data"][0]["id"]
-    file_bytes = b"Congestion avoidance grows cwnd linearly after slow start."
+    marker = uuid.uuid4().hex
+    filename = f"congestion_notes_{marker[:8]}.txt"
+    file_bytes = f"Congestion avoidance grows cwnd linearly after slow start. {marker}".encode("utf-8")
 
     upload1 = client.post(
         f"/api/v1/courses/{course_id}/files/upload",
         headers=teacher_headers,
-        files={"file": ("congestion_notes.txt", io.BytesIO(file_bytes), "text/plain")},
+        files={"file": (filename, io.BytesIO(file_bytes), "text/plain")},
         data={"title": "Congestion Notes"},
     )
     assert upload1.status_code == 200
@@ -125,7 +127,7 @@ def test_kb_upload_idempotent_and_task_retry(client, teacher_headers):
     upload2 = client.post(
         f"/api/v1/courses/{course_id}/files/upload",
         headers=teacher_headers,
-        files={"file": ("congestion_notes.txt", io.BytesIO(file_bytes), "text/plain")},
+        files={"file": (filename, io.BytesIO(file_bytes), "text/plain")},
         data={"title": "Congestion Notes Duplicate"},
     )
     assert upload2.status_code == 200

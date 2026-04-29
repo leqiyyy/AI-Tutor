@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
     AUTO_CREATE_TABLES: bool = True
+    SEED_DEMO_DATA: bool = False
 
     SECRET_KEY: str = "dev-secret-key-change-in-production-32ch"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080
@@ -137,6 +138,7 @@ class Settings(BaseSettings):
     RAG_QUERY_REWRITE_ENABLED: bool = False
     RAG_QUERY_REWRITE_MODE: str = "hybrid"  # none | hybrid | compact | keywords; legacy simple maps to hybrid
     RAG_QUERY_REWRITE_MAX_VARIANTS: int = 3
+    RAG_ANSWER_REPAIR_ENABLED: bool = True
     RERANKER_PROVIDER: str = "mock"  # mock | none | api | local
     RERANKER_MODEL: str = "mock-reranker-v1"
     RERANKER_API_BASE: str = ""
@@ -166,12 +168,14 @@ class Settings(BaseSettings):
     @field_validator(
         "DEBUG",
         "AUTO_CREATE_TABLES",
+        "SEED_DEMO_DATA",
         "REDIS_AVAILABLE",
         "MINIO_SECURE",
         "EMAIL_DEV_MODE",
         "KB_QUEUE_AUTO_RETRY_ENABLED",
         "KB_INDEX_ALERT_NOTIFY_ADMIN",
         "RAG_QUERY_REWRITE_ENABLED",
+        "RAG_ANSWER_REPAIR_ENABLED",
         "RAGANYTHING_STRICT_MODE",
         "RAGANYTHING_METADATA_FALLBACK_ENABLED",
         "RAGANYTHING_REQUIRE_OFFICIAL_METADATA",

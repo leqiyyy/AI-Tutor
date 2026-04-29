@@ -642,6 +642,7 @@ class RAGAnythingAdapter:
         self,
         *,
         class_id: str,
+        material_id: str,
         status: dict[str, Any],
         preprocess_result: PreprocessResult,
         file_path: str,
@@ -656,6 +657,7 @@ class RAGAnythingAdapter:
         summary = self._find_payload_text(status, {"summary", "document_summary", "abstract"})
         metadata_source = "raganything"
 
+        lightrag_output = None
         if preprocess_result.mode == "direct_document" and (not content_items or not chunks or not summary):
             official_output = self._load_official_output_metadata(
                 class_id=class_id,
@@ -669,9 +671,36 @@ class RAGAnythingAdapter:
                 summary = summary or official_output["summary"]
                 metadata_source = official_output["metadata_source"]
 
-        if not content_items and preprocess_result.content_list:
-            content_items = preprocess_result.content_list
-            metadata_source = "preprocessed_content_list"
+        if preprocess_result.mode == "direct_document":
+            lightrag_output = self._load_lightrag_document_metadata(
+                class_id=class_id,
+                material_id=material_id,
+                file_name=file_name,
+            )
+            if lightrag_output:
+                content_items = content_items or lightrag_output["content_items"]
+                chunks = self._merge_metadata_chunks(chunks, lightrag_output["chunks"])
+                keywords = keywords or lightrag_output["keywords"]
+                if not summary or self._is_media_only_markdown(summary):
+                    summary = lightrag_output["summary"]
+                metadata_source = (
+                    f"{metadata_source}+{lightrag_output['metadata_source']}"
+                    if metadata_source and metadata_source != lightrag_output["metadata_source"]
+                    else lightrag_output["metadata_source"]
+                )
+
+        if preprocess_result.content_list:
+            if content_items:
+                content_items = self._merge_content_items(content_items, preprocess_result.content_list)
+                if "preprocessed_content_list" not in metadata_source:
+                    metadata_source = f"{metadata_source}+preprocessed_content_list"
+            else:
+                content_items = preprocess_result.content_list
+                metadata_source = "preprocessed_content_list"
+            chunks = self._merge_metadata_chunks(
+                chunks,
+                self._chunks_from_content_items(preprocess_result.content_list, file_name),
+            )
         if not chunks and content_items:
             chunks = self._chunks_from_content_items(content_items, file_name)
         text = self._text_from_chunks_or_items(chunks, content_items)
@@ -720,18 +749,37 @@ class RAGAnythingAdapter:
         mime_type: str,
     ) -> dict[str, Any] | None:
         stem = Path(file_name).stem
-        output_root = (Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id / stem).resolve()
-        if not output_root.exists():
+        storage_stem = Path(file_path).stem
+        class_output_root = (Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()
+        output_roots = [
+            class_output_root / stem,
+            class_output_root / storage_stem,
+        ]
+        if class_output_root.exists():
+            output_roots.extend(class_output_root.glob(f"{storage_stem}_*"))
+            output_roots.extend(class_output_root.glob(f"{stem}_*"))
+        output_roots = [root for root in output_roots if root.exists()]
+        if not output_roots:
             return None
 
         content_list_path = self._latest_existing_path(
-            output_root,
+            output_roots,
             [f"{stem}_content_list.json", f"{stem}_content_list_v2.json"],
         )
+        if not content_list_path and storage_stem != stem:
+            content_list_path = self._latest_existing_path(
+                output_roots,
+                [f"{storage_stem}_content_list.json", f"{storage_stem}_content_list_v2.json"],
+            )
         markdown_path = self._latest_existing_path(
-            output_root,
+            output_roots,
             [f"{stem}.md", f"{stem}.markdown", f"{stem}.txt"],
         )
+        if not markdown_path and storage_stem != stem:
+            markdown_path = self._latest_existing_path(
+                output_roots,
+                [f"{storage_stem}.md", f"{storage_stem}.markdown", f"{storage_stem}.txt"],
+            )
 
         content_items = self._read_official_content_items(content_list_path)
         markdown_text = self._safe_read_text(markdown_path)
@@ -748,10 +796,148 @@ class RAGAnythingAdapter:
             "metadata_source": "raganything_output_files",
         }
 
-    def _latest_existing_path(self, root: Path, candidate_names: list[str]) -> Path | None:
+    def _load_lightrag_document_metadata(
+        self,
+        *,
+        class_id: str,
+        material_id: str,
+        file_name: str,
+    ) -> dict[str, Any] | None:
+        storage_plan = build_lightrag_storage_plan(class_id)
+        workspace = storage_plan.get("workspace") or class_id
+        base_dir = Path(settings.RAGANYTHING_WORKING_DIR) / class_id / str(workspace)
+        text_chunks = self._load_json_file(base_dir / "kv_store_text_chunks.json")
+        full_entities = self._load_json_file(base_dir / "kv_store_full_entities.json")
+
+        if not isinstance(text_chunks, dict):
+            return None
+
+        chunks = []
+        for chunk_id, chunk in text_chunks.items():
+            if not isinstance(chunk, dict) or chunk.get("full_doc_id") != material_id:
+                continue
+            content = self._clean_lightrag_chunk_text(chunk.get("content"))
+            if not content:
+                continue
+            chunks.append({
+                "chunk_id": str(chunk_id),
+                "text": content,
+                "page": chunk.get("page_idx") or chunk.get("page") or 0,
+                "source_name": file_name,
+                "source_type": "lightrag_chunk",
+                "metadata": {
+                    "source": "lightrag_kv",
+                    "full_doc_id": material_id,
+                    "file_path": chunk.get("file_path"),
+                    "tokens": chunk.get("tokens"),
+                },
+            })
+
+        if not chunks:
+            return None
+
+        text = "\n\n".join(chunk["text"] for chunk in chunks)
+        entities_payload = (full_entities or {}).get(material_id) if isinstance(full_entities, dict) else {}
+        keywords = []
+        if isinstance(entities_payload, dict):
+            keywords = [
+                str(name).strip()
+                for name in entities_payload.get("entity_names", [])
+                if str(name).strip()
+            ]
+
+        return {
+            "text": text,
+            "chunks": chunks,
+            "content_items": [{
+                "type": "text",
+                "text": text,
+                "page_idx": 0,
+                "metadata": {
+                    "source_name": file_name,
+                    "source_type": "lightrag_kv",
+                    "full_doc_id": material_id,
+                },
+            }],
+            "keywords": keywords,
+            "summary": text[:500],
+            "metadata_source": "lightrag_kv",
+        }
+
+    def _merge_metadata_chunks(
+        self,
+        primary: list[dict[str, Any]] | None,
+        extra: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for chunk in list(primary or []) + list(extra or []):
+            if not isinstance(chunk, dict):
+                continue
+            text = re.sub(r"\s+", " ", str(chunk.get("text") or "")).strip()
+            if not text:
+                continue
+            key = text[:500].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(chunk)
+        return merged
+
+    def _merge_content_items(
+        self,
+        primary: list[dict[str, Any]] | None,
+        extra: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in list(primary or []) + list(extra or []):
+            if not isinstance(item, dict):
+                continue
+            key_payload = {
+                "type": item.get("type"),
+                "text": re.sub(r"\s+", " ", str(item.get("text") or "")).strip()[:800],
+                "caption": re.sub(r"\s+", " ", str(item.get("caption") or "")).strip()[:800],
+                "table_markdown": re.sub(r"\s+", " ", str(item.get("table_markdown") or "")).strip()[:800],
+                "equation": re.sub(r"\s+", " ", str(item.get("equation") or item.get("formula_latex") or "")).strip()[:500],
+                "img_path": str(item.get("img_path") or item.get("image_path") or ""),
+            }
+            key = json.dumps(key_payload, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _is_media_only_markdown(self, text: str | None) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        stripped = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", value).strip()
+        return not stripped
+
+    def _clean_lightrag_chunk_text(self, text: Any) -> str:
+        value = str(text or "")
+        for marker in ("Visual Analysis:", "Analysis:"):
+            if marker in value:
+                prefix, suffix = value.split(marker, 1)
+                if "Table Analysis:" in prefix and "Structure:" in prefix:
+                    structure = prefix.split("Structure:", 1)[1]
+                    value = f"Structure: {structure}\nAnalysis: {suffix}"
+                else:
+                    value = suffix
+                break
+        value = re.sub(r"Image Path:\s*/app/[^\n\r]+", "", value)
+        value = re.sub(r"/app/(?:uploads|rag_storage|rag_output|runtime_tmp)/[^\s\]\)\r\n]+", "[系统内部路径]", value)
+        value = re.sub(r"^\s*(Image Content Analysis:|Table Analysis:|Captions?:\s*None|Footnotes:\s*None)\s*", "", value, flags=re.I)
+        return re.sub(r"\s+", " ", value).strip()
+
+    def _latest_existing_path(self, root: Path | list[Path], candidate_names: list[str]) -> Path | None:
         matches: list[Path] = []
+        roots = root if isinstance(root, list) else [root]
         for name in candidate_names:
-            matches.extend(root.rglob(name))
+            for item in roots:
+                matches.extend(item.rglob(name))
         if not matches:
             return None
         matches.sort(key=lambda item: item.stat().st_mtime, reverse=True)
@@ -997,7 +1183,12 @@ class RAGAnythingAdapter:
         entity_count = 1
         relation_count = 0
 
-        explicit_entities = self._extract_graph_entities(status)
+        storage_graph = self._extract_lightrag_storage_graph(
+            class_id=class_id,
+            material_id=material_id,
+        )
+        explicit_entities = self._extract_graph_entities(status) or storage_graph.get("entities", [])
+        explicit_relations = self._extract_graph_relations(status) or storage_graph.get("relations", [])
         entity_by_name: dict[str, KnowledgeEntity] = {material_entity.name.lower(): material_entity}
         for item in explicit_entities[:48]:
             entity = self._upsert_graph_entity(
@@ -1025,18 +1216,43 @@ class RAGAnythingAdapter:
             ):
                 relation_count += 1
 
+        candidate_keywords = self._projection_candidate_keywords(parsed, limit=80)
         if not explicit_entities:
-            for keyword in (parsed.get("keywords") or [])[:12]:
+            for keyword in candidate_keywords[:12]:
+                normalized_keyword = str(keyword or "").strip()[:300]
+                if not normalized_keyword:
+                    continue
+                is_identifier_keyword = self._is_projection_identifier_keyword(normalized_keyword)
+                provenance_payload = provenance_base
+                fallback_reason = "raganything_metadata_keywords"
+                confidence = 0.62
+                if is_identifier_keyword:
+                    source_material_ids = self._material_ids_referencing_projection_keyword(
+                        db,
+                        class_id=class_id,
+                        keyword=normalized_keyword,
+                        current_material_id=material_id,
+                    )
+                    provenance_payload = {
+                        **provenance_base,
+                        "source_material_ids": source_material_ids,
+                        "occurrence_count": max(
+                            int(provenance_base.get("occurrence_count", 1) or 1),
+                            len(source_material_ids),
+                        ),
+                    }
+                    fallback_reason = "raganything_metadata_identifier_keyword"
+                    confidence = 0.7
                 entity = self._upsert_graph_entity(
                     db,
                     class_id=class_id,
-                    name=str(keyword),
+                    name=normalized_keyword,
                     entity_type="candidate_concept",
                     description=f"Candidate concept projected from RAG-Anything metadata for {file_name}",
                     material_id=material_id,
-                    confidence=0.62,
-                    source_span={**source_span_seed, "kind": "candidate_concept", "keyword": keyword},
-                    provenance={**provenance_base, "fallback": "raganything_metadata_keywords"},
+                    confidence=confidence,
+                    source_span={**source_span_seed, "kind": "candidate_concept", "keyword": normalized_keyword},
+                    provenance={**provenance_payload, "fallback": fallback_reason},
                 )
                 entity_by_name[entity.name.lower()] = entity
                 entity_count += 1
@@ -1048,7 +1264,73 @@ class RAGAnythingAdapter:
                     relation_type="appears_in",
                     confidence=0.6,
                     source_span={**source_span_seed, "kind": "candidate_material_link"},
-                    provenance={**provenance_base, "fallback": "raganything_metadata_keywords"},
+                    provenance={**provenance_payload, "fallback": fallback_reason},
+                ):
+                    relation_count += 1
+        else:
+            for keyword in candidate_keywords[:48]:
+                normalized_keyword = str(keyword or "").strip()[:300]
+                if not normalized_keyword or normalized_keyword.lower() in entity_by_name:
+                    continue
+                existing_entity = db.query(KnowledgeEntity).filter(
+                    KnowledgeEntity.class_id == class_id,
+                    KnowledgeEntity.name == normalized_keyword,
+                ).first()
+                is_identifier_keyword = self._is_projection_identifier_keyword(normalized_keyword)
+                if not existing_entity and not is_identifier_keyword:
+                    continue
+                provenance_payload = provenance_base
+                if is_identifier_keyword:
+                    source_material_ids = self._material_ids_referencing_projection_keyword(
+                        db,
+                        class_id=class_id,
+                        keyword=normalized_keyword,
+                        current_material_id=material_id,
+                    )
+                    provenance_payload = {
+                        **provenance_base,
+                        "source_material_ids": source_material_ids,
+                        "occurrence_count": max(
+                            int(provenance_base.get("occurrence_count", 1) or 1),
+                            len(source_material_ids),
+                        ),
+                    }
+                entity = self._upsert_graph_entity(
+                    db,
+                    class_id=class_id,
+                    name=normalized_keyword,
+                    entity_type=(existing_entity.entity_type if existing_entity else None) or "candidate_concept",
+                    description=(
+                        (existing_entity.description if existing_entity else None)
+                        or f"Candidate concept projected from RAG-Anything metadata for {file_name}"
+                    ),
+                    material_id=material_id,
+                    confidence=max(float((existing_entity.confidence if existing_entity else None) or 0.6), 0.6),
+                    source_span={
+                        **source_span_seed,
+                        "kind": "candidate_concept_existing" if existing_entity else "candidate_concept_identifier",
+                        "keyword": normalized_keyword,
+                    },
+                    provenance={
+                        **provenance_payload,
+                        "fallback": (
+                            "raganything_metadata_existing_keyword"
+                            if existing_entity
+                            else "raganything_metadata_identifier_keyword"
+                        ),
+                    },
+                )
+                entity_by_name[entity.name.lower()] = entity
+                entity_count += 1
+                if self._upsert_graph_relation(
+                    db,
+                    class_id=class_id,
+                    source=entity,
+                    target=material_entity,
+                    relation_type="appears_in",
+                    confidence=0.6,
+                    source_span={**source_span_seed, "kind": "candidate_material_link_existing"},
+                    provenance={**provenance_base, "fallback": "raganything_metadata_existing_keyword"},
                 ):
                     relation_count += 1
 
@@ -1089,7 +1371,7 @@ class RAGAnythingAdapter:
             ):
                 relation_count += 1
 
-        for item in self._extract_graph_relations(status)[:64]:
+        for item in explicit_relations[:64]:
             source_name = item.get("source") or item.get("source_entity") or item.get("head")
             target_name = item.get("target") or item.get("target_entity") or item.get("tail")
             if not source_name or not target_name:
@@ -1123,7 +1405,12 @@ class RAGAnythingAdapter:
                 target=target,
                 relation_type=item.get("relation_type") or item.get("type") or "related_to",
                 confidence=item.get("confidence") or 0.7,
-                source_span={**source_span_seed, "kind": "raganything_relation", "evidence": item.get("evidence")},
+                source_span={
+                    **source_span_seed,
+                    **(item.get("source_span") or {}),
+                    "kind": "raganything_relation",
+                    "evidence": item.get("evidence"),
+                },
                 provenance={**provenance_base, "raganything_relation": item},
             ):
                 relation_count += 1
@@ -1133,7 +1420,318 @@ class RAGAnythingAdapter:
             "entity_count": entity_count,
             "relation_count": relation_count,
             "used_explicit_raganything_graph": bool(explicit_entities),
+            "explicit_graph_source": storage_graph.get("source") if storage_graph.get("entities") else "raganything_status",
         }
+
+    def _projection_candidate_keywords(self, parsed: dict[str, Any], *, limit: int = 80) -> list[str]:
+        values: list[str] = []
+
+        text_parts = [str(parsed.get("text") or ""), str(parsed.get("summary") or "")]
+        for chunk in parsed.get("chunks") or []:
+            if isinstance(chunk, dict):
+                text_parts.append(str(chunk.get("text") or chunk.get("content") or ""))
+        for item in parsed.get("content_items") or []:
+            if isinstance(item, dict):
+                text_parts.append(
+                    str(
+                        item.get("text")
+                        or item.get("caption")
+                        or item.get("ocr_text")
+                        or item.get("table_markdown")
+                        or item.get("equation")
+                        or ""
+                    )
+                )
+
+        joined_text = "\n".join(text_parts)
+        values.extend(self._projection_identifier_keywords_from_text(joined_text, limit=24))
+
+        for keyword in parsed.get("keywords") or []:
+            if keyword:
+                values.append(str(keyword))
+
+        values.extend(self._fallback_keywords(joined_text, limit=limit))
+
+        deduped = []
+        seen = set()
+        for value in values:
+            normalized = str(value or "").strip()[:300]
+            key = normalized.lower()
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+            if len(deduped) >= limit:
+                break
+        return deduped
+
+    def _projection_identifier_keywords_from_text(self, text: str, *, limit: int = 24) -> list[str]:
+        identifiers: list[str] = []
+        for match in re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{7,79}\b", text or ""):
+            if not any(char.isdigit() for char in match):
+                continue
+            if match not in identifiers:
+                identifiers.append(match)
+            if len(identifiers) >= limit:
+                break
+        return identifiers
+
+    def _is_projection_identifier_keyword(self, keyword: str) -> bool:
+        normalized = str(keyword or "").strip()
+        if len(normalized) < 8 or len(normalized) > 80:
+            return False
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]+", normalized):
+            return False
+        return any(char.isdigit() for char in normalized)
+
+    def _material_ids_referencing_projection_keyword(
+        self,
+        db,
+        *,
+        class_id: str,
+        keyword: str,
+        current_material_id: str,
+    ) -> list[str]:
+        normalized = str(keyword or "").strip().lower()
+        material_ids: list[str] = []
+        if current_material_id:
+            material_ids.append(current_material_id)
+        if not normalized:
+            return material_ids
+
+        tasks = db.query(FileParseTask).filter(
+            FileParseTask.class_id == class_id,
+            FileParseTask.status == "completed",
+        ).all()
+        for task in tasks:
+            material_id = str(task.material_id or "")
+            if not material_id or material_id in material_ids:
+                continue
+            if self._parse_task_contains_projection_keyword(task, normalized):
+                material_ids.append(material_id)
+        return material_ids
+
+    def _parse_task_contains_projection_keyword(self, task: FileParseTask, normalized_keyword: str) -> bool:
+        text_parts = [
+            str(task.extracted_text or ""),
+            str(task.summary or ""),
+        ]
+        for chunk in task.chunks or []:
+            if isinstance(chunk, dict):
+                text_parts.append(str(chunk.get("text") or chunk.get("content") or ""))
+            elif chunk:
+                text_parts.append(str(chunk))
+
+        extra = task.extra_data or {}
+        for keyword in extra.get("keywords") or []:
+            text_parts.append(str(keyword or ""))
+        for item in extra.get("content_items") or []:
+            if isinstance(item, dict):
+                text_parts.append(
+                    str(
+                        item.get("text")
+                        or item.get("caption")
+                        or item.get("ocr_text")
+                        or item.get("table_markdown")
+                        or item.get("equation")
+                        or ""
+                    )
+                )
+        return normalized_keyword in "\n".join(text_parts).lower()
+
+    def _extract_lightrag_storage_graph(
+        self,
+        *,
+        class_id: str,
+        material_id: str,
+    ) -> dict[str, Any]:
+        """Read LightRAG persisted graph metadata for app-level projection."""
+
+        storage_plan = build_lightrag_storage_plan(class_id)
+        workspace = storage_plan.get("workspace") or class_id
+        base_dir = Path(settings.RAGANYTHING_WORKING_DIR) / class_id / str(workspace)
+        full_entities = self._load_json_file(base_dir / "kv_store_full_entities.json")
+        full_relations = self._load_json_file(base_dir / "kv_store_full_relations.json")
+        entity_chunks = self._load_json_file(base_dir / "kv_store_entity_chunks.json")
+        relation_chunks = self._load_json_file(base_dir / "kv_store_relation_chunks.json")
+
+        material_entities = (full_entities or {}).get(material_id) or {}
+        entity_names = []
+        if isinstance(material_entities, dict):
+            entity_names = [
+                str(name).strip()
+                for name in material_entities.get("entity_names", [])
+                if str(name).strip()
+            ]
+
+        material_relations = (full_relations or {}).get(material_id) or {}
+        relation_pairs = []
+        if isinstance(material_relations, dict):
+            relation_pairs = [
+                pair
+                for pair in material_relations.get("relation_pairs", [])
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2
+            ]
+
+        if not entity_names and not relation_pairs:
+            return {"source": "none", "entities": [], "relations": []}
+
+        neo4j_graph = self._extract_lightrag_neo4j_graph(
+            class_id=class_id,
+            entity_names=entity_names,
+            relation_pairs=relation_pairs,
+        )
+        neo4j_entities = neo4j_graph.get("entities", {})
+        neo4j_relations = neo4j_graph.get("relations", {})
+
+        entities = []
+        for name in entity_names:
+            neo4j_entity = neo4j_entities.get(name, {})
+            chunk_payload = (entity_chunks or {}).get(name) if isinstance(entity_chunks, dict) else None
+            chunk_ids = []
+            if isinstance(chunk_payload, dict):
+                chunk_ids = [str(chunk_id) for chunk_id in chunk_payload.get("chunk_ids", []) if chunk_id]
+            entities.append({
+                "name": name,
+                "entity_type": neo4j_entity.get("entity_type") or "concept",
+                "description": neo4j_entity.get("description") or f"LightRAG extracted entity: {name}",
+                "confidence": 0.82,
+                "source_span": {
+                    "chunk_ids": chunk_ids,
+                    "file_path": neo4j_entity.get("file_path"),
+                    "source_id": neo4j_entity.get("source_id"),
+                },
+            })
+
+        relations = []
+        for pair in relation_pairs:
+            source_name = str(pair[0]).strip()
+            target_name = str(pair[1]).strip()
+            if not source_name or not target_name:
+                continue
+            relation_key = f"{source_name}<SEP>{target_name}"
+            neo4j_relation = neo4j_relations.get(relation_key, {})
+            chunk_payload = (relation_chunks or {}).get(relation_key) if isinstance(relation_chunks, dict) else None
+            chunk_ids = []
+            if isinstance(chunk_payload, dict):
+                chunk_ids = [str(chunk_id) for chunk_id in chunk_payload.get("chunk_ids", []) if chunk_id]
+            relations.append({
+                "source": source_name,
+                "target": target_name,
+                "relation_type": neo4j_relation.get("relation_type") or "related_to",
+                "confidence": 0.82,
+                "evidence": neo4j_relation.get("description") or neo4j_relation.get("keywords"),
+                "source_span": {
+                    "chunk_ids": chunk_ids,
+                    "file_path": neo4j_relation.get("file_path"),
+                    "source_id": neo4j_relation.get("source_id"),
+                    "keywords": neo4j_relation.get("keywords"),
+                },
+            })
+
+        return {
+            "source": "lightrag_kv_neo4j" if neo4j_graph.get("available") else "lightrag_kv",
+            "entities": entities,
+            "relations": relations,
+        }
+
+    def _load_json_file(self, path: Path) -> Any:
+        try:
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "lightrag_storage_json_load_failed",
+                path=str(path),
+                error=str(exc),
+            )
+            return None
+
+    def _extract_lightrag_neo4j_graph(
+        self,
+        *,
+        class_id: str,
+        entity_names: list[str],
+        relation_pairs: list[Any],
+    ) -> dict[str, Any]:
+        if not settings.GRAPH_DB_URL or not settings.GRAPH_DB_USERNAME:
+            return {"available": False, "entities": {}, "relations": {}}
+
+        try:
+            from neo4j import GraphDatabase
+        except Exception:
+            return {"available": False, "entities": {}, "relations": {}}
+
+        relation_keys = {
+            f"{str(pair[0]).strip()}<SEP>{str(pair[1]).strip()}"
+            for pair in relation_pairs
+            if isinstance(pair, (list, tuple)) and len(pair) >= 2
+        }
+        try:
+            driver = GraphDatabase.driver(
+                settings.GRAPH_DB_URL,
+                auth=(settings.GRAPH_DB_USERNAME, settings.GRAPH_DB_PASSWORD),
+            )
+            with driver:
+                with driver.session(database=settings.GRAPH_DB_DATABASE or None) as session:
+                    entity_rows = session.run(
+                        """
+                        MATCH (n)
+                        WHERE $workspace IN labels(n) AND n.entity_id IN $entity_names
+                        RETURN n.entity_id AS name,
+                               n.entity_type AS entity_type,
+                               n.description AS description,
+                               n.source_id AS source_id,
+                               n.file_path AS file_path
+                        """,
+                        workspace=class_id,
+                        entity_names=entity_names,
+                    )
+                    entities = {
+                        row["name"]: {
+                            "entity_type": row["entity_type"],
+                            "description": row["description"],
+                            "source_id": row["source_id"],
+                            "file_path": row["file_path"],
+                        }
+                        for row in entity_rows
+                        if row["name"]
+                    }
+                    relation_rows = session.run(
+                        """
+                        MATCH (a)-[r]->(b)
+                        WHERE $workspace IN labels(a) AND $workspace IN labels(b)
+                        RETURN a.entity_id AS source,
+                               b.entity_id AS target,
+                               type(r) AS relation_type,
+                               r.description AS description,
+                               r.keywords AS keywords,
+                               r.source_id AS source_id,
+                               r.file_path AS file_path
+                        """,
+                        workspace=class_id,
+                    )
+                    relations = {}
+                    for row in relation_rows:
+                        key = f"{row['source']}<SEP>{row['target']}"
+                        if key not in relation_keys:
+                            continue
+                        relations[key] = {
+                            "relation_type": row["relation_type"],
+                            "description": row["description"],
+                            "keywords": row["keywords"],
+                            "source_id": row["source_id"],
+                            "file_path": row["file_path"],
+                        }
+            return {"available": True, "entities": entities, "relations": relations}
+        except Exception as exc:
+            logger.warning(
+                "lightrag_neo4j_graph_projection_load_failed",
+                class_id=class_id,
+                error=str(exc),
+            )
+            return {"available": False, "entities": {}, "relations": {}}
 
     def _upsert_graph_entity(
         self,
@@ -1174,7 +1772,11 @@ class RAGAnythingAdapter:
         entity.source_material_id = material_id
         entity.confidence = self._blended_confidence(entity.confidence, confidence)
         entity.source_span = self._merge_source_span(entity.source_span, source_span)
-        entity.provenance = self._merge_provenance(entity.provenance, material_id, provenance.get("last_seen_at") or datetime.now(timezone.utc).isoformat())
+        entity.provenance = self._merge_provenance(
+            entity.provenance,
+            [*self._source_material_ids_from_provenance(provenance), material_id],
+            provenance.get("last_seen_at") or datetime.now(timezone.utc).isoformat(),
+        )
         db.add(entity)
         return entity
 
@@ -1214,7 +1816,11 @@ class RAGAnythingAdapter:
         relation.weight = round(min(5.0, float(relation.weight or 1.0) + 0.2), 4)
         relation.confidence = self._blended_confidence(relation.confidence, confidence)
         relation.source_span = self._merge_source_span(relation.source_span, source_span)
-        relation.provenance = self._merge_provenance(relation.provenance, provenance.get("source_material_ids", [None])[0], provenance.get("last_seen_at") or datetime.now(timezone.utc).isoformat())
+        relation.provenance = self._merge_provenance(
+            relation.provenance,
+            self._source_material_ids_from_provenance(provenance),
+            provenance.get("last_seen_at") or datetime.now(timezone.utc).isoformat(),
+        )
         db.add(relation)
         return False
 
@@ -1300,13 +1906,23 @@ class RAGAnythingAdapter:
                 merged[key] = value if value is not None else merged.get(key)
         return merged
 
-    def _merge_provenance(self, existing: Any, material_id: str | None, seen_at: str) -> dict[str, Any]:
+    def _source_material_ids_from_provenance(self, provenance: Any) -> list[str]:
+        if not isinstance(provenance, dict):
+            return []
+        source_material_ids = provenance.get("source_material_ids") or []
+        if not isinstance(source_material_ids, list):
+            source_material_ids = [source_material_ids]
+        return [str(material_id) for material_id in source_material_ids if material_id]
+
+    def _merge_provenance(self, existing: Any, material_ids: str | list[str] | tuple[str, ...] | None, seen_at: str) -> dict[str, Any]:
         provenance = dict(existing or {})
         source_material_ids = provenance.get("source_material_ids") or []
         if not isinstance(source_material_ids, list):
             source_material_ids = [source_material_ids]
-        if material_id and material_id not in source_material_ids:
-            source_material_ids.append(material_id)
+        incoming_ids = material_ids if isinstance(material_ids, (list, tuple, set)) else [material_ids]
+        for material_id in incoming_ids:
+            if material_id and material_id not in source_material_ids:
+                source_material_ids.append(material_id)
         provenance["source_material_ids"] = source_material_ids
         provenance["occurrence_count"] = int(provenance.get("occurrence_count", 0) or 0) + 1
         provenance["first_seen_at"] = provenance.get("first_seen_at") or seen_at
@@ -1355,6 +1971,7 @@ class RAGAnythingAdapter:
                 )
 
             task.status = "processing"
+            db.expire(task, ["extra_data"])
             task.extra_data = {
                 **(task.extra_data or {}),
                 "preprocess": self._preprocess_result_to_metadata(preprocess_result),
@@ -1386,6 +2003,7 @@ class RAGAnythingAdapter:
 
             parsed = self._build_metadata_payload(
                 class_id=class_id,
+                material_id=material_id,
                 status=status,
                 preprocess_result=preprocess_result,
                 file_path=file_path,
@@ -1406,7 +2024,10 @@ class RAGAnythingAdapter:
             task.extracted_text = parsed["text"]
             task.chunks = parsed["chunks"]
             task.error_message = None if task.status == "completed" else processing_error["message"]
+            db.expire(task, ["extra_data"])
+            existing_extra = task.extra_data or {}
             task.extra_data = {
+                **existing_extra,
                 "keywords": parsed["keywords"],
                 "content_items": parsed["content_items"],
                 "metadata_source": parsed.get("metadata_source"),
@@ -1653,6 +2274,20 @@ class RAGAnythingAdapter:
             question=question,
             sources=sources,
         )
+        if bool(settings.RAG_ANSWER_REPAIR_ENABLED) and self._answer_needs_repair(answer) and sources:
+            repaired_answer = await self._repair_answer_from_sources(
+                question=question,
+                answer=answer,
+                sources=sources,
+                role=role,
+            )
+            if repaired_answer:
+                answer = repaired_answer
+                rerank_meta = {
+                    **rerank_meta,
+                    "answer_repaired": True,
+                    "answer_repair_reason": "low_readability_generation",
+                }
         if confidence <= 0:
             top_score = next((source.get("score") for source in sources if source.get("score") is not None), None)
             confidence = min(0.95, max(0.55, float(top_score))) if top_score is not None else 0.6
@@ -1669,6 +2304,103 @@ class RAGAnythingAdapter:
             query_method,
             None,
         )
+
+    def _answer_needs_repair(self, answer: str) -> bool:
+        text = str(answer or "")
+        if not text.strip():
+            return False
+        if "�" in text:
+            return True
+
+        chinese_chars = re.findall(r"[\u4e00-\u9fff]", text)
+        if chinese_chars:
+            quote_count = len(re.findall(r'["“”]', text))
+            if quote_count / max(len(chinese_chars), 1) > 0.08:
+                return True
+            repeated_chinese = re.findall(r"([\u4e00-\u9fff]{1,2})\1{2,}", text)
+            if len(repeated_chinese) >= 2:
+                return True
+            awkward_patterns = (
+                r"的的",
+                r"地地",
+                r"会会",
+                r"指指",
+                r"###\s*###",
+                r"RTTT",
+            )
+            if any(re.search(pattern, text) for pattern in awkward_patterns):
+                return True
+        return False
+
+    async def _repair_answer_from_sources(
+        self,
+        *,
+        question: str,
+        answer: str,
+        sources: list[dict],
+        role: str,
+    ) -> str:
+        generation_base = settings.EFFECTIVE_LLM_API_BASE
+        generation_api_key = settings.EFFECTIVE_LLM_API_KEY
+        generation_model = settings.LLM_MODEL
+        if not generation_base or not generation_api_key or not generation_model:
+            return ""
+
+        evidence_lines = []
+        for index, source in enumerate(sources[:5], start=1):
+            snippet = (
+                source.get("snippet")
+                or source.get("raw_text")
+                or source.get("content")
+                or source.get("text")
+                or ""
+            )
+            snippet = re.sub(r"\s+", " ", str(snippet)).strip()
+            if not snippet:
+                continue
+            name = source.get("source_name") or source.get("name") or f"source-{index}"
+            evidence_lines.append(f"[资料{index}] {name}: {snippet[:900]}")
+        if not evidence_lines:
+            return ""
+
+        role_guidance = (
+            "当前用户是教师，请额外给出教学提示。"
+            if str(role or "").lower() in {"teacher", "admin", "instructor"}
+            else "当前用户是学生，请用循序渐进的方式解释，避免过度扩展。"
+        )
+        prompt = (
+            "请根据下面的课程资料，重新生成一段自然、准确、适合中国教育场景的中文回答。\n"
+            "要求：\n"
+            "1. 只能依据资料内容回答，不要编造资料外事实。\n"
+            "2. 先给简明结论，再用 2-4 个要点解释。\n"
+            "3. 中文必须通顺，不要输出乱码、重复字词、异常引号或无意义标题。\n"
+            "4. 如果资料不足，请明确说明资料不足。\n"
+            f"5. {role_guidance}\n\n"
+            f"学生问题：{question}\n\n"
+            "课程资料：\n"
+            + "\n".join(evidence_lines)
+            + "\n\n原始回答存在可读性问题，仅用于判断不要照抄：\n"
+            + str(answer)[:1200]
+        )
+        try:
+            repaired = await self._call_llm_api(
+                prompt=prompt,
+                system_prompt="你是面向中国高校课程的 AI 助教，请输出清晰、严谨、自然的简体中文。",
+                history_messages=[],
+                model=generation_model,
+                base_url=generation_base,
+                api_key=generation_api_key,
+                wire_api=settings.LLM_WIRE_API,
+            )
+        except Exception as exc:
+            logger.warning("raganything_answer_repair_failed", error=str(exc))
+            return ""
+
+        repaired = self._sanitize_answer_text(repaired)
+        if not repaired or self._answer_needs_repair(repaired):
+            return ""
+        logger.info("raganything_answer_repaired", source_count=len(sources))
+        return repaired
 
     async def _ensure_rag_query_ready(self, rag: object) -> None:
         ensure_method = getattr(rag, "_ensure_lightrag_initialized", None)
@@ -1698,6 +2430,7 @@ class RAGAnythingAdapter:
                 or source.get("description")
                 or ""
             )
+            evidence_text = self._clean_lightrag_chunk_text(evidence_text)
             if not evidence_text:
                 continue
             candidates.append({
@@ -1839,11 +2572,7 @@ class RAGAnythingAdapter:
 
         lightrag_module = importlib.import_module("lightrag")
         QueryParam = getattr(lightrag_module, "QueryParam")
-        attempted_modes = [query_mode]
-        attempted_modes.extend(
-            mode for mode in ("hybrid", "naive", "local")
-            if mode not in attempted_modes
-        )
+        attempted_modes = self._lightrag_reference_query_modes(query_mode)
 
         last_raw: dict[str, Any] = {}
         for effective_mode in attempted_modes:
@@ -1853,7 +2582,17 @@ class RAGAnythingAdapter:
                 history=history or [],
                 role=role,
             )
-            raw = await lightrag.aquery_llm(query_text, param=query_param)
+            try:
+                raw = await lightrag.aquery_llm(query_text, param=query_param)
+            except Exception as exc:
+                logger.warning(
+                    "lightrag_query_mode_failed",
+                    class_id=class_id,
+                    requested_mode=query_mode,
+                    effective_mode=effective_mode,
+                    error=str(exc),
+                )
+                continue
             if isinstance(raw, dict):
                 metadata = dict(raw.get("metadata") or {})
                 metadata["adapter_requested_mode"] = query_mode
@@ -1864,6 +2603,16 @@ class RAGAnythingAdapter:
                     return raw, f"lightrag_aquery_llm:{effective_mode}"
 
         return last_raw, f"lightrag_aquery_llm:{attempted_modes[-1]}"
+
+    def _lightrag_reference_query_modes(self, query_mode: str) -> list[str]:
+        requested = (query_mode or "hybrid").strip().lower()
+        stable_primary = "hybrid" if requested == "mix" else requested
+        attempted_modes = [stable_primary]
+        attempted_modes.extend(
+            mode for mode in ("hybrid", "naive", "local")
+            if mode not in attempted_modes
+        )
+        return attempted_modes
 
     def _build_lightrag_query_param(
         self,
@@ -2033,6 +2782,11 @@ class RAGAnythingAdapter:
         # structured sources list still carries the citation metadata.
         text = re.sub(
             r"(?P<path>[A-Za-z]:\\[^\s\]\)\r\n]+)",
+            lambda match: Path(match.group("path")).name,
+            text,
+        )
+        text = re.sub(
+            r"(?P<path>/app/(?:uploads|rag_storage|rag_output|runtime_tmp)/[^\s\]\)\r\n]+)",
             lambda match: Path(match.group("path")).name,
             text,
         )
@@ -2388,7 +3142,7 @@ class RAGAnythingAdapter:
         class_id: str | None = None,
         entity_type: str | None = None,
         min_confidence: float = 0.0,
-        limit: int = 300,
+        limit: int = 1000,
     ) -> dict[str, Any]:
         with SessionLocal() as db:
             classes = db.query(Class).filter(Class.course_id == course_id).all()
@@ -2398,7 +3152,7 @@ class RAGAnythingAdapter:
                 class_ids = [item for item in class_ids if item == requested_class_id]
             normalized_entity_type = str(entity_type or "").strip().lower() or None
             normalized_min_confidence = max(0.0, min(1.0, float(min_confidence or 0.0)))
-            node_limit = max(1, min(int(limit or 300), 2000))
+            node_limit = max(1, min(int(limit or 1000), 2000))
             if not class_ids:
                 return {
                     "course_id": course_id,
@@ -2476,14 +3230,26 @@ class RAGAnythingAdapter:
                     continue
                 source = entity_by_id.get(relation.source_id)
                 target = entity_by_id.get(relation.target_id)
+                source_label = source.name if source else relation.source_id
+                target_label = target.name if target else relation.target_id
+                relation_label = relation.relation_type or "related_to"
+                relation_description = self._relation_description(
+                    source_label=source_label,
+                    target_label=target_label,
+                    relation_type=relation_label,
+                    source_span=relation.source_span or {},
+                    provenance=relation.provenance or {},
+                )
                 edges.append({
                     "id": relation.id,
                     "source": relation.source_id,
                     "target": relation.target_id,
-                    "source_label": source.name if source else relation.source_id,
-                    "target_label": target.name if target else relation.target_id,
-                    "label": relation.relation_type or "related_to",
+                    "source_label": source_label,
+                    "target_label": target_label,
+                    "label": relation_label,
                     "relation_type": relation.relation_type,
+                    "description": relation_description,
+                    "summary": relation_description,
                     "weight": float(relation.weight or 0.0),
                     "confidence": float(relation.confidence or 0.0),
                     "source_span": relation.source_span or {},
@@ -2575,6 +3341,28 @@ class RAGAnythingAdapter:
                     }),
                 },
             }
+
+    @staticmethod
+    def _relation_description(
+        *,
+        source_label: str,
+        target_label: str,
+        relation_type: str,
+        source_span: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> str:
+        evidence = source_span.get("evidence")
+        if evidence:
+            return str(evidence)[:500]
+
+        relation_payload = provenance.get("raganything_relation")
+        if isinstance(relation_payload, dict):
+            for key in ("description", "summary", "evidence"):
+                value = relation_payload.get(key)
+                if value:
+                    return str(value)[:500]
+
+        return f"{source_label} --{relation_type}--> {target_label}"
 
     def _count_labels(self, values: Any) -> dict[str, int]:
         counts: dict[str, int] = {}
