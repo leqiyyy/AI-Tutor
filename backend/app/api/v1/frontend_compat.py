@@ -13,6 +13,7 @@ from app.core.response import ok
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Task
 from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
+from app.models.notification import Notification
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
 from app.services import course_service, kb_service
@@ -108,6 +109,27 @@ def _discussion_count(db: Session, class_id: str) -> int:
     ).count()
 
 
+def _notifications_for_user(db: Session, user_id: str, limit: int = 20) -> list[dict]:
+    rows = (
+        db.query(Notification)
+        .filter(Notification.user_id == user_id)
+        .order_by(Notification.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": item.id,
+            "type": item.type,
+            "title": item.title,
+            "content": item.content,
+            "time": _date(item.created_at),
+            "unread": not bool(item.is_read),
+        }
+        for item in rows
+    ]
+
+
 def _course_summary(db: Session, cls: Class) -> dict:
     course = _get_course(db, cls.course_id)
     teacher = _get_teacher(db, cls.teacher_id)
@@ -177,7 +199,7 @@ def student_dashboard(
         "progressCourses": progress_courses,
         "recommendations": [],
         "activities": [],
-        "notifications": [],
+        "notifications": _notifications_for_user(db, current_user.id),
         "courses": courses,
     })
 
@@ -227,7 +249,7 @@ def teacher_dashboard(
         "hotQuestionTopics": [],
         "todoItems": [],
         "warningItems": [],
-        "notifications": [],
+        "notifications": _notifications_for_user(db, current_user.id),
         "courses": courses,
     })
 

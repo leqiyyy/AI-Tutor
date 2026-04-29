@@ -67,11 +67,13 @@ export function getKnowledgeGraphRootIds(data: KnowledgeGraphData): string[] {
 export function getVisibleKnowledgeGraph(
   data: KnowledgeGraphData,
   expandedNodeIds: string[],
+  options: { undirected?: boolean } = {},
 ): { nodes: KnowledgeGraphNode[]; edges: KnowledgeGraphEdge[] } {
   const normalized = normalizeKnowledgeGraph(data);
   const rootIds = getKnowledgeGraphRootIds(normalized);
   const expanded = new Set(expandedNodeIds);
   const visibleNodeIds = new Set(rootIds);
+  const undirected = options.undirected ?? false;
 
   let hasChanges = true;
   while (hasChanges) {
@@ -86,6 +88,15 @@ export function getVisibleKnowledgeGraph(
         visibleNodeIds.add(edge.target);
         hasChanges = true;
       }
+      if (
+        undirected &&
+        visibleNodeIds.has(edge.target) &&
+        expanded.has(edge.target) &&
+        !visibleNodeIds.has(edge.source)
+      ) {
+        visibleNodeIds.add(edge.source);
+        hasChanges = true;
+      }
     });
   }
 
@@ -95,7 +106,24 @@ export function getVisibleKnowledgeGraph(
       (edge) =>
         visibleNodeIds.has(edge.source) &&
         visibleNodeIds.has(edge.target) &&
-        expanded.has(edge.source),
+        (expanded.has(edge.source) || (undirected && expanded.has(edge.target))),
     ),
   };
+}
+
+export function getKnowledgeGraphNeighborIds(
+  edges: KnowledgeGraphEdge[],
+  nodeId: string,
+  options: { undirected?: boolean } = {},
+): string[] {
+  const neighborIds = new Set<string>();
+  edges.forEach((edge) => {
+    if (edge.source === nodeId) {
+      neighborIds.add(edge.target);
+    }
+    if (options.undirected && edge.target === nodeId) {
+      neighborIds.add(edge.source);
+    }
+  });
+  return Array.from(neighborIds);
 }

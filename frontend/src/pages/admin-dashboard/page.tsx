@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductSidePanel from '../../components/ProductSidePanel';
+import { useAuth } from '@/hooks/use-auth';
 import { authService } from '@/services/auth';
 import { adminService } from '@/services/admin';
 import { dashboardService } from '@/services/dashboard';
@@ -15,6 +16,7 @@ import type {
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('overview');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [dashboardData, setDashboardData] = useState<AdminDashboardData | null>(null);
@@ -240,6 +242,9 @@ export default function AdminDashboard() {
   const adminActivities = dashboardData?.activities ?? [];
   const adminTodoReminders = dashboardData?.todoReminders ?? [];
   const adminSystemStatus = dashboardData?.systemStatus ?? [];
+  const displayName = dashboardData?.greetingName || user?.displayName || user?.name || '管理员';
+  const accountLabel = user?.email || user?.account || '';
+  const avatarInitial = displayName.trim().charAt(0) || '管';
 
   return (
     <div className="soft-dash soft-dash-admin min-h-screen bg-gray-50">
@@ -272,15 +277,15 @@ export default function AdminDashboard() {
                   onClick={() => setShowUserMenu(v => !v)}
                   className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
                 >
-                  <div className="w-8 h-8 rounded-full bg-teal-600 flex items-center justify-center text-white text-sm font-medium">管</div>
-                  <span className="text-sm text-gray-700 font-medium">超级管理员</span>
+                  <div className="w-8 h-8 rounded-full bg-teal-600 flex items-center justify-center text-white text-sm font-medium">{avatarInitial}</div>
+                  <span className="text-sm text-gray-700 font-medium">{displayName}</span>
                   <i className={`ri-arrow-down-s-line text-gray-400 text-base transition-transform ${showUserMenu ? 'rotate-180' : ''}`}></i>
                 </button>
                 {showUserMenu && (
                   <div className="absolute right-0 bottom-full mb-1.5 w-44 origin-bottom-right bg-white border border-gray-200 rounded-xl overflow-hidden z-50">
                     <div className="px-4 py-3 border-b border-gray-100">
-                      <div className="text-sm font-semibold text-gray-900">超级管理员</div>
-                      <div className="text-xs text-gray-500 mt-0.5">admin@university.edu.cn</div>
+                      <div className="text-sm font-semibold text-gray-900">{displayName}</div>
+                      {accountLabel && <div className="text-xs text-gray-500 mt-0.5">{accountLabel}</div>}
                     </div>
                     <div className="py-1">
                       <button

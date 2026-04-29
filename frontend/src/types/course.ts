@@ -33,6 +33,9 @@ export interface KnowledgeGraphNode {
   color: string;
   type?: string;
   description?: string;
+  confidence?: number | null;
+  sourceSpan?: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
   hidden?: boolean;
   expandable?: boolean;
 }
@@ -45,6 +48,10 @@ export interface KnowledgeGraphEdge {
   label?: string;
   color?: string;
   dashed?: boolean;
+  confidence?: number | null;
+  sourceSpan?: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
+  weight?: number;
 }
 
 export interface KnowledgeGraphMeta {
@@ -81,7 +88,7 @@ export type TeacherCourseFileCategory =
   | "exercise";
 
 export interface TeacherCourseFile {
-  id: number;
+  id: string | number;
   name: string;
   type: TeacherCourseFileType;
   size: string;
@@ -101,7 +108,7 @@ export interface TeacherCourseMaterialAnalysisPoint {
 }
 
 export interface TeacherCourseMaterialAnalysisDetail {
-  fileId: number;
+  fileId: string | number;
   summary: string;
   keyPoints: string[];
   difficulties: TeacherCourseMaterialAnalysisPoint[];
@@ -110,7 +117,7 @@ export interface TeacherCourseMaterialAnalysisDetail {
 }
 
 export interface TeacherCourseMaterialPreviewData {
-  fileId: number;
+  fileId: string | number;
   previewType: "document" | "slide" | "video" | "unavailable";
   previewUrl: string;
   note: string;
@@ -119,7 +126,7 @@ export interface TeacherCourseMaterialPreviewData {
 }
 
 export interface TeacherCourseMaterialDownloadData {
-  fileId: number;
+  fileId: string | number;
   fileName: string;
   downloadUrl: string;
 }

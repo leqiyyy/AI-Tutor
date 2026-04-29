@@ -1,0 +1,54 @@
+{
+  "questions": [
+    {
+      "id": "fact_001",
+      "type": "事实查询",
+      "text": "TCP 慢启动的主要作用是什么？",
+      "expected_source_names": [
+        "network_notes.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    },
+    {
+      "id": "concept_001",
+      "type": "概念解释",
+      "text": "请解释 CIDR 中 /24 的含义，并说明它为什么影响子网划分。",
+      "expected_source_names": [
+        "subnetting_handbook.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    },
+    {
+      "id": "compare_001",
+      "type": "对比分析",
+      "text": "Go-Back-N 和 Selective Repeat 的主要区别是什么？",
+      "expected_source_names": [
+        "network_notes.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    },
+    {
+      "id": "table_001",
+      "type": "表格理解",
+      "text": "根据实验结果表，哪种算法的准确率最高？",
+      "expected_source_names": [
+        "experiment_results.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    },
+    {
+      "id": "multimodal_001",
+      "type": "多模态资料",
+      "text": "课件截图中的流程图显示，数据预处理之后的步骤是什么？",
+      "expected_source_names": [
+        "data_pipeline_slides.pdf"
+      ],
+      "expected_chunk_ids": [],
+      "expected_doc_ids": []
+    }
+  ]
+}

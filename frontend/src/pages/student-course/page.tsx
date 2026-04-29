@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
+import KnowledgeGraphViewer from '@/components/KnowledgeGraphViewer';
 import AIAssistant from './components/AIAssistant';
 import MyLearning from './components/MyLearning';
 import {
   getKnowledgeGraphRootIds,
-  getVisibleKnowledgeGraph,
   normalizeKnowledgeGraph,
 } from '@/lib/knowledge-graph';
 import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
@@ -125,12 +125,9 @@ export default function StudentCourse() {
   const [searchQuery, setSearchQuery] = useState('');
   const [videoSpeed, setVideoSpeed] = useState('1.0');
   const [courseMaterials, setCourseMaterials] = useState<StudentCourseMaterial[]>([]);
-  const [expandedGraphNodes, setExpandedGraphNodes] = useState<string[]>(['root']);
   const [graphNodes, setGraphNodes] = useState<KnowledgeGraphNode[]>([]);
   const [graphEdges, setGraphEdges] = useState<KnowledgeGraphEdge[]>([]);
   const [graphRootIds, setGraphRootIds] = useState<string[]>(['root']);
-  const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
-  const graphContainerRef = useRef<HTMLDivElement>(null);
 
   // 新增：任务中心相关状态
   const [taskFilter, setTaskFilter] = useState('all');
@@ -344,41 +341,6 @@ export default function StudentCourse() {
     alert(`搜索结果：找到 ${Math.floor(Math.random() * 20) + 1} 条相关内容`);
   };
 
-  // 新增：切换知识图谱节点
-  const toggleGraphNode = (nodeId: string) => {
-    setExpandedGraphNodes(prev => 
-      prev.includes(nodeId) 
-        ? prev.filter(id => id !== nodeId)
-        : [...prev, nodeId]
-    );
-  };
-
-  // 新增：重置知识图谱
-  const resetGraph = () => {
-    setExpandedGraphNodes(graphRootIds);
-    setIsGraphFullscreen(false);
-  };
-
-  // 新增：切换知识图谱全屏
-  const toggleGraphFullscreen = () => {
-    if (!isGraphFullscreen) {
-      graphContainerRef.current?.requestFullscreen();
-      setIsGraphFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsGraphFullscreen(false);
-    }
-  };
-
-  // 监听全屏变化
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsGraphFullscreen(!!document.fullscreenElement);
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, []);
-
   useEffect(() => {
     let mounted = true;
 
@@ -391,14 +353,12 @@ export default function StudentCourse() {
         setGraphNodes(normalized.nodes);
         setGraphEdges(normalized.edges);
         setGraphRootIds(rootIds);
-        setExpandedGraphNodes(rootIds);
       })
       .catch(() => {
         if (!mounted) return;
         setGraphNodes([]);
         setGraphEdges([]);
         setGraphRootIds([]);
-        setExpandedGraphNodes([]);
       });
 
     return () => {
@@ -477,29 +437,6 @@ export default function StudentCourse() {
       mounted = false;
     };
   }, [courseId]);
-
-  // 获取可见的知识图谱节点
-  const getVisibleGraphNodes = () => {
-    return getVisibleKnowledgeGraph(
-      {
-        nodes: graphNodes,
-        edges: graphEdges,
-        meta: { rootNodeId: graphRootIds[0] ?? null },
-      },
-      expandedGraphNodes,
-    ).nodes;
-  };
-
-  const getVisibleGraphEdges = () => {
-    return getVisibleKnowledgeGraph(
-      {
-        nodes: graphNodes,
-        edges: graphEdges,
-        meta: { rootNodeId: graphRootIds[0] ?? null },
-      },
-      expandedGraphNodes,
-    ).edges;
-  };
 
   // 新增：获取过滤后的任务列表
   const getFilteredHomeworks = () => {
@@ -2315,139 +2252,15 @@ export default function StudentCourse() {
         {/* 知识图谱弹窗 */}
         {showKnowledgeGraphModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
-              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">知识图谱可视化</h2>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={resetGraph}
-                    className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 rounded-md hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                  >
-                    <i className="ri-refresh-line mr-1"></i>重置
-                  </button>
-                  <button 
-                    onClick={toggleGraphFullscreen}
-                    className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 rounded-md hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                  >
-                    <i className={`${isGraphFullscreen ? 'ri-fullscreen-exit-line' : 'ri-fullscreen-line'} mr-1`}></i>
-                    {isGraphFullscreen ? '退出全屏' : '全屏'}
-                  </button>
-                  <button
-                    onClick={() => setShowKnowledgeGraphModal(false)}
-                    className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
-                  >
-                    <i className="ri-close-line text-xl"></i>
-                  </button>
-                </div>
-              </div>
-              
-              <div className="flex-1 overflow-hidden p-6" ref={graphContainerRef}>
-                <div className={`${isGraphFullscreen ? 'h-screen' : 'h-[600px]'} bg-gray-50 rounded-lg overflow-hidden relative`}>
-                  <svg className="w-full h-full" viewBox="0 0 1000 300">
-                    {/* 绘制连线 */}
-                    {getVisibleGraphEdges().map(edge => {
-                      const sourceNode = graphNodes.find(n => n.id === edge.source);
-                      const targetNode = graphNodes.find(n => n.id === edge.target);
-                      if (!sourceNode || !targetNode) return null;
-
-                      return (
-                        <line
-                          key={edge.id}
-                          x1={sourceNode.x}
-                          y1={sourceNode.y}
-                          x2={targetNode.x}
-                          y2={targetNode.y}
-                          stroke={edge.color || '#d1d5db'}
-                          strokeWidth="2"
-                          strokeDasharray={edge.dashed ? '5 4' : undefined}
-                        />
-                      );
-                    })}
-                    
-                    {/* 绘制节点 */}
-                    {getVisibleGraphNodes().map(node => {
-                      const hasChildren = graphEdges.some(edge => edge.source === node.id);
-                      const isExpanded = expandedGraphNodes.includes(node.id);
-                      
-                      return (
-                        <g key={node.id}>
-                          <circle
-                            cx={node.x}
-                            cy={node.y}
-                            r="30"
-                            fill={node.color}
-                            className="cursor-pointer transition-all hover:opacity-80"
-                            onClick={() => hasChildren && toggleGraphNode(node.id)}
-                          />
-                          {hasChildren && (
-                            <circle
-                              cx={node.x}
-                              cy={node.y}
-                              r="12"
-                              fill="white"
-                              className="cursor-pointer"
-                              onClick={() => toggleGraphNode(node.id)}
-                            />
-                          )}
-                          {hasChildren && (
-                            <text
-                              x={node.x}
-                              y={node.y + 5}
-                              textAnchor="middle"
-                              className="text-xs font-bold cursor-pointer select-none"
-                              fill={node.color}
-                              onClick={() => toggleGraphNode(node.id)}
-                            >
-                              {isExpanded ? '−' : '+'}
-                            </text>
-                          )}
-                          <text
-                            x={node.x}
-                            y={node.y + 50}
-                            textAnchor="middle"
-                            className="text-xs font-medium fill-gray-700 select-none"
-                          >
-                            {node.label}
-                          </text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                  
-                  {/* 图例 */}
-                  <div className="absolute bottom-4 left-4 bg-white rounded-lg p-3 shadow-md border border-gray-200">
-                    <div className="text-xs font-semibold text-gray-900 mb-2">图例</div>
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-teal-500"></div>
-                        <span className="text-xs text-gray-600">主节点</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-blue-500"></div>
-                        <span className="text-xs text-gray-600">子节点</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-white border-2 border-gray-300 flex items-center justify-center">
-                          <span className="text-xs font-bold text-gray-600">+</span>
-                        </div>
-                        <span className="text-xs text-gray-600">可展开</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 操作提示 */}
-                  <div className="absolute top-4 left-4 bg-white rounded-lg p-3 shadow-md border border-gray-200">
-                    <div className="text-xs text-gray-600">
-                      <div className="flex items-center gap-2 mb-1">
-                        <i className="ri-information-line text-teal-500"></i>
-                        <span className="font-semibold">操作提示</span>
-                      </div>
-                      <div>• 点击带 + 号的节点展开子节点</div>
-                      <div>• 点击带 − 号的节点收起子节点</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+            <div className="w-full max-w-6xl max-h-[90vh] overflow-hidden">
+              <KnowledgeGraphViewer
+                nodes={graphNodes}
+                edges={graphEdges}
+                rootIds={graphRootIds}
+                heightClassName="h-[620px]"
+                showCloseButton
+                onClose={() => setShowKnowledgeGraphModal(false)}
+              />
             </div>
           </div>
         )}

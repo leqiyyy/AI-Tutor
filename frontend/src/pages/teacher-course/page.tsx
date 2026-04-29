@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import KnowledgeGraphViewer from '@/components/KnowledgeGraphViewer';
 import TeacherAIAssistant from './components/TeacherAIAssistant';
 import {
   getKnowledgeGraphRootIds,
-  getVisibleKnowledgeGraph,
   normalizeKnowledgeGraph,
 } from '@/lib/knowledge-graph';
 import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
@@ -105,6 +105,8 @@ interface Message {
   sources?: { name: string; page: number; type: string }[];
 }
 
+type CourseFileId = TeacherCourseFile['id'];
+
 const AI_RESPONSES: Record<string, { content: string; sources?: { name: string; page: number; type: string }[] }> = {
   default: {
     content: '这是一个很好的问题！根据课程知识库中的内容，我来为您详细解答。\n\n计算机网络是现代信息技术的基础，涵盖了从物理层到应用层的多个协议栈层次。如需了解具体某个知识点，欢迎继续提问。',
@@ -192,6 +194,48 @@ function getTaskSubmissionStatusMeta(status: 'submitted' | 'pending' | 'graded')
   };
 }
 
+function isIndexedMaterialStatus(status: string) {
+  const normalized = status.trim().toLowerCase();
+  return ['indexed', 'completed', 'complete', 'success', 'ready', '已解析', '解析完成'].includes(normalized);
+}
+
+function getMaterialStatusMeta(status: string) {
+  const normalized = status.trim().toLowerCase();
+
+  if (isIndexedMaterialStatus(status)) {
+    return {
+      label: '已解析',
+      className: 'bg-green-50 text-green-600',
+    };
+  }
+
+  if (['failed', 'error', '解析失败'].includes(normalized)) {
+    return {
+      label: '解析失败',
+      className: 'bg-red-50 text-red-600',
+    };
+  }
+
+  if (['partial', 'degraded', '部分完成'].includes(normalized)) {
+    return {
+      label: '部分完成',
+      className: 'bg-orange-50 text-orange-600',
+    };
+  }
+
+  if (['pending', 'queued', 'processing', 'running', '待解析', '解析中'].includes(normalized)) {
+    return {
+      label: '解析中',
+      className: 'bg-yellow-50 text-yellow-600',
+    };
+  }
+
+  return {
+    label: status || '待解析',
+    className: 'bg-gray-100 text-gray-600',
+  };
+}
+
 function buildMaterialAnalysisFallback(
   file: TeacherCourseFile,
 ): TeacherCourseMaterialAnalysisDetail {
@@ -238,26 +282,31 @@ function buildAiAnswerFallback(question: TeacherCourseQuestion): AiTeacherQuesti
 
 export default function TeacherCourse() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const [activeSection, setActiveSection] = useState('home');
   const { bootstrap, course, courseError } = useCourseBootstrap(id, 'teacher');
   const courseId = course?.id ?? id ?? '1';
+
+  useEffect(() => {
+    const section = searchParams.get('section');
+    if (section && ['home', 'knowledge', 'tasks', 'interaction', 'students', 'ai'].includes(section)) {
+      setActiveSection(section);
+    }
+  }, [searchParams]);
   const [teacherHome, setTeacherHome] = useState<TeacherCourseHomeData>(EMPTY_TEACHER_HOME);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [expandedNodes, setExpandedNodes] = useState<string[]>(['root']);
   const [graphNodes, setGraphNodes] = useState<KnowledgeGraphNode[]>([]);
   const [graphEdges, setGraphEdges] = useState<KnowledgeGraphEdge[]>([]);
   const [graphRootIds, setGraphRootIds] = useState<string[]>(['root']);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const graphContainerRef = useRef<HTMLDivElement>(null);
 
   // 新增：课程资料相关状态
-  const [expandedFiles, setExpandedFiles] = useState<number[]>([]);
-  const [showFileMenu, setShowFileMenu] = useState<number | null>(null);
+  const [expandedFiles, setExpandedFiles] = useState<CourseFileId[]>([]);
+  const [showFileMenu, setShowFileMenu] = useState<CourseFileId | null>(null);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [showAIAnalysisModal, setShowAIAnalysisModal] = useState(false);
   const [showRenameModal, setShowRenameModal] = useState(false);
@@ -273,7 +322,7 @@ export default function TeacherCourse() {
   const [fileFilter, setFileFilter] = useState('all');
   const [fileSortBy, setFileSortBy] = useState('date');
   const [courseFiles, setCourseFiles] = useState<TeacherCourseFile[]>([]);
-  const [downloadingFileId, setDownloadingFileId] = useState<number | null>(null);
+  const [downloadingFileId, setDownloadingFileId] = useState<CourseFileId | null>(null);
 
   // 新增：任务发布相关状态
   const [showNoticeModal, setShowNoticeModal] = useState(false);
@@ -366,6 +415,21 @@ export default function TeacherCourse() {
     return { icon: 'ri-file-line', color: 'text-gray-600', bg: 'bg-gray-50' };
   };
 
+  const refreshKnowledgeData = async () => {
+    const [materials, graph] = await Promise.all([
+      courseService.getTeacherCourseMaterials(courseId),
+      courseService.getKnowledgeGraph(courseId, 'teacher'),
+    ]);
+
+    const normalized = normalizeKnowledgeGraph(graph);
+    const rootIds = getKnowledgeGraphRootIds(normalized);
+
+    setCourseFiles(materials.files);
+    setGraphNodes(normalized.nodes);
+    setGraphEdges(normalized.edges);
+    setGraphRootIds(rootIds);
+  };
+
   const handleUpload = async () => {
     if (uploadFiles.length === 0) return;
     setIsUploading(true);
@@ -382,6 +446,7 @@ export default function TeacherCourse() {
     }
     
     await courseService.uploadTeacherCourseFiles(courseId, uploadFiles);
+    await refreshKnowledgeData();
     await new Promise(resolve => setTimeout(resolve, 500));
     setIsUploading(false);
     setUploadFiles([]);
@@ -389,37 +454,6 @@ export default function TeacherCourse() {
     setShowUploadModal(false);
     alert('资料上传成功！');
   };
-
-  const toggleNode = (nodeId: string) => {
-    setExpandedNodes(prev => 
-      prev.includes(nodeId) 
-        ? prev.filter(id => id !== nodeId)
-        : [...prev, nodeId]
-    );
-  };
-
-  const resetGraph = () => {
-    setExpandedNodes(graphRootIds);
-    setIsFullscreen(false);
-  };
-
-  const toggleFullscreen = () => {
-    if (!isFullscreen) {
-      graphContainerRef.current?.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
-    }
-  };
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -433,14 +467,12 @@ export default function TeacherCourse() {
         setGraphNodes(normalized.nodes);
         setGraphEdges(normalized.edges);
         setGraphRootIds(rootIds);
-        setExpandedNodes(rootIds);
       })
       .catch(() => {
         if (!mounted) return;
         setGraphNodes([]);
         setGraphEdges([]);
         setGraphRootIds([]);
-        setExpandedNodes([]);
       });
 
     return () => {
@@ -511,27 +543,8 @@ export default function TeacherCourse() {
     };
   }, [courseId]);
 
-  const getVisibleNodes = () => {
-    return getVisibleKnowledgeGraph(
-      {
-        nodes: graphNodes,
-        edges: graphEdges,
-        meta: { rootNodeId: graphRootIds[0] ?? null },
-      },
-      expandedNodes,
-    ).nodes;
-  };
-
-  const getVisibleEdges = () => {
-    return getVisibleKnowledgeGraph(
-      {
-        nodes: graphNodes,
-        edges: graphEdges,
-        meta: { rootNodeId: graphRootIds[0] ?? null },
-      },
-      expandedNodes,
-    ).edges;
-  };
+  const indexedFileCount = courseFiles.filter((file) => isIndexedMaterialStatus(file.status)).length;
+  const knowledgeHealth = courseFiles.length === 0 ? 0 : Math.round((indexedFileCount / courseFiles.length) * 100);
 
   // 新增：处理附件上传
   const handleAttachmentUpload = (e: React.ChangeEvent<HTMLInputElement>, formType: 'notice' | 'homework' | 'exam') => {
@@ -941,7 +954,7 @@ export default function TeacherCourse() {
   };
 
   // 新增：切换文件展开状态
-  const toggleFileExpand = (fileId: number) => {
+  const toggleFileExpand = (fileId: CourseFileId) => {
     setExpandedFiles(prev => 
       prev.includes(fileId) 
         ? prev.filter(id => id !== fileId)
@@ -950,7 +963,7 @@ export default function TeacherCourse() {
   };
 
   // 新增：打开文件菜单
-  const openFileMenu = (e: React.MouseEvent, fileId: number) => {
+  const openFileMenu = (e: React.MouseEvent, fileId: CourseFileId) => {
     e.stopPropagation();
     setShowFileMenu(showFileMenu === fileId ? null : fileId);
   };
@@ -1023,7 +1036,7 @@ export default function TeacherCourse() {
   };
 
   // 新增：删除文件
-  const handleDeleteFile = async (fileId: number) => {
+  const handleDeleteFile = async (fileId: CourseFileId) => {
     if (confirm('确定要删除这个文件吗？')) {
       await courseService.deleteTeacherCourseFile(courseId, fileId);
       setCourseFiles(prev => prev.filter(f => f.id !== fileId));
@@ -1510,7 +1523,7 @@ export default function TeacherCourse() {
                     <span className="text-sm text-gray-600">知识图谱节点</span>
                     <i className="ri-node-tree text-green-600 text-lg"></i>
                   </div>
-                  <div className="text-2xl font-bold text-gray-900">328</div>
+                  <div className="text-2xl font-bold text-gray-900">{graphNodes.length}</div>
                 </div>
                 <div className="bg-white rounded-lg p-4 border border-gray-200">
                   <div className="flex items-center justify-between mb-2">
@@ -1519,9 +1532,9 @@ export default function TeacherCourse() {
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                      <div className="h-full bg-teal-500 rounded-full" style={{ width: '87%' }}></div>
+                      <div className="h-full bg-teal-500 rounded-full" style={{ width: `${knowledgeHealth}%` }}></div>
                     </div>
-                    <span className="text-sm font-semibold text-gray-900">87%</span>
+                    <span className="text-sm font-semibold text-gray-900">{knowledgeHealth}%</span>
                   </div>
                 </div>
               </div>
@@ -1576,7 +1589,7 @@ export default function TeacherCourse() {
                             <div className="text-sm font-medium text-gray-900">{file.name}</div>
                             <div className="text-xs text-gray-500 mt-1">{file.size} · {file.date} · {file.downloads}次下载</div>
                           </div>
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${file.status === '已解析' ? 'bg-green-50 text-green-600' : 'bg-yellow-50 text-yellow-600'}`}>{file.status}</span>
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${getMaterialStatusMeta(file.status).className}`}>{getMaterialStatusMeta(file.status).label}</span>
                           <button 
                             onClick={(e) => openFileMenu(e, file.id)}
                             className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer relative"
@@ -1668,7 +1681,7 @@ export default function TeacherCourse() {
                             </div>
                             <div>
                               <div className="text-xs text-gray-500 mb-1">解析状态</div>
-                              <div className="text-sm text-gray-900">{file.status}</div>
+                              <div className="text-sm text-gray-900">{getMaterialStatusMeta(file.status).label}</div>
                             </div>
                             <div>
                               <div className="text-xs text-gray-500 mb-1">知识点数量</div>
@@ -1707,119 +1720,12 @@ export default function TeacherCourse() {
                   ))}
                 </div>
               </div>
-              <div className="bg-white rounded-lg p-5 border border-gray-200" ref={graphContainerRef}>
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-base font-semibold text-gray-900">知识图谱可视化</h2>
-                  <div className="flex items-center gap-2">
-                    <button 
-                      onClick={resetGraph}
-                      className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 rounded-md hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                    >
-                      <i className="ri-refresh-line mr-1"></i>重置
-                    </button>
-                    <button 
-                      onClick={toggleFullscreen}
-                      className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 rounded-md hover:bg-gray-100 cursor-pointer whitespace-nowrap"
-                    >
-                      <i className={`${isFullscreen ? 'ri-fullscreen-exit-line' : 'ri-fullscreen-line'} mr-1`}></i>
-                      {isFullscreen ? '退出全屏' : '全屏'}
-                    </button>
-                  </div>
-                </div>
-                <div className={`${isFullscreen ? 'h-screen' : 'h-96'} bg-gray-50 rounded-lg overflow-hidden relative`}>
-                  <svg className="w-full h-full" viewBox="0 0 1000 300">
-                    {/* 绘制连线 */}
-                    {getVisibleEdges().map(edge => {
-                      const sourceNode = graphNodes.find(n => n.id === edge.source);
-                      const targetNode = graphNodes.find(n => n.id === edge.target);
-                      if (!sourceNode || !targetNode) return null;
-
-                      return (
-                        <line
-                          key={edge.id}
-                          x1={sourceNode.x}
-                          y1={sourceNode.y}
-                          x2={targetNode.x}
-                          y2={targetNode.y}
-                          stroke={edge.color || '#d1d5db'}
-                          strokeWidth="2"
-                          strokeDasharray={edge.dashed ? '5 4' : undefined}
-                        />
-                      );
-                    })}
-                    
-                    {/* 绘制节点 */}
-                    {getVisibleNodes().map(node => {
-                      const hasChildren = graphEdges.some(edge => edge.source === node.id);
-                      const isExpanded = expandedNodes.includes(node.id);
-                      
-                      return (
-                        <g key={node.id}>
-                          <circle
-                            cx={node.x}
-                            cy={node.y}
-                            r="30"
-                            fill={node.color}
-                            className="cursor-pointer transition-all hover:opacity-80"
-                            onClick={() => hasChildren && toggleNode(node.id)}
-                          />
-                          {hasChildren && (
-                            <circle
-                              cx={node.x}
-                              cy={node.y}
-                              r="12"
-                              fill="white"
-                              className="cursor-pointer"
-                              onClick={() => toggleNode(node.id)}
-                            />
-                          )}
-                          {hasChildren && (
-                            <text
-                              x={node.x}
-                              y={node.y + 5}
-                              textAnchor="middle"
-                              className="text-xs font-bold cursor-pointer select-none"
-                              fill={node.color}
-                              onClick={() => toggleNode(node.id)}
-                            >
-                              {isExpanded ? '−' : '+'}
-                            </text>
-                          )}
-                          <text
-                            x={node.x}
-                            y={node.y + 50}
-                            textAnchor="middle"
-                            className="text-xs font-medium fill-gray-700 select-none"
-                          >
-                            {node.label}
-                          </text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                  
-                  {/* 图例 */}
-                  <div className="absolute bottom-4 left-4 bg-white rounded-lg p-3 shadow-md border border-gray-200">
-                    <div className="text-xs font-semibold text-gray-900 mb-2">图例</div>
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-teal-500"></div>
-                        <span className="text-xs text-gray-600">主节点</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-blue-500"></div>
-                        <span className="text-xs text-gray-600">子节点</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-white border-2 border-gray-300 flex items-center justify-center">
-                          <span className="text-xs font-bold text-gray-600">+</span>
-                        </div>
-                        <span className="text-xs text-gray-600">可展开</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <KnowledgeGraphViewer
+                nodes={graphNodes}
+                edges={graphEdges}
+                rootIds={graphRootIds}
+                heightClassName="h-[520px]"
+              />
             </div>
           )}
 

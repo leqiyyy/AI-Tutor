@@ -7,51 +7,12 @@ import type {
   AiFeedbackItem,
   AiKnowledgeBase,
   AiMessage as Message,
+  AiMessageSource,
   AiResourceRecommendation as ResourceRecommendation,
   AiResponseStyle,
 } from '@/types/ai';
 
 export type FeedbackItem = AiFeedbackItem;
-
-const AI_RESPONSES: Record<string, { content: string; sources?: { name: string; page: number; type: string }[] }> = {
-  default: {
-    content: '这是一个很好的问题！根据课程知识库中的内容，我来为您详细解答。\n\n计算机网络是现代信息技术的基础，涵盖了从物理层到应用层的多个协议栈层次。如需了解具体某个知识点，欢迎继续提问。',
-    sources: [{ name: '第1章-计算机网络概述.pdf', page: 3, type: 'pdf' }],
-  },
-  file: {
-    content: '已收到您上传的文件，我正在解析内容...\n\n根据文件内容，我为您提取了以下关键信息：\n\n**主要知识点**\n• 文件内容已成功解析并关联到课程知识库\n• 我可以基于此文件内容回答您的问题\n• 如需深入分析某部分，请告诉我\n\n有什么想了解的内容吗？',
-    sources: [{ name: '上传文件', page: 1, type: 'pdf' }],
-  },
-  tcp: {
-    content: 'TCP三次握手过程如下：\n\n**第一次握手**：客户端发送SYN报文（SYN=1, seq=x），进入SYN_SENT状态。\n\n**第二次握手**：服务器收到后回复SYN+ACK报文（SYN=1, ACK=1, seq=y, ack=x+1），进入SYN_RCVD状态。\n\n**第三次握手**：客户端发送ACK报文（ACK=1, seq=x+1, ack=y+1），双方进入ESTABLISHED状态。\n\n第三次握手**可以携带数据**，但前两次不能携带数据。',
-    sources: [
-      { name: '第4章-传输层.pdf', page: 12, type: 'pdf' },
-      { name: 'TCP协议详解视频.mp4', page: 0, type: 'video' },
-    ],
-  },
-  http: {
-    content: 'HTTP与HTTPS的主要区别：\n\n1. **安全性**：HTTP是明文传输，HTTPS通过TLS/SSL加密传输，防止数据被窃听和篡改。\n\n2. **端口**：HTTP默认使用80端口，HTTPS默认使用443端口。\n\n3. **证书**：HTTPS需要CA颁发的数字证书，用于身份验证。\n\n4. **性能**：HTTPS因加密解密有轻微性能开销，但现代硬件影响极小。',
-    sources: [{ name: '第5章-应用层.pdf', page: 8, type: 'pdf' }],
-  },
-  subnet: {
-    content: '子网掩码255.255.255.0的CIDR表示为 **/24**。\n\n原因：255.255.255.0转换为二进制是24个连续的1，即：\n`11111111.11111111.11111111.00000000`\n\n因此CIDR前缀长度为24，写作 `/24`。',
-    sources: [{ name: '第3章-网络层.pdf', page: 15, type: 'pdf' }],
-  },
-  congestion: {
-    content: 'TCP拥塞控制包含四个核心算法：\n\n**1. 慢启动（Slow Start）**：初始拥塞窗口cwnd=1，每收到一个ACK，cwnd翻倍增长，呈指数增长。\n\n**2. 拥塞避免（Congestion Avoidance）**：当cwnd达到慢启动阈值ssthresh后，改为线性增长，每个RTT增加1个MSS。\n\n**3. 快速重传（Fast Retransmit）**：收到3个重复ACK时，立即重传丢失的报文段。\n\n**4. 快速恢复（Fast Recovery）**：快速重传后，ssthresh设为cwnd/2，cwnd设为ssthresh。',
-    sources: [{ name: '第4章-传输层.pdf', page: 18, type: 'pdf' }],
-  },
-};
-
-function getAIResponse(input: string, hasFiles: boolean) {
-  if (hasFiles) return AI_RESPONSES.file;
-  const lower = input.toLowerCase();
-  if (lower.includes('tcp') && (lower.includes('握手') || lower.includes('三次'))) return AI_RESPONSES.tcp;
-  if (lower.includes('http') || lower.includes('https')) return AI_RESPONSES.http;
-  if (lower.includes('子网') || lower.includes('255') || lower.includes('cidr')) return AI_RESPONSES.subnet;
-  if (lower.includes('拥塞') || lower.includes('慢启动') || lower.includes('快速重传')) return AI_RESPONSES.congestion;
-  return AI_RESPONSES.default;
-}
 
 function getFileType(file: File): AttachedFile['fileType'] {
   const name = file.name.toLowerCase();
@@ -130,6 +91,30 @@ const DISLIKE_REASONS = ['回答不准确', '答非所问', '解释太复杂', '
 type RightTab = 'quick' | 'recommend' | 'source';
 type RightPanelMode = 'closed' | 'standard' | 'wide';
 
+function getSourceIconClass(type: string) {
+  if (type === 'pdf') return 'ri-file-pdf-line text-red-500';
+  if (type === 'video') return 'ri-video-line text-violet-500';
+  if (type === 'ppt' || type === 'pptx') return 'ri-file-ppt-line text-orange-500';
+  if (type === 'image') return 'ri-image-line text-green-600';
+  return 'ri-file-text-line text-teal-600';
+}
+
+function getSourceScore(source: AiMessageSource) {
+  return source.score ?? source.rerankScore ?? source.relevanceScore ?? source.confidence ?? null;
+}
+
+function formatSourceScore(source: AiMessageSource) {
+  const value = getSourceScore(source);
+  if (value === null || Number.isNaN(value)) return null;
+  const percent = value > 1 ? value : value * 100;
+  return `${Math.round(percent)}%`;
+}
+
+function getSourceSnippet(source: AiMessageSource) {
+  const text = (source.snippet || source.rawText || '').replace(/\s+/g, ' ').trim();
+  return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+}
+
 export default function AIAssistant() {
   const { id: classId } = useParams<{ id: string }>();
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -142,7 +127,7 @@ export default function AIAssistant() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [knowledgeBase, setKnowledgeBase] = useState<AiKnowledgeBase>('course');
   const [style, setStyle] = useState<AiResponseStyle>('academic');
-  const [currentSources, setCurrentSources] = useState<{ name: string; page: number; type: string }[]>([]);
+  const [currentSources, setCurrentSources] = useState<AiMessageSource[]>([]);
   const [recommendations, setRecommendations] = useState<ResourceRecommendation[]>([]);
   const [showConvList, setShowConvList] = useState(true);
   const [rightTab, setRightTab] = useState<RightTab>('quick');
@@ -325,14 +310,21 @@ export default function AIAssistant() {
         attachments: userMsg.attachments,
       });
 
-      const finalMessages = conversation.messages.length > 0 ? conversation.messages : [...nextMessages, reply];
+      const finalMessages = [...nextMessages, reply];
       setMessages(finalMessages);
       setActiveConvId(conversation.id);
       setConversations(prev => {
-        const exists = prev.some(item => item.id === conversation.id);
-        return exists
-          ? prev.map(item => item.id === conversation.id ? conversation : item)
-          : [conversation, ...prev];
+        const existing = prev.find(item => item.id === conversation.id);
+        const updatedConversation: Conversation = {
+          ...conversation,
+          title: existing?.title || conversation.title,
+          createdAt: existing?.createdAt || conversation.createdAt,
+          lastMessage: reply.content.slice(0, 40) + (reply.content.length > 40 ? '...' : ''),
+          messages: finalMessages,
+        };
+        return existing
+          ? prev.map(item => item.id === conversation.id ? updatedConversation : item)
+          : [updatedConversation, ...prev];
       });
       if (reply.sources) {
         setCurrentSources(reply.sources);
@@ -342,22 +334,15 @@ export default function AIAssistant() {
         }
       }
       setRecommendations(await aiService.getRecommendations());
-    } catch {
-      const resp = getAIResponse(text, (userMsg.attachments?.length ?? 0) > 0);
+    } catch (error) {
+      console.error('ai_send_message_failed', error);
       const aiMsg: Message = {
         id: Date.now() + 1, role: 'ai',
-        content: resp.content, time: getNow(),
-        sources: resp.sources,
+        content: 'AI助教暂时不可用，请稍后重试。', time: getNow(),
       };
       const finalMessages = [...nextMessages, aiMsg];
       setMessages(finalMessages);
-      if (resp.sources) {
-        setCurrentSources(resp.sources);
-        setRightTab('source');
-        if (rightPanelMode === 'closed') {
-          setRightPanelMode('standard');
-        }
-      }
+      setCurrentSources([]);
       setRecommendations(getRecommendations(finalMessages));
       saveCurrentConversation(finalMessages);
     } finally {
@@ -708,9 +693,10 @@ export default function AIAssistant() {
                     <div className="flex flex-wrap gap-1.5">
                       {msg.sources.map((s, i) => (
                         <span key={i} className="flex items-center gap-1 px-2 py-0.5 bg-teal-50 border border-teal-100 rounded-full text-xs text-teal-700 cursor-pointer hover:bg-teal-100 transition-colors">
-                          <i className={`text-sm ${s.type === 'pdf' ? 'ri-file-pdf-line text-red-500' : s.type === 'video' ? 'ri-video-line text-violet-500' : 'ri-file-ppt-line text-orange-500'}`}></i>
+                          <i className={`text-sm ${getSourceIconClass(s.type)}`}></i>
                           {s.name.length > 14 ? s.name.slice(0, 14) + '…' : s.name}
                           {s.page > 0 && ` · P${s.page}`}
+                          {formatSourceScore(s) && ` · ${formatSourceScore(s)}`}
                         </span>
                       ))}
                     </div>
@@ -1051,11 +1037,20 @@ export default function AIAssistant() {
                     {currentSources.map((s, i) => (
                       <div key={i} className="flex min-w-0 items-start gap-2.5 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50 cursor-pointer">
                         <div className="w-8 h-8 flex items-center justify-center flex-shrink-0">
-                          <i className={`text-xl ${s.type === 'pdf' ? 'ri-file-pdf-line text-red-500' : s.type === 'video' ? 'ri-video-line text-violet-500' : 'ri-file-ppt-line text-orange-500'}`}></i>
+                          <i className={`text-xl ${getSourceIconClass(s.type)}`}></i>
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="break-words text-xs font-medium leading-snug text-gray-800">{s.name}</div>
-                          {s.page > 0 && <div className="text-xs text-teal-600 mt-1">第 {s.page} 页</div>}
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                            {s.page > 0 && <span className="text-teal-600">第 {s.page} 页</span>}
+                            {formatSourceScore(s) && <span className="text-gray-500">相关度 {formatSourceScore(s)}</span>}
+                            {s.chunkId && <span className="max-w-full truncate text-gray-400">Chunk {s.chunkId}</span>}
+                          </div>
+                          {getSourceSnippet(s) && (
+                            <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-gray-600">
+                              {getSourceSnippet(s)}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}

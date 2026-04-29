@@ -1,6 +1,8 @@
 """AI chat orchestration service for the AI tutor system."""
 import base64
 import mimetypes
+import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
@@ -15,9 +17,9 @@ from app.integrations.rag import get_rag_engine
 from app.integrations.parser.simple import SimpleParserProvider
 from app.integrations.preprocessors import preprocess_for_raganything
 from app.integrations.rag.quality import build_evidence_quality, build_review_context
-from app.models.course import Class
+from app.models.course import Class, Material
 from app.models.chat import ChatCitation, ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
-from app.models.knowledge import KBSpace
+from app.models.knowledge import FileParseTask, KBSpace
 from app.models.user import User
 from app.services import admin_service, analytics_service, conversation_context_service, model_routing_service, rag_metrics_service
 
@@ -168,6 +170,17 @@ async def send_message(
     )
     analytics_service.record_question_topics(db, class_id, content)
 
+    routed_answer = _build_routed_answer(db, class_id, content, role=role)
+    if routed_answer:
+        return _persist_direct_ai_answer(
+            db=db,
+            session=session,
+            user_msg=user_msg,
+            answer=routed_answer["answer"],
+            suggestions=routed_answer.get("suggestions") or [],
+            confidence=routed_answer.get("confidence", 1.0),
+        )
+
     history = conversation_context.recent_turns[-10:]
 
     persisted_model_config = admin_service.get_model_config(db)
@@ -282,7 +295,7 @@ async def send_message(
             },
         )
         result = type("R", (), {
-            "answer": "The AI assistant is temporarily unavailable. Please try again later.",
+            "answer": "AI助教暂时不可用，请稍后再试。如果问题比较紧急，可以先联系课程教师。",
             "sources": [],
             "confidence": 0.0,
             "suggestions": [],
@@ -353,6 +366,253 @@ async def send_message(
         "user_message": _msg_to_dict(user_msg),
         "ai_message": _msg_to_dict(ai_msg),
     }
+
+
+def _persist_direct_ai_answer(
+    *,
+    db: Session,
+    session: ChatSession,
+    user_msg: ChatMessage,
+    answer: str,
+    suggestions: list[str] | None = None,
+    confidence: float = 1.0,
+) -> dict:
+    ai_msg = ChatMessage(
+        session_id=session.id,
+        role="ai",
+        content=answer,
+        sources=[],
+        suggestions=suggestions or [],
+        confidence=confidence,
+        needs_review=False,
+    )
+    db.add(ai_msg)
+    session.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(ai_msg)
+    return {
+        "session_id": session.id,
+        "user_message": _msg_to_dict(user_msg),
+        "ai_message": _msg_to_dict(ai_msg),
+    }
+
+
+def _build_routed_answer(db: Session, class_id: str, content: str, role: str = "student") -> dict | None:
+    intent = _classify_direct_intent(content)
+    if intent == "greeting":
+        return {
+            "answer": _build_greeting_answer(role),
+            "suggestions": _default_direct_suggestions(role),
+        }
+    if intent == "identity":
+        return {
+            "answer": "我是珞樱学堂 AI 助教，负责在当前课程中帮助你理解知识点、整理学习思路，并结合课程资料回答问题。",
+            "suggestions": _default_direct_suggestions(role),
+        }
+    if intent == "capability":
+        return {
+            "answer": _build_capability_answer(role),
+            "suggestions": [
+                "帮我解释一个课程概念",
+                "目前知识库里有资料吗",
+                "我可以上传资料让你分析吗",
+            ],
+        }
+    if intent == "kb_status":
+        return {
+            "answer": _build_kb_status_answer(db, class_id),
+            "suggestions": [
+                "老师上传了哪些资料",
+                "哪些资料已经完成知识库构建",
+                "我可以问哪些课程问题",
+            ],
+        }
+    if intent == "off_topic":
+        return {
+            "answer": "这个问题看起来和当前课程学习关系不大。我主要负责课程答疑、资料解释、学习建议和知识点梳理。你可以换成课程相关问题继续问我。",
+            "suggestions": _default_direct_suggestions(role),
+            "confidence": 0.9,
+        }
+    return None
+
+
+def _classify_direct_intent(content: str) -> str | None:
+    normalized = _normalize_intent_text(content)
+    if not normalized:
+        return None
+
+    if normalized in {
+        "你好",
+        "您好",
+        "嗨",
+        "哈喽",
+        "hello",
+        "hi",
+        "hey",
+        "在吗",
+        "在不在",
+        "老师你好",
+        "助教你好",
+        "ai你好",
+        "ai助教你好",
+    }:
+        return "greeting"
+
+    if _contains_any(normalized, ("你叫什么", "你是谁", "你是啥", "你是什么", "你的名字", "怎么称呼你")):
+        return "identity"
+
+    if _contains_any(
+        normalized,
+        (
+            "你能做什么",
+            "你可以做什么",
+            "你可以实现什么功能",
+            "你有什么功能",
+            "你会做什么",
+            "功能介绍",
+            "怎么使用你",
+            "你能帮我什么",
+            "你可以帮我什么",
+        ),
+    ):
+        return "capability"
+
+    if _contains_any(
+        normalized,
+        (
+            "知识库有资料吗",
+            "知识库里有资料吗",
+            "知识库有没有资料",
+            "目前知识库",
+            "当前知识库",
+            "课程资料上传了吗",
+            "老师上传资料了吗",
+            "有哪些资料",
+            "有什么资料",
+            "资料状态",
+            "知识库状态",
+        ),
+    ):
+        return "kb_status"
+
+    if _contains_any(
+        normalized,
+        (
+            "写情书",
+            "讲个笑话",
+            "今天天气",
+            "股票",
+            "彩票",
+            "代写论文",
+            "帮我作弊",
+        ),
+    ):
+        return "off_topic"
+
+    return None
+
+
+def _normalize_intent_text(content: str) -> str:
+    text = str(content or "").strip().lower()
+    text = re.sub(r"[\s，。！？!?、,.；;：:\"'“”‘’（）()\[\]{}<>《》]+", "", text)
+    return text
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _build_greeting_answer(role: str = "student") -> str:
+    if str(role or "").lower() in {"teacher", "admin", "instructor"}:
+        return (
+            "您好，我是珞樱学堂 AI 助教。您可以让我协助整理课程知识点、生成教学材料、"
+            "分析学生问题，或根据课程资料回答教学相关问题。"
+        )
+    return (
+        "你好，我是珞樱学堂 AI 助教。你可以直接问我课程里的概念、例题、作业思路，"
+        "也可以上传资料让我结合内容帮你解释。"
+    )
+
+
+def _build_capability_answer(role: str = "student") -> str:
+    if str(role or "").lower() in {"teacher", "admin", "instructor"}:
+        return (
+            "我可以协助您完成这些教学相关工作：\n"
+            "1. 根据课程资料回答学生或教师提出的问题。\n"
+            "2. 帮助梳理知识点、易错点和课堂讲解思路。\n"
+            "3. 结合上传的文档、图片、课件生成摘要或教学建议。\n"
+            "4. 对低置信度或学生反馈不佳的回答生成待教师审核的问题。\n\n"
+            "如果课程资料还没有完成知识库构建，我会明确提示资料不足。"
+        )
+    return (
+        "我可以帮助你做这些课程学习相关的事情：\n"
+        "1. 解答课程概念、例题和作业思路问题。\n"
+        "2. 根据教师上传的课程资料进行解释和总结。\n"
+        "3. 帮你梳理学习重点、易错点和复习方向。\n"
+        "4. 支持你上传图片或文档，让我结合内容分析。\n\n"
+        "如果当前知识库没有相关资料，我会告诉你资料不足，而不是随便编答案。"
+    )
+
+
+def _build_kb_status_answer(db: Session, class_id: str) -> str:
+    materials = db.query(Material).filter(
+        Material.class_id == class_id,
+        Material.is_active == True,
+    ).order_by(Material.created_at.desc()).all()
+    tasks = db.query(FileParseTask).filter(FileParseTask.class_id == class_id).all()
+    kb_space = db.query(KBSpace).filter(KBSpace.class_id == class_id).order_by(KBSpace.updated_at.desc()).first()
+
+    if not materials:
+        return (
+            "当前课程知识库里还没有可用资料。教师上传课程资料并完成知识库构建后，"
+            "我就可以结合资料回答更具体的课程问题。"
+        )
+
+    material_status = Counter(str(material.kb_status or "unknown") for material in materials)
+    task_status = Counter(str(task.status or "unknown") for task in tasks)
+    indexed = material_status.get("indexed", 0)
+    processing = material_status.get("processing", 0) + material_status.get("pending", 0)
+    failed = material_status.get("failed", 0)
+    recent_names = "、".join(material.file_name for material in materials[:3])
+
+    lines = [
+        f"当前课程已上传 {len(materials)} 份资料，其中 {indexed} 份已完成知识库构建。",
+    ]
+    if processing:
+        lines.append(f"还有 {processing} 份资料正在等待或处理中。")
+    if failed:
+        lines.append(f"有 {failed} 份资料处理失败，需要教师在资料管理中查看原因。")
+    if recent_names:
+        lines.append(f"最近的资料包括：{recent_names}。")
+    if kb_space:
+        lines.append(
+            f"知识库空间状态：{kb_space.status}，文档数 {kb_space.document_count or 0}，"
+            f"分块数 {kb_space.chunk_count or 0}。"
+        )
+    if task_status:
+        completed_tasks = task_status.get("completed", 0)
+        failed_tasks = task_status.get("failed", 0)
+        processing_tasks = task_status.get("processing", 0) + task_status.get("pending", 0)
+        lines.append(
+            f"解析任务状态：完成 {completed_tasks} 个，处理中/等待 {processing_tasks} 个，失败 {failed_tasks} 个。"
+        )
+    if indexed <= 0:
+        lines.append("目前还没有已索引资料，所以课程知识类问题可能无法得到可靠回答。")
+    return "\n".join(lines)
+
+
+def _default_direct_suggestions(role: str = "student") -> list[str]:
+    if str(role or "").lower() in {"teacher", "admin", "instructor"}:
+        return [
+            "目前知识库里有资料吗",
+            "帮我整理本课程的教学重点",
+            "学生可能会在哪些地方困惑",
+        ]
+    return [
+        "目前知识库里有资料吗",
+        "帮我解释一个课程概念",
+        "帮我梳理本章学习重点",
+    ]
 
 
 def submit_feedback(

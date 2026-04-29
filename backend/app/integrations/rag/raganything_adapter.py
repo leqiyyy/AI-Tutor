@@ -2154,9 +2154,8 @@ class RAGAnythingAdapter:
 
         return RAGResult(
             answer=(
-                "RAG-Anything main-chain retrieval is currently unavailable. "
-                "The system is configured to use RAG-Anything as the only formal RAG chain, "
-                "so no local Simple fallback was used."
+                "我暂时没有从当前课程资料中检索到足够依据来回答这个问题。"
+                "你可以换一种问法，或请教师先上传/补充相关课程资料后再提问。"
             ),
             sources=[],
             confidence=0.0,
@@ -2761,6 +2760,12 @@ class RAGAnythingAdapter:
         if not text:
             return ""
 
+        if self._is_no_context_answer(text):
+            return (
+                "我暂时没有从当前课程资料中检索到足够依据来回答这个问题。"
+                "你可以换一种问法，或请教师先上传/补充相关课程资料后再提问。"
+            )
+
         text = text.replace("\x00", "")
         text = re.sub(r"[ \t]{3,}", " ", text)
         text = re.sub(r"\n{4,}", "\n\n", text)
@@ -2795,6 +2800,19 @@ class RAGAnythingAdapter:
         if len(text) > max_chars:
             text = text[:max_chars].rstrip() + "\n\n[答案过长，已截断。]"
         return text.strip()
+
+    def _is_no_context_answer(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip()).lower()
+        if not normalized:
+            return False
+        markers = (
+            "[no-context]",
+            "no context",
+            "not able to provide an answer",
+            "cannot provide an answer",
+            "unable to answer",
+        )
+        return any(marker in normalized for marker in markers)
 
     def _normalize_sources(self, source_candidates: Any) -> list[dict]:
         if not isinstance(source_candidates, list):

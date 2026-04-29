@@ -66,10 +66,29 @@ type BackendMessage = {
   sources?: Array<{
     name?: string;
     file_name?: string;
+    fileName?: string;
     page?: number;
     type?: string;
     source_type?: string;
+    sourceType?: string;
+    score?: number;
+    retrieval_score?: number;
+    retrievalScore?: number;
+    rerank_score?: number;
+    rerankScore?: number;
+    relevance_score?: number;
+    relevanceScore?: number;
+    confidence?: number;
+    chunk_id?: string;
+    chunkId?: string;
+    snippet?: string;
+    raw_text?: string;
+    rawText?: string;
   }>;
+  confidence?: number;
+  quality?: Record<string, unknown>;
+  review_context?: Record<string, unknown>;
+  needs_review?: boolean;
   feedback?: "like" | "dislike";
 };
 
@@ -78,6 +97,10 @@ type BackendQueryResult = {
   message_id?: string;
   content?: string;
   sources?: BackendMessage["sources"];
+  confidence?: number;
+  quality?: Record<string, unknown>;
+  review_context?: Record<string, unknown>;
+  needs_review?: boolean;
 };
 
 type BackendAttachment = {
@@ -106,9 +129,17 @@ function numericConversationId(backendId: string) {
 
 function normalizeSource(source: NonNullable<BackendMessage["sources"]>[number]): AiMessageSource {
   return {
-    name: source.name || source.file_name || "课程资料",
+    name: source.name || source.file_name || source.fileName || "课程资料",
     page: Number(source.page || 0),
-    type: source.type || source.source_type || "document",
+    type: source.type || source.source_type || source.sourceType || "document",
+    score: source.score,
+    retrievalScore: source.retrieval_score ?? source.retrievalScore,
+    rerankScore: source.rerank_score ?? source.rerankScore,
+    relevanceScore: source.relevance_score ?? source.relevanceScore,
+    confidence: source.confidence,
+    chunkId: source.chunk_id ?? source.chunkId,
+    snippet: source.snippet,
+    rawText: source.raw_text ?? source.rawText,
   };
 }
 
@@ -122,6 +153,10 @@ function normalizeMessage(message: BackendMessage): AiMessage {
     time: message.created_at || new Date().toISOString(),
     attachments: message.attachments,
     sources: message.sources?.map(normalizeSource),
+    confidence: message.confidence,
+    quality: message.quality,
+    reviewContext: message.review_context,
+    needsReview: message.needs_review,
     feedback: message.feedback,
   };
 }
@@ -294,6 +329,10 @@ export const aiService = {
       content: result.content || "",
       time: new Date().toISOString(),
       sources: result.sources?.map(normalizeSource),
+      confidence: result.confidence,
+      quality: result.quality,
+      reviewContext: result.review_context,
+      needsReview: result.needs_review,
     };
     if (result.message_id) {
       messageIdMap.set(reply.id, result.message_id);
@@ -371,9 +410,12 @@ export const aiService = {
   },
 
   async getMessageSources(messageId: number): Promise<AiMessageSource[]> {
-    return shouldUseMockApi
-      ? getMockMessageSources()
-      : http<AiMessageSource[]>(`/ai/messages/${messageId}/sources`);
+    if (shouldUseMockApi) {
+      return getMockMessageSources();
+    }
+
+    const sources = await http<BackendMessage["sources"]>(`/ai/messages/${messageId}/sources`);
+    return (sources ?? []).map(normalizeSource);
   },
 
   async updateConversationContext(

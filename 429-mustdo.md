@@ -36,6 +36,9 @@
 - [x] 已同步修复到后端 API 容器与 Celery worker 容器，并重启服务进程加载代码。
 - [x] 后端阻断回归测试通过：`tests/test_kb_index_task_management.py` 11 passed；图谱 API 与 RAG 查询补测 3 passed；多模态预处理测试 2 passed；多模态回归 E2E 1 passed。
 - [x] 前端基线验证通过：`npm run type-check` 与 `npm run build` 均通过。
+- [x] 已完成主页/角色 Dashboard 第一轮 live 联调：前端 `.env.local` 为 live 模式，登录、学生/教师/管理员 dashboard、教师邀请码接口均走真实后端。
+- [x] 已修复 Dashboard 伪联调点：学生/教师/管理员顶部用户信息改为使用当前会话或 dashboard `greetingName`，教师分享邀请码改为调用后端真实接口。
+- [x] 已将本次前端构建产物同步到运行中的 `ai-tutor-frontend-1` nginx 容器，容器内 `/health` 与 `/api/v1/auth/login` 代理验证通过。
 - [ ] 注意：当前课程级 KB 状态为 `degraded`，原因是历史运行中仍有 16 个失败材料、1 个旧材料缺少 storage metadata；本次新链路材料均为 `indexed`，但部署验收前应清理/重建历史脏数据。
 - [x] 已修复 LightRAG 直接引用查询的 `mix` 模式兼容问题：配置仍保留 `RAGANYTHING_QUERY_MODE=mix`，但 direct `aquery_llm` 实际使用稳定的 `hybrid`，避免旧的 keyword 解析异常阻断回答。
 - [ ] 注意：Qdrant client 1.17.1 与 server 1.13.2 有兼容警告；当前可运行，但部署前建议统一版本。
@@ -68,10 +71,10 @@
 ### 2. 注册登录与角色会话闭环
 
 - [x] 联调 `POST /api/v1/auth/login`。
-- [ ] 联调 `GET /api/v1/auth/me`。
-- [ ] 校验后端 `access_token` 和前端 `accessToken` 的归一化。
-- [ ] 校验 `Authorization: Bearer <token>` 全局携带。
-- [ ] 校验学生、教师、管理员三类 demo 账号登录。（已验证学生/教师，管理员待补）
+- [x] 联调 `GET /api/v1/auth/me`。
+- [x] 校验后端 `access_token` 和前端 `accessToken` 的归一化。
+- [x] 校验 `Authorization: Bearer <token>` 全局携带。
+- [x] 校验学生、教师、管理员三类 demo 账号登录。
 - [ ] 校验注册接口，包括学生注册和教师注册。
 - [ ] 校验退出登录，清空本地 token 和用户态。
 - [ ] 校验刷新页面后会话恢复。
@@ -84,9 +87,9 @@
 
 验收标准：
 
-- [ ] 三类角色均可真实登录。
-- [ ] 不同角色进入不同 dashboard。
-- [ ] 界面入口和可点击操作随角色变化。
+- [x] 三类角色均可真实登录。
+- [x] 不同角色进入不同 dashboard。
+- [x] 界面入口和可点击操作随角色变化。（已验证 dashboard 数据与教师邀请码主操作，课程空间逐页待补）
 - [ ] 错误账号、过期 token、无权限访问均有明确 UI 状态。
 
 ### 3. 课程、班级、空间边界统一
@@ -196,16 +199,16 @@
 
 ### 7. 前端 live 模式切换
 
-- [ ] 设置 `VITE_API_MODE=live`。
-- [ ] 设置 `VITE_API_BASE_URL=/api/v1` 或与部署代理保持一致。
+- [x] 设置 `VITE_API_MODE=live`。
+- [x] 设置 `VITE_API_BASE_URL=/api/v1` 或与部署代理保持一致。
 - [ ] 确认所有 service 层不再静默回退 mock。
 - [ ] 网络错误、空数据、权限错误、加载中状态完整。
 
 ### 8. Dashboard 与空间页面联调
 
-- [ ] 学生 dashboard。
-- [ ] 教师 dashboard。
-- [ ] 管理员 dashboard。
+- [x] 学生 dashboard。
+- [x] 教师 dashboard。
+- [x] 管理员 dashboard。
 - [ ] 学生课程空间首页。
 - [ ] 教师课程空间首页。
 - [ ] 资料列表。
@@ -331,3 +334,28 @@
 - [ ] 尚未完成真实多模态链路验证：上传含表格、图片、公式的 PDF -> MinerU/RAG-Anything 解析 -> LightRAG/Qdrant/Neo4j 入库 -> 学生/教师问答 -> 引用溯源 -> 反馈审核回流。
 - [ ] Qdrant Python client 1.17.1 与 server 1.13.2 版本差异较大，需要统一版本以降低检索兼容风险。
 - [ ] 测试结束时 RAGAnything/LightRAG logger 偶发 `I/O operation on closed file`，不影响当前用例通过，但需要作为清理项跟踪。
+
+### 2026-04-29 主页与角色 Dashboard 联调
+
+- [x] 前端 live 配置确认：`frontend/.env.local` 使用 `VITE_API_MODE=live`、`VITE_API_BASE_URL=/api/v1`、`VITE_API_PROXY_TARGET=http://localhost:8000`。
+- [x] 修复学生 Dashboard 用户区硬编码姓名/邮箱，改为优先使用 dashboard `greetingName`，再回退当前会话用户。
+- [x] 修复教师 Dashboard 用户区硬编码姓名/邮箱，改为优先使用 dashboard `greetingName`，并移除问候语中的固定教师姓名。
+- [x] 修复管理员 Dashboard 用户区硬编码信息，改为使用当前会话或 dashboard 返回值。
+- [x] 修复教师课程卡片的邀请码按钮：不再前端随机生成，改为调用 `POST /api/v1/teacher/courses/{class_id}/invite-code`。
+- [x] 后端 dashboard 兼容接口补齐通知数据读取：学生/教师 dashboard 从 `Notification` 表返回真实通知列表。
+- [x] 前端验证：`npm run type-check` 通过，`npm run build` 通过。
+- [x] 容器内 API 验证：学生、教师、管理员 `POST /api/v1/auth/login` 均 200 且返回 token。
+- [x] 容器内 API 验证：学生、教师、管理员 `GET /api/v1/auth/me` 均 200 且角色正确。
+- [x] 容器内 API 验证：`GET /api/v1/student/dashboard` 返回 `greetingName=Li Student`、课程数 4。
+- [x] 容器内 API 验证：`GET /api/v1/teacher/dashboard` 返回 `greetingName=Wang Teacher`、课程数 45。
+- [x] 容器内 API 验证：教师邀请码接口返回真实邀请码 `CS301A1`。
+- [x] 容器内 API 验证：`GET /api/v1/admin/dashboard` 返回 `greetingName=System Admin` 和管理端数据键。
+- [x] 已将 `frontend/out` 同步到运行中的 `ai-tutor-frontend-1:/usr/share/nginx/html/`。
+- [x] 前端容器验证：`/student-dashboard` SPA 路由回退正常，首页 HTML 引用本次构建产物。
+- [x] 前端容器代理验证：`/health` 返回后端 ready，`/api/v1/auth/login` 可通过 nginx 代理成功登录。
+
+残留风险：
+
+- [ ] `/auth/me` 当前只确认角色正确，姓名字段为空；Dashboard 已通过 `greetingName` 展示真实姓名，但会话恢复瞬间的用户菜单仍可能短暂显示角色兜底名。
+- [ ] 本轮只完成主页与三类 Dashboard 的第一轮联调；课程空间、资料分析页、知识图谱页、审核中心仍需逐页做浏览器点击验证。
+- [ ] RAG 流程仍需保留专项验证：真实含表格、图片、公式的 PDF 样例触发 MinerU/RAG-Anything 多模态解析，并检查原始图/表/公式单元、实体关系摘要、检索 evidence 与引用展示。

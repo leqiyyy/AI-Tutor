@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductSidePanel from '../../components/ProductSidePanel';
 import TeacherSettings from './components/TeacherSettings';
+import { useAuth } from '@/hooks/use-auth';
 import { authService } from '@/services/auth';
 import { courseService } from '@/services/course';
 import { dashboardService } from '@/services/dashboard';
@@ -10,6 +11,7 @@ import type { DashboardNotification, TeacherDashboardData } from '@/types/dashbo
 
 export default function TeacherDashboard() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('overview');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [dashboardData, setDashboardData] = useState<TeacherDashboardData | null>(null);
@@ -56,6 +58,7 @@ export default function TeacherDashboard() {
   };
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [inviteCodePendingId, setInviteCodePendingId] = useState<string | null>(null);
   const [createStep, setCreateStep] = useState(1);
   const [newCourse, setNewCourse] = useState({
     name: '',
@@ -112,6 +115,21 @@ export default function TeacherDashboard() {
   const handleCopyInviteCode = () => {
     navigator.clipboard.writeText(inviteCode);
     alert('邀请码已复制到剪贴板');
+  };
+
+  const handleShowInviteCode = async (courseId: string) => {
+    setInviteCodePendingId(courseId);
+    setDashboardError('');
+
+    try {
+      const result = await courseService.generateInviteCode(courseId);
+      setInviteCode(result.inviteCode);
+      setShowInviteModal(true);
+    } catch (error) {
+      setDashboardError(error instanceof Error ? error.message : 'Failed to load invite code');
+    } finally {
+      setInviteCodePendingId(null);
+    }
   };
 
   const handleFinishCreate = () => {
@@ -242,6 +260,9 @@ export default function TeacherDashboard() {
     icon: item.icon || 'ri-checkbox-circle-line',
     action: item.meta || '',
   }));
+  const displayName = dashboardData?.greetingName || user?.displayName || user?.name || '教师';
+  const accountLabel = user?.email || user?.account || '';
+  const avatarInitial = displayName.trim().charAt(0) || '师';
 
   return (
     <div className="soft-dash soft-dash-teacher min-h-screen bg-gray-50">
@@ -275,15 +296,15 @@ export default function TeacherDashboard() {
                   onClick={() => setShowUserMenu(v => !v)}
                   className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
                 >
-                  <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium">王</div>
-                  <span className="text-sm text-gray-700 font-medium">王教授</span>
+                  <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium">{avatarInitial}</div>
+                  <span className="text-sm text-gray-700 font-medium">{displayName}</span>
                   <i className={`ri-arrow-down-s-line text-gray-400 text-base transition-transform ${showUserMenu ? 'rotate-180' : ''}`}></i>
                 </button>
                 {showUserMenu && (
                   <div className="absolute right-0 bottom-full mb-1.5 w-44 origin-bottom-right bg-white border border-gray-200 rounded-xl overflow-hidden z-50">
                     <div className="px-4 py-3 border-b border-gray-100">
-                      <div className="text-sm font-semibold text-gray-900">王教授</div>
-                      <div className="text-xs text-gray-500 mt-0.5">wang@university.edu.cn</div>
+                      <div className="text-sm font-semibold text-gray-900">{displayName}</div>
+                      {accountLabel && <div className="text-xs text-gray-500 mt-0.5">{accountLabel}</div>}
                     </div>
                     <div className="py-1">
                       <button
@@ -327,7 +348,7 @@ export default function TeacherDashboard() {
               </div>
               <div className="relative flex items-center justify-between">
                 <div>
-                  <div className="text-white/80 text-sm mb-1">早上好，王教授 👋</div>
+                  <div className="text-white/80 text-sm mb-1">早上好，{displayName}</div>
                   <h1 className="text-2xl font-bold text-white mb-2">今日工作台</h1>
                   <div className="flex items-center gap-4 text-white/80 text-sm">
                     <span className="flex items-center gap-1"><i className="ri-calendar-line"></i>2026年4月10日 周五</span>
@@ -683,13 +704,11 @@ export default function TeacherDashboard() {
                         进入课程
                       </Link>
                       <button 
-                        onClick={() => {
-                          setInviteCode(Math.random().toString(36).substring(2, 8).toUpperCase());
-                          setShowInviteModal(true);
-                        }}
+                        onClick={() => void handleShowInviteCode(course.id)}
+                        disabled={inviteCodePendingId === course.id}
                         className="px-3 py-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 rounded-md hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap"
                       >
-                        <i className="ri-share-line"></i>
+                        <i className={inviteCodePendingId === course.id ? 'ri-loader-4-line animate-spin' : 'ri-share-line'}></i>
                       </button>
                     </div>
                   </div>

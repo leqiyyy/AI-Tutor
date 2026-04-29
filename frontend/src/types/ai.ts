@@ -8,6 +8,14 @@ export interface AiMessageSource {
   name: string;
   page: number;
   type: string;
+  score?: number;
+  retrievalScore?: number;
+  rerankScore?: number;
+  relevanceScore?: number;
+  confidence?: number;
+  chunkId?: string;
+  snippet?: string;
+  rawText?: string;
 }
 
 export interface AiAttachment {
@@ -28,6 +36,10 @@ export interface AiMessage {
   time: string;
   attachments?: AiAttachment[];
   sources?: AiMessageSource[];
+  confidence?: number;
+  quality?: Record<string, unknown>;
+  reviewContext?: Record<string, unknown>;
+  needsReview?: boolean;
   feedback?: AiFeedback;
   isWelcome?: boolean;
 }

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ProductSidePanel from '../../components/ProductSidePanel';
 import StudentSettings from './components/StudentSettings';
+import { useAuth } from '@/hooks/use-auth';
 import { authService } from '@/services/auth';
 import { courseService } from '@/services/course';
 import { dashboardService } from '@/services/dashboard';
@@ -58,6 +59,7 @@ const toneTextClassMap: Record<DashboardTone, string> = {
 
 export default function StudentDashboard() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('learning');
   const [showJoinCourseModal, setShowJoinCourseModal] = useState(false);
   const [inviteCode, setInviteCode] = useState('');
@@ -180,6 +182,9 @@ export default function StudentDashboard() {
   const pendingItems = dashboardData?.pendingItems ?? [];
   const recommendations = dashboardData?.recommendations ?? [];
   const activities = dashboardData?.activities ?? [];
+  const displayName = dashboardData?.greetingName || user?.displayName || user?.name || '学生';
+  const accountLabel = user?.email || user?.account || '';
+  const avatarInitial = displayName.trim().charAt(0) || '学';
 
   return (
     <div className="soft-dash soft-dash-student min-h-screen bg-gray-50" translate="no">
@@ -213,15 +218,15 @@ export default function StudentDashboard() {
                   onClick={() => setShowUserMenu(v => !v)}
                   className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
                 >
-                  <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium">李</div>
-                  <span className="text-sm text-gray-700 font-medium">李浩然</span>
+                  <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium">{avatarInitial}</div>
+                  <span className="text-sm text-gray-700 font-medium">{displayName}</span>
                   <i className={`ri-arrow-down-s-line text-gray-400 text-base transition-transform ${showUserMenu ? 'rotate-180' : ''}`}></i>
                 </button>
                 {showUserMenu && (
                   <div className="absolute right-0 bottom-full mb-1.5 w-44 origin-bottom-right bg-white border border-gray-200 rounded-xl overflow-hidden z-50">
                     <div className="px-4 py-3 border-b border-gray-100">
-                      <div className="text-sm font-semibold text-gray-900">李浩然</div>
-                      <div className="text-xs text-gray-500 mt-0.5">2024301001@stu.edu.cn</div>
+                      <div className="text-sm font-semibold text-gray-900">{displayName}</div>
+                      {accountLabel && <div className="text-xs text-gray-500 mt-0.5">{accountLabel}</div>}
                     </div>
                     <div className="py-1">
                       <button
@@ -531,8 +536,8 @@ export default function StudentDashboard() {
                   type="text" 
                   value={inviteCode}
                   onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
-                  placeholder="请输入6位邀请码" 
-                  maxLength={6}
+                  placeholder="请输入课程邀请码" 
+                  maxLength={20}
                   className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 uppercase tracking-wider" 
                 />
                 <p className="text-xs text-gray-500 mt-2">请向教师索取课程邀请码</p>
@@ -558,7 +563,7 @@ export default function StudentDashboard() {
               </button>
               <button 
                 onClick={handleJoinCourse}
-                disabled={inviteCode.length !== 6 || joinCoursePending}
+                disabled={!inviteCode.trim() || joinCoursePending}
                 className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 加入课程

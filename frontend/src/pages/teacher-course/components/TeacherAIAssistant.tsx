@@ -25,36 +25,28 @@ interface TeacherRecommendation {
 type TeacherToolAction = 'lessonPlan' | 'exam' | 'learningAnalysis' | 'flashcards';
 type RightPanelMode = 'closed' | 'standard' | 'wide';
 
-const AI_RESPONSES: Record<string, { content: string; sources?: { name: string; page: number; type: string }[] }> = {
-  default: {
-    content: '根据课程数据分析，我来为您提供相关教学建议。\n\n当前班级整体学习状况良好，平均进度达到了75%。建议关注学习进度落后的学生，及时给予个性化辅导。',
-    sources: [{ name: '班级学情报告.pdf', page: 1, type: 'pdf' }],
-  },
-  file: {
-    content: '已收到您上传的文件，正在解析内容...\n\n**文件解析完成**，主要内容如下：\n\n• 文件已关联到课程知识库，可用于生成教案和试卷\n• 识别到相关知识点，已建立知识关联\n• 建议将此文件作为参考资料分发给学生',
-    sources: [{ name: '上传文件', page: 1, type: 'pdf' }],
-  },
-  tcp: {
-    content: 'TCP三次握手过程如下：\n\n**第一次握手**：客户端发送SYN报文，进入SYN_SENT状态。\n\n**第二次握手**：服务器回复SYN+ACK报文，进入SYN_RCVD状态。\n\n**第三次握手**：客户端发送ACK报文，双方进入ESTABLISHED状态。',
-    sources: [{ name: '第4章-传输层.pdf', page: 12, type: 'pdf' }],
-  },
-  lesson: {
-    content: '根据您的课程内容和学生学情，我为您生成以下教案大纲：\n\n**教学目标**\n• 理解TCP三次握手的完整过程\n• 掌握各状态的转换条件\n\n**教学重难点**\n• 重点：三次握手必要性\n• 难点：第三次握手为什么必须有\n\n**教学流程**\n1. 导入：为什么需要建立连接（5min）\n2. 讲解：三次握手详细过程（20min）\n3. 演示：Wireshark抓包分析（10min）\n4. 练习：连接状态题目（15min）',
-    sources: [{ name: '教学大纲.docx', page: 1, type: 'pdf' }],
-  },
-  analysis: {
-    content: '**班级学情分析报告**\n\n**整体情况**\n本班68名学生，平均学习进度75%，整体表现良好。\n\n**薄弱环节**\n1. TCP拥塞控制：约35%的学生掌握不足\n2. 子网划分计算：约28%的学生需要加强\n3. 路由算法：约22%的学生理解不深\n\n**建议措施**\n• 增加TCP拥塞控制的习题练习\n• 设计专项子网划分练习课',
-    sources: [{ name: '学情数据.xlsx', page: 0, type: 'pdf' }],
-  },
-};
+function getSourceIconClass(type: string) {
+  if (type === 'pdf') return 'ri-file-pdf-line text-red-500';
+  if (type === 'video') return 'ri-video-line text-amber-500';
+  if (type === 'ppt' || type === 'pptx') return 'ri-file-ppt-line text-orange-500';
+  if (type === 'image') return 'ri-image-line text-green-600';
+  return 'ri-file-text-line text-teal-600';
+}
 
-function getAIResponse(input: string, hasFiles: boolean) {
-  if (hasFiles) return AI_RESPONSES.file;
-  const lower = input.toLowerCase();
-  if (lower.includes('tcp') || lower.includes('握手')) return AI_RESPONSES.tcp;
-  if (lower.includes('教案') || lower.includes('备课')) return AI_RESPONSES.lesson;
-  if (lower.includes('学情') || lower.includes('分析')) return AI_RESPONSES.analysis;
-  return AI_RESPONSES.default;
+function getSourceScore(source: AiMessageSource) {
+  return source.score ?? source.rerankScore ?? source.relevanceScore ?? source.confidence ?? null;
+}
+
+function formatSourceScore(source: AiMessageSource) {
+  const value = getSourceScore(source);
+  if (value === null || Number.isNaN(value)) return null;
+  const percent = value > 1 ? value : value * 100;
+  return `${Math.round(percent)}%`;
+}
+
+function getSourceSnippet(source: AiMessageSource) {
+  const text = (source.snippet || source.rawText || '').replace(/\s+/g, ' ').trim();
+  return text.length > 180 ? `${text.slice(0, 180)}...` : text;
 }
 
 function getFileType(file: File): AttachedFile['fileType'] {
@@ -664,14 +656,21 @@ export default function TeacherAIAssistant() {
         attachments: userMsg.attachments,
       });
 
-      const finalMessages = conversation.messages.length > 0 ? conversation.messages : [...nextMessages, reply];
+      const finalMessages = [...nextMessages, reply];
       setMessages(finalMessages);
       setActiveConvId(conversation.id);
       setConversations(prev => {
-        const exists = prev.some(item => item.id === conversation.id);
-        return exists
-          ? prev.map(item => item.id === conversation.id ? conversation : item)
-          : [conversation, ...prev];
+        const existing = prev.find(item => item.id === conversation.id);
+        const updatedConversation: Conversation = {
+          ...conversation,
+          title: existing?.title || conversation.title,
+          createdAt: existing?.createdAt || conversation.createdAt,
+          lastMessage: reply.content.slice(0, 40) + (reply.content.length > 40 ? '...' : ''),
+          messages: finalMessages,
+        };
+        return existing
+          ? prev.map(item => item.id === conversation.id ? updatedConversation : item)
+          : [updatedConversation, ...prev];
       });
       if (reply.role === 'ai') {
         void syncMessageSources(reply);
@@ -682,18 +681,12 @@ export default function TeacherAIAssistant() {
           }
         }
       }
-    } catch {
-      const resp = getAIResponse(text, (userMsg.attachments?.length ?? 0) > 0);
-      const aiMsg: Message = { id: Date.now() + 1, role: 'ai', content: resp.content, time: getNow(), sources: resp.sources };
+    } catch (error) {
+      console.error('teacher_ai_send_message_failed', error);
+      const aiMsg: Message = { id: Date.now() + 1, role: 'ai', content: 'AI助教暂时不可用，请稍后重试。', time: getNow() };
       const finalMessages = [...nextMessages, aiMsg];
       setMessages(finalMessages);
-      if (resp.sources) {
-        setCurrentSources(resp.sources);
-        setRightTab('sources');
-        if (rightPanelMode === 'closed') {
-          setRightPanelMode('standard');
-        }
-      }
+      setCurrentSources([]);
       saveCurrentConversation(finalMessages);
     } finally {
       setIsTyping(false);
@@ -904,9 +897,10 @@ export default function TeacherAIAssistant() {
                     <div className="flex flex-wrap gap-1.5 mt-1">
                       {msg.sources.map((s, i) => (
                         <span key={i} className="flex items-center gap-1 px-2 py-0.5 bg-teal-50 border border-teal-100 rounded-full text-xs text-teal-700 cursor-pointer hover:bg-teal-100 transition-colors">
-                          <i className={`text-base ${s.type === 'pdf' ? 'ri-file-pdf-line text-red-500' : s.type === 'video' ? 'ri-video-line text-amber-500' : 'ri-file-ppt-line text-orange-500'}`}></i>
+                          <i className={`text-base ${getSourceIconClass(s.type)}`}></i>
                           {s.name.length > 14 ? s.name.slice(0, 14) + '…' : s.name}
                           {s.page > 0 && ` · P${s.page}`}
+                          {formatSourceScore(s) && ` · ${formatSourceScore(s)}`}
                         </span>
                       ))}
                     </div>
@@ -1199,11 +1193,20 @@ export default function TeacherAIAssistant() {
                       {currentSources.map((s, i) => (
                         <div key={i} className="flex min-w-0 items-start gap-2 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50 cursor-pointer">
                           <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-                            <i className={`text-lg ${s.type === 'pdf' ? 'ri-file-pdf-line text-red-500' : s.type === 'video' ? 'ri-video-line text-amber-500' : 'ri-file-ppt-line text-orange-500'}`}></i>
+                            <i className={`text-lg ${getSourceIconClass(s.type)}`}></i>
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="break-words text-xs font-medium leading-snug text-gray-800">{s.name}</div>
-                            {s.page > 0 && <div className="text-xs text-teal-600 mt-0.5">第 {s.page} 页</div>}
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                              {s.page > 0 && <span className="text-teal-600">第 {s.page} 页</span>}
+                              {formatSourceScore(s) && <span className="text-gray-500">相关度 {formatSourceScore(s)}</span>}
+                              {s.chunkId && <span className="max-w-full truncate text-gray-400">Chunk {s.chunkId}</span>}
+                            </div>
+                            {getSourceSnippet(s) && (
+                              <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-gray-600">
+                                {getSourceSnippet(s)}
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
