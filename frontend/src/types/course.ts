@@ -132,7 +132,7 @@ export interface TeacherCourseMaterialDownloadData {
 }
 
 export interface TeacherCourseTask {
-  id: number;
+  id: string | number;
   type: string;
   title: string;
   deadline: string;
@@ -143,6 +143,7 @@ export interface TeacherCourseTask {
   attachments: string[];
   startTime?: string;
   duration?: number;
+  description?: string;
 }
 
 export interface TeacherCourseTasksData {
@@ -150,7 +151,7 @@ export interface TeacherCourseTasksData {
 }
 
 export interface TeacherCourseTaskSubmission {
-  id: number;
+  id: string | number;
   studentName: string;
   studentId: string;
   groupName: string;

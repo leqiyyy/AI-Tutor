@@ -21,6 +21,10 @@ FOLLOW_UP_PATTERNS = (
     r"(继续|展开|详细|再说|再解释|举例|对比|区别|为什么|怎么做)",
 )
 
+COMPLETE_QUESTION_PATTERNS = (
+    r"(是什么|有什么关系|什么关系|有何关系|区别是什么|有什么区别|有哪些|如何|怎么|为什么|是否|能否|属于哪一层|属于什么)",
+)
+
 NEW_TOPIC_PATTERNS = (
     r"^(换个|另一个|新问题| unrelated |new topic)",
     r"(不讨论|先不说|另外问)",
@@ -90,6 +94,10 @@ def classify_context_intent(history: Iterable[dict[str, str]], question: str) ->
     if not list(history):
         return "new_topic"
     if "?" in text or "？" in text:
+        if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in FOLLOW_UP_PATTERNS):
+            return "follow_up"
+        return "new_topic"
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in COMPLETE_QUESTION_PATTERNS):
         if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in FOLLOW_UP_PATTERNS):
             return "follow_up"
         return "new_topic"
@@ -226,4 +234,3 @@ def _terms(text: str) -> list[str]:
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
-

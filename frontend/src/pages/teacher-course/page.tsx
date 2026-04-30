@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import KnowledgeGraphViewer from '@/components/KnowledgeGraphViewer';
 import TeacherAIAssistant from './components/TeacherAIAssistant';
@@ -158,12 +158,15 @@ function TeacherCourseEmptyState({
 }
 
 function buildTaskDetailFallback(task: TeacherCourseTask): TeacherCourseTaskDetail {
+  const localDescription = task.description?.trim();
+
   return {
     ...task,
     description:
-      task.type === 'notice'
+      localDescription ||
+      (task.type === 'notice'
         ? '该通知的详细内容将在任务详情接口接入后返回，这里先展示列表中的基础信息。'
-        : '该任务的详细说明、提交记录和统计数据将在任务详情接口接入后返回，这里先展示列表中的基础信息。',
+        : '该任务的详细说明、提交记录和统计数据将在任务详情接口接入后返回，这里先展示列表中的基础信息。'),
     requirements: [],
     participantCount: task.total,
     averageScore: task.type === 'notice' ? undefined : 0,
@@ -194,13 +197,22 @@ function getTaskSubmissionStatusMeta(status: 'submitted' | 'pending' | 'graded')
   };
 }
 
+function normalizeMaterialStatus(status: string) {
+  return status.trim().toLowerCase();
+}
+
 function isIndexedMaterialStatus(status: string) {
-  const normalized = status.trim().toLowerCase();
+  const normalized = normalizeMaterialStatus(status);
   return ['indexed', 'completed', 'complete', 'success', 'ready', '已解析', '解析完成'].includes(normalized);
 }
 
+function isMaterialIndexingStatus(status: string) {
+  const normalized = normalizeMaterialStatus(status);
+  return ['pending', 'queued', 'processing', 'running', '待解析', '解析中'].includes(normalized);
+}
+
 function getMaterialStatusMeta(status: string) {
-  const normalized = status.trim().toLowerCase();
+  const normalized = normalizeMaterialStatus(status);
 
   if (isIndexedMaterialStatus(status)) {
     return {
@@ -223,7 +235,7 @@ function getMaterialStatusMeta(status: string) {
     };
   }
 
-  if (['pending', 'queued', 'processing', 'running', '待解析', '解析中'].includes(normalized)) {
+  if (isMaterialIndexingStatus(status)) {
     return {
       label: '解析中',
       className: 'bg-yellow-50 text-yellow-600',
@@ -323,12 +335,15 @@ export default function TeacherCourse() {
   const [fileSortBy, setFileSortBy] = useState('date');
   const [courseFiles, setCourseFiles] = useState<TeacherCourseFile[]>([]);
   const [downloadingFileId, setDownloadingFileId] = useState<CourseFileId | null>(null);
+  const [reindexingFileId, setReindexingFileId] = useState<CourseFileId | null>(null);
+  const [isRebuildingKnowledge, setIsRebuildingKnowledge] = useState(false);
 
   // 新增：任务发布相关状态
   const [showNoticeModal, setShowNoticeModal] = useState(false);
   const [showHomeworkModal, setShowHomeworkModal] = useState(false);
   const [showExamModal, setShowExamModal] = useState(false);
   const [noticeForm, setNoticeForm] = useState(createEmptyNoticeForm);
+  const [isPublishingNotice, setIsPublishingNotice] = useState(false);
   const [homeworkForm, setHomeworkForm] = useState(createEmptyHomeworkForm);
   const [examForm, setExamForm] = useState(createEmptyExamForm);
   const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
@@ -415,7 +430,7 @@ export default function TeacherCourse() {
     return { icon: 'ri-file-line', color: 'text-gray-600', bg: 'bg-gray-50' };
   };
 
-  const refreshKnowledgeData = async () => {
+  const refreshKnowledgeData = useCallback(async () => {
     const [materials, graph] = await Promise.all([
       courseService.getTeacherCourseMaterials(courseId),
       courseService.getKnowledgeGraph(courseId, 'teacher'),
@@ -428,7 +443,7 @@ export default function TeacherCourse() {
     setGraphNodes(normalized.nodes);
     setGraphEdges(normalized.edges);
     setGraphRootIds(rootIds);
-  };
+  }, [courseId]);
 
   const handleUpload = async () => {
     if (uploadFiles.length === 0) return;
@@ -479,6 +494,36 @@ export default function TeacherCourse() {
       mounted = false;
     };
   }, [courseId]);
+
+  const hasIndexingCourseFiles = courseFiles.some((file) => isMaterialIndexingStatus(file.status));
+
+  useEffect(() => {
+    if (!hasIndexingCourseFiles) {
+      return;
+    }
+
+    let mounted = true;
+    const intervalId = window.setInterval(async () => {
+      try {
+        const materials = await courseService.getTeacherCourseMaterials(courseId);
+        if (!mounted) return;
+
+        setCourseFiles(materials.files);
+        const hasIndexingFile = materials.files.some((file) => isMaterialIndexingStatus(file.status));
+        if (!hasIndexingFile) {
+          window.clearInterval(intervalId);
+          void refreshKnowledgeData();
+        }
+      } catch {
+        // Keep the current list visible and try again on the next tick.
+      }
+    }, 5000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, [hasIndexingCourseFiles, courseId, refreshKnowledgeData]);
 
   useEffect(() => {
     let mounted = true;
@@ -584,37 +629,56 @@ export default function TeacherCourse() {
 
   // 新增：发布通知
   const handlePublishNotice = async () => {
-    if (!noticeForm.title || !noticeForm.content) {
+    if (isPublishingNotice) return;
+
+    if (!noticeForm.title.trim() || !noticeForm.content.trim()) {
       alert('请填写完整的通知信息');
       return;
     }
 
-    await courseService.publishNotice(courseId, {
-      title: noticeForm.title,
-      content: noticeForm.content,
-      importance: noticeForm.importance,
-      scope: noticeForm.scope,
-      attachments: noticeForm.attachments.map(f => f.name),
-    });
-    
-    // 模拟发布通知
-    const newTask = {
-      id: Date.now(),
-      type: 'notice',
-      title: noticeForm.title,
-      deadline: '-',
-      submitted: 68,
-      total: 68,
-      status: '已发布',
-      publishDate: new Date().toISOString().split('T')[0],
-      attachments: noticeForm.attachments.map(f => f.name)
-    };
-    
-    setPublishedTasks([newTask, ...publishedTasks]);
-    
-    alert('通知发布成功！');
-    setShowNoticeModal(false);
-    setNoticeForm(createEmptyNoticeForm());
+    setIsPublishingNotice(true);
+
+    try {
+      const title = noticeForm.title.trim();
+      const content = noticeForm.content.trim();
+      const attachments = noticeForm.attachments.map(f => f.name);
+      const result = await courseService.publishNotice(courseId, {
+        title,
+        content,
+        importance: noticeForm.importance,
+        scope: noticeForm.scope,
+        attachments,
+      });
+
+      try {
+        const tasksData = await courseService.getTeacherCourseTasks(courseId);
+        setPublishedTasks(tasksData.tasks);
+      } catch {
+        const newTask: TeacherCourseTask = {
+          id: result.id ?? Date.now(),
+          type: 'notice',
+          title,
+          deadline: '-',
+          submitted: 68,
+          total: 68,
+          status: '已发布',
+          publishDate: new Date().toISOString().split('T')[0],
+          attachments,
+          description: content,
+        };
+
+        setPublishedTasks(prev => [newTask, ...prev]);
+      }
+
+      alert('通知发布成功！');
+      setShowNoticeModal(false);
+      setNoticeForm(createEmptyNoticeForm());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '通知发布失败，请稍后重试';
+      alert(`通知发布失败：${message}`);
+    } finally {
+      setIsPublishingNotice(false);
+    }
   };
 
   // 新增：创建作业
@@ -628,7 +692,7 @@ export default function TeacherCourse() {
       return;
     }
 
-    await courseService.createHomework(courseId, {
+    const result = await courseService.createHomework(courseId, {
       title: homeworkForm.title,
       deadline: homeworkForm.deadline,
       allowLate: homeworkForm.allowLate,
@@ -638,7 +702,7 @@ export default function TeacherCourse() {
     
     // 模拟创建作业
     const newTask = {
-      id: Date.now(),
+      id: result.id ?? Date.now(),
       type: 'homework',
       title: homeworkForm.title,
       deadline: homeworkForm.deadline,
@@ -699,7 +763,7 @@ export default function TeacherCourse() {
       return;
     }
 
-    await courseService.createExam(courseId, {
+    const result = await courseService.createExam(courseId, {
       name: examForm.name,
       startTime: examForm.startTime,
       endTime: examForm.endTime,
@@ -711,7 +775,7 @@ export default function TeacherCourse() {
     
     // 模拟创建考试
     const newTask = {
-      id: Date.now(),
+      id: result.id ?? Date.now(),
       type: 'exam',
       title: examForm.name,
       startTime: examForm.startTime,
@@ -755,7 +819,7 @@ export default function TeacherCourse() {
   };
 
   // 新增：更新任务状态
-  const updateTaskStatus = async (taskId: number, newStatus: string) => {
+  const updateTaskStatus = async (taskId: string | number, newStatus: string) => {
     await courseService.updateTeacherCourseTaskStatus(courseId, taskId, {
       status: newStatus,
     });
@@ -1037,12 +1101,74 @@ export default function TeacherCourse() {
 
   // 新增：删除文件
   const handleDeleteFile = async (fileId: CourseFileId) => {
-    if (confirm('确定要删除这个文件吗？')) {
-      await courseService.deleteTeacherCourseFile(courseId, fileId);
-      setCourseFiles(prev => prev.filter(f => f.id !== fileId));
-      alert('文件已删除');
-    }
     setShowFileMenu(null);
+
+    if (confirm('确定要删除这个文件吗？')) {
+      try {
+        await courseService.deleteTeacherCourseFile(courseId, fileId);
+        await refreshKnowledgeData();
+        alert('文件已删除');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '删除文件失败，请稍后重试';
+        alert(`删除文件失败：${message}`);
+      }
+    }
+  };
+
+  const handleReindexFile = async (file: TeacherCourseFile) => {
+    setShowFileMenu(null);
+
+    const confirmed = confirm(
+      `确定要重新构建「${file.name}」的知识库索引吗？提交后会重新解析文件并刷新检索索引。`,
+    );
+    if (!confirmed) return;
+
+    setReindexingFileId(file.id);
+    setCourseFiles(prev => prev.map(item => (
+      item.id === file.id ? { ...item, status: 'processing' } : item
+    )));
+
+    try {
+      await courseService.retryTeacherCourseFileIndex(courseId, file.id);
+      alert('已提交重新索引任务，完成前资料状态会显示为处理中。');
+
+      try {
+        const materials = await courseService.getTeacherCourseMaterials(courseId);
+        setCourseFiles(materials.files);
+        await refreshKnowledgeData();
+      } catch {
+        // The retry request succeeded; the current optimistic status is enough until the next refresh.
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '重新索引失败，请稍后重试';
+      alert(`重新索引失败：${message}`);
+    } finally {
+      setReindexingFileId(null);
+    }
+  };
+
+  const handleRebuildKnowledge = async () => {
+    const confirmed = confirm(
+      '确定要重建当前课程的全部知识库索引和知识图谱吗？提交后会清空当前课程图谱投影，并重新解析所有活跃资料。',
+    );
+    if (!confirmed) return;
+
+    setIsRebuildingKnowledge(true);
+    setCourseFiles(prev => prev.map(item => ({ ...item, status: 'processing' })));
+    setGraphNodes(prev => prev.filter(node => graphRootIds.includes(node.id)));
+    setGraphEdges([]);
+
+    try {
+      await courseService.rebuildTeacherCourseKnowledge(courseId);
+      alert('已提交课程知识库重建任务，完成前资料状态会显示为处理中。');
+      await refreshKnowledgeData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '重建知识库失败，请稍后重试';
+      alert(`重建知识库失败：${message}`);
+      await refreshKnowledgeData().catch(() => undefined);
+    } finally {
+      setIsRebuildingKnowledge(false);
+    }
   };
 
   // 新增：重命名文件
@@ -1503,12 +1629,22 @@ export default function TeacherCourse() {
             <div className="max-w-6xl mx-auto">
               <div className="flex items-center justify-between mb-6">
                 <h1 className="text-xl font-bold text-gray-900">课程知识</h1>
-                <button 
-                  onClick={() => setShowUploadModal(true)}
-                  className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  <i className="ri-upload-line mr-1"></i>上传资料
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { void handleRebuildKnowledge(); }}
+                    disabled={isRebuildingKnowledge || courseFiles.length === 0}
+                    className="px-4 py-2 bg-white text-teal-700 border border-teal-200 text-sm font-medium rounded-lg hover:bg-teal-50 transition-colors cursor-pointer whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <i className={`${isRebuildingKnowledge ? 'ri-loader-4-line animate-spin' : 'ri-refresh-line'} mr-1`}></i>
+                    {isRebuildingKnowledge ? '重建中' : '重建知识库'}
+                  </button>
+                  <button
+                    onClick={() => setShowUploadModal(true)}
+                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <i className="ri-upload-line mr-1"></i>上传资料
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-3 gap-4 mb-6">
                 <div className="bg-white rounded-lg p-4 border border-gray-200">
@@ -1627,6 +1763,17 @@ export default function TeacherCourse() {
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
+                                    void handleReindexFile(file);
+                                  }}
+                                  disabled={reindexingFileId === file.id}
+                                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2 disabled:cursor-not-allowed disabled:text-gray-400 disabled:hover:bg-white"
+                                >
+                                  <i className={reindexingFileId === file.id ? 'ri-loader-4-line animate-spin' : 'ri-refresh-line'}></i>
+                                  {reindexingFileId === file.id ? '重建中' : '重新索引'}
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     handleRenameFile(file);
                                   }}
                                   className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
@@ -1646,7 +1793,7 @@ export default function TeacherCourse() {
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    handleDeleteFile(file.id);
+                                    void handleDeleteFile(file.id);
                                   }}
                                   className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
                                 >
@@ -1708,10 +1855,24 @@ export default function TeacherCourse() {
                               <i className="ri-robot-line mr-1"></i>AI解析
                             </button>
                             <button
+                              onClick={() => { void handleReindexFile(file); }}
+                              disabled={reindexingFileId === file.id}
+                              className="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 rounded-md hover:bg-indigo-100 cursor-pointer whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              <i className={`${reindexingFileId === file.id ? 'ri-loader-4-line animate-spin' : 'ri-refresh-line'} mr-1`}></i>
+                              {reindexingFileId === file.id ? '重建中' : '重新索引'}
+                            </button>
+                            <button
                               onClick={() => handleShareFile(file)}
                               className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 cursor-pointer whitespace-nowrap"
                             >
                               <i className="ri-share-line mr-1"></i>分享
+                            </button>
+                            <button
+                              onClick={() => { void handleDeleteFile(file.id); }}
+                              className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 cursor-pointer whitespace-nowrap"
+                            >
+                              <i className="ri-delete-bin-line mr-1"></i>删除
                             </button>
                           </div>
                         </div>
@@ -2475,9 +2636,10 @@ export default function TeacherCourse() {
                   </button>
                   <button
                     onClick={handlePublishNotice}
-                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                    disabled={isPublishingNotice}
+                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    确认发布
+                    {isPublishingNotice ? '发布中...' : '确认发布'}
                   </button>
                 </div>
               </div>

@@ -52,6 +52,11 @@ import type {
 } from "@/types/course";
 
 type CoursePayload = Record<string, unknown>;
+type CourseMutationResult = {
+  id?: string | number;
+  title?: string;
+  recipientCount?: number;
+};
 
 function buildFormData(files: File[], extra?: CoursePayload) {
   const formData = new FormData();
@@ -282,6 +287,26 @@ export const courseService = {
     });
   },
 
+  async retryTeacherCourseFileIndex(
+    courseId: string,
+    fileId: string | number,
+  ): Promise<void> {
+    if (shouldUseMockApi) return;
+
+    await http<void>(`/teacher/courses/${courseId}/files/${fileId}/kb/retry`, {
+      method: "POST",
+      query: { force: true, async_retry: true },
+    });
+  },
+
+  async rebuildTeacherCourseKnowledge(courseId: string): Promise<void> {
+    if (shouldUseMockApi) return;
+
+    await http<void>(`/teacher/courses/${courseId}/kb/rebuild`, {
+      method: "POST",
+    });
+  },
+
   async shareTeacherCourseFile(
     courseId: string,
     fileId: string | number,
@@ -295,28 +320,28 @@ export const courseService = {
     });
   },
 
-  async publishNotice(courseId: string, payload: CoursePayload): Promise<void> {
-    if (shouldUseMockApi) return;
+  async publishNotice(courseId: string, payload: CoursePayload): Promise<CourseMutationResult> {
+    if (shouldUseMockApi) return {};
 
-    await http<void>(`/teacher/courses/${courseId}/notices`, {
+    return http<CourseMutationResult>(`/teacher/courses/${courseId}/notices`, {
       method: "POST",
       body: payload,
     });
   },
 
-  async createHomework(courseId: string, payload: CoursePayload): Promise<void> {
-    if (shouldUseMockApi) return;
+  async createHomework(courseId: string, payload: CoursePayload): Promise<CourseMutationResult> {
+    if (shouldUseMockApi) return {};
 
-    await http<void>(`/teacher/courses/${courseId}/homeworks`, {
+    return http<CourseMutationResult>(`/teacher/courses/${courseId}/homeworks`, {
       method: "POST",
       body: payload,
     });
   },
 
-  async createExam(courseId: string, payload: CoursePayload): Promise<void> {
-    if (shouldUseMockApi) return;
+  async createExam(courseId: string, payload: CoursePayload): Promise<CourseMutationResult> {
+    if (shouldUseMockApi) return {};
 
-    await http<void>(`/teacher/courses/${courseId}/exams`, {
+    return http<CourseMutationResult>(`/teacher/courses/${courseId}/exams`, {
       method: "POST",
       body: payload,
     });

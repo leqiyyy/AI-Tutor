@@ -24,6 +24,20 @@ DEFAULT_ENTITY_TYPES = [
     "assessment_point",
 ]
 
+DEFAULT_RELATION_TYPES = [
+    "prerequisite_of",
+    "part_of",
+    "explains",
+    "uses_formula",
+    "applies_algorithm",
+    "example_of",
+    "tests",
+    "causes",
+    "contrasts_with",
+    "equivalent_to",
+    "related_to",
+]
+
 _APPLIED_SIGNATURE: tuple[Any, ...] | None = None
 
 
@@ -89,8 +103,8 @@ def build_query_user_prompt(settings: Any, role: str = "student") -> str | None:
 def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
     """Patch selected RAG-Anything/LightRAG prompt templates at runtime.
 
-    The override deliberately avoids entity/relationship extraction templates so
-    the framework's structured output format remains stable.
+    The override appends guidance instead of replacing templates, so upstream
+    tuple delimiters, JSON fields, and continuation prompts keep their format.
     """
 
     global _APPLIED_SIGNATURE
@@ -109,6 +123,7 @@ def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
 
     patched: dict[str, list[str]] = {"lightrag": [], "raganything": []}
     subject = str(getattr(settings, "RAG_EDUCATION_SUBJECT", "课程学习") or "课程学习").strip()
+    entity_types = parse_entity_types(getattr(settings, "RAG_EDUCATION_ENTITY_TYPES_RAW", ""))
 
     lightrag_guidance = (
         "[AI Tutor education response guidance]\n"
@@ -127,11 +142,27 @@ def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
         "when they are visible or inferable from the multimodal content.\n"
         "- Preserve the original output format requirements above."
     )
+    graph_extraction_guidance = build_course_graph_extraction_guidance(
+        subject=subject,
+        language=str(getattr(settings, "RAG_EDUCATION_LANGUAGE", "简体中文") or "简体中文").strip(),
+        entity_types=entity_types,
+    )
 
     patched["lightrag"] = _patch_prompt_module(
         module_name="lightrag.prompt",
         keys=("rag_response", "naive_rag_response", "mix_rag_response"),
         guidance=lightrag_guidance,
+    )
+    patched["lightrag_extraction"] = _patch_prompt_module(
+        module_name="lightrag.prompt",
+        keys=(
+            "entity_extraction",
+            "entity_continue_extraction",
+            "entity_if_loop_extraction",
+            "summarize_entity_descriptions",
+        ),
+        guidance=graph_extraction_guidance,
+        key_fragments=("entity_extraction", "relationship", "relation_extraction"),
     )
     patched["raganything"] = _patch_prompt_module(
         module_name="raganything.prompt",
@@ -151,7 +182,41 @@ def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
     return {"enabled": True, "patched": patched}
 
 
-def _patch_prompt_module(*, module_name: str, keys: tuple[str, ...], guidance: str) -> list[str]:
+def build_course_graph_extraction_guidance(
+    *,
+    subject: str,
+    language: str,
+    entity_types: list[str],
+) -> str:
+    entity_type_text = ", ".join(entity_types or DEFAULT_ENTITY_TYPES)
+    relation_type_text = ", ".join(DEFAULT_RELATION_TYPES)
+    return (
+        "[AI Tutor course knowledge graph extraction guidance]\n"
+        f"- Domain: {subject or '课程学习'}; output language for names/descriptions/evidence: {language or '简体中文'}.\n"
+        "- Build a high-quality course knowledge graph, not a file/material graph. Extract stable teaching concepts, "
+        "learning objectives, formulas, theorems, algorithms, examples, exercises, misconceptions, tools, datasets, "
+        "and assessment points that are explicitly supported by the source text.\n"
+        f"- Prefer these entity types when the original template asks for entity types: {entity_type_text}.\n"
+        f"- Prefer these relationship meanings when the original template asks for relationships: {relation_type_text}.\n"
+        "- Entity names should be short canonical terms. For Chinese course material, use concise Simplified Chinese names "
+        "unless the term is a standard English acronym or symbol. Merge obvious aliases instead of creating duplicates.\n"
+        "- Do not extract filenames, file paths, parser chunk IDs, UUIDs, hashes, page numbers alone, dates alone, "
+        "generic words, or upload/indexing artifacts as entities. Do not create relationships whose only evidence is "
+        "co-occurrence in the same file name or metadata.\n"
+        "- Keep evidence grounded: descriptions and relation rationales should be concise and traceable to the source. "
+        "When evidence is weak, lower confidence or omit the entity/relation.\n"
+        "- Preserve the original output format exactly, including delimiters, tuple labels, JSON keys, record separators, "
+        "and continuation/loop semantics required above."
+    )
+
+
+def _patch_prompt_module(
+    *,
+    module_name: str,
+    keys: tuple[str, ...],
+    guidance: str,
+    key_fragments: tuple[str, ...] = (),
+) -> list[str]:
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:  # pragma: no cover - depends on optional runtime packages
@@ -171,7 +236,8 @@ def _patch_prompt_module(*, module_name: str, keys: tuple[str, ...], guidance: s
 
     patched: list[str] = []
     for container in containers:
-        for key in keys:
+        target_keys = _matching_prompt_keys(container, keys=keys, key_fragments=key_fragments)
+        for key in target_keys:
             value = container.get(key)
             if isinstance(value, str):
                 new_value = _append_guidance_once(value, guidance)
@@ -181,8 +247,24 @@ def _patch_prompt_module(*, module_name: str, keys: tuple[str, ...], guidance: s
     return sorted(set(patched))
 
 
+def _matching_prompt_keys(
+    container: dict[Any, Any],
+    *,
+    keys: tuple[str, ...],
+    key_fragments: tuple[str, ...],
+) -> list[Any]:
+    targets: list[Any] = [key for key in keys if key in container]
+    lowered_fragments = tuple(fragment.lower() for fragment in key_fragments)
+    if lowered_fragments:
+        for key in container:
+            key_text = str(key).lower()
+            if any(fragment in key_text for fragment in lowered_fragments) and key not in targets:
+                targets.append(key)
+    return targets
+
+
 def _append_guidance_once(prompt: str, guidance: str) -> str:
-    marker = "[AI Tutor"
+    marker = guidance.split("\n", 1)[0]
     if marker in prompt:
         return prompt
     return f"{prompt.rstrip()}\n\n{guidance}"

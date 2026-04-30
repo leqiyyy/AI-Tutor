@@ -13,7 +13,7 @@ from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.logging import get_logger
 from app.integrations.rag import get_rag_engine
 from app.models.course import Class, ClassMember, Course, Material
-from app.models.knowledge import FileParseTask, KBSpace
+from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.user import User
 
@@ -76,6 +76,258 @@ def _ensure_kb_space(db: Session, *, course_id: str, class_id: str | None) -> KB
     db.add(kb_space)
     db.flush()
     return kb_space
+
+
+def _json_source_material_ids(payload: Any) -> set[str]:
+    if not isinstance(payload, dict):
+        return set()
+    raw_ids = payload.get("source_material_ids")
+    if raw_ids is None:
+        raw_ids = payload.get("material_ids")
+    if raw_ids is None:
+        raw_ids = []
+    if not isinstance(raw_ids, list):
+        raw_ids = [raw_ids]
+    return {str(item) for item in raw_ids if item}
+
+
+def _record_source_material_ids(record: Any) -> set[str]:
+    material_ids = _json_source_material_ids(getattr(record, "provenance", None))
+    source_span = getattr(record, "source_span", None)
+    if isinstance(source_span, dict):
+        for key in ("material_id", "source_material_id", "doc_id", "full_doc_id"):
+            value = source_span.get(key)
+            if value:
+                material_ids.add(str(value))
+    source_material_id = getattr(record, "source_material_id", None)
+    if source_material_id:
+        material_ids.add(str(source_material_id))
+    return material_ids
+
+
+def _without_material_id(payload: Any, material_id: str, remaining_ids: set[str]) -> dict:
+    next_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+    if "source_material_ids" in next_payload or remaining_ids:
+        next_payload["source_material_ids"] = sorted(remaining_ids)
+    if "material_ids" in next_payload:
+        next_payload["material_ids"] = sorted(remaining_ids)
+    next_payload["occurrence_count"] = len(remaining_ids)
+    return next_payload
+
+
+def _source_span_without_material_id(payload: Any, material_id: str, replacement_id: str | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+    next_payload = dict(payload)
+    for key in ("material_id", "source_material_id", "doc_id", "full_doc_id"):
+        if str(next_payload.get(key) or "") == material_id:
+            if replacement_id:
+                next_payload[key] = replacement_id
+            else:
+                next_payload.pop(key, None)
+    return next_payload
+
+
+def _active_material_ids_for_class(db: Session, class_id: str, *, excluding_material_id: str | None = None) -> set[str]:
+    query = db.query(Material.id).filter(
+        Material.class_id == class_id,
+        Material.is_active == True,
+    )
+    if excluding_material_id:
+        query = query.filter(Material.id != excluding_material_id)
+    return {str(row[0]) for row in query.all() if row[0]}
+
+
+def remove_material_graph_contributions(
+    db: Session,
+    *,
+    class_id: str,
+    material_id: str,
+    commit: bool = False,
+) -> dict[str, int]:
+    """Remove a material's app-level KG contribution without damaging shared nodes.
+
+    KnowledgeEntity/KnowledgeRelation rows are course-level aggregates. Their
+    provenance stores which active materials support them; when a single file is
+    deleted or reindexed, only that file's contribution should disappear.
+    """
+
+    active_material_ids = _active_material_ids_for_class(
+        db,
+        class_id,
+        excluding_material_id=material_id,
+    )
+    stats = {
+        "relations_deleted": 0,
+        "relations_updated": 0,
+        "entities_deleted": 0,
+        "entities_updated": 0,
+        "orphan_relations_deleted": 0,
+    }
+
+    relations = db.query(KnowledgeRelation).filter(KnowledgeRelation.class_id == class_id).all()
+    for relation in relations:
+        source_ids = _record_source_material_ids(relation)
+        if material_id not in source_ids:
+            continue
+        remaining_ids = (source_ids - {material_id}) & active_material_ids
+        if not remaining_ids:
+            db.delete(relation)
+            stats["relations_deleted"] += 1
+            continue
+        replacement_id = sorted(remaining_ids)[0]
+        relation.provenance = _without_material_id(relation.provenance, material_id, remaining_ids)
+        relation.source_span = _source_span_without_material_id(relation.source_span, material_id, replacement_id)
+        relation.weight = max(0.2, min(float(relation.weight or 1.0), float(len(remaining_ids))))
+        db.add(relation)
+        stats["relations_updated"] += 1
+
+    db.flush()
+
+    deleted_entity_ids: set[str] = set()
+    entities = db.query(KnowledgeEntity).filter(KnowledgeEntity.class_id == class_id).all()
+    for entity in entities:
+        source_ids = _record_source_material_ids(entity)
+        if material_id not in source_ids:
+            continue
+        remaining_ids = (source_ids - {material_id}) & active_material_ids
+        if not remaining_ids:
+            deleted_entity_ids.add(entity.id)
+            db.delete(entity)
+            stats["entities_deleted"] += 1
+            continue
+        replacement_id = sorted(remaining_ids)[0]
+        entity.provenance = _without_material_id(entity.provenance, material_id, remaining_ids)
+        entity.source_span = _source_span_without_material_id(entity.source_span, material_id, replacement_id)
+        if not entity.source_material_id or entity.source_material_id == material_id or entity.source_material_id not in remaining_ids:
+            entity.source_material_id = replacement_id
+        db.add(entity)
+        stats["entities_updated"] += 1
+
+    if deleted_entity_ids:
+        orphan_relations = db.query(KnowledgeRelation).filter(
+            KnowledgeRelation.class_id == class_id,
+            (
+                KnowledgeRelation.source_id.in_(deleted_entity_ids)
+                | KnowledgeRelation.target_id.in_(deleted_entity_ids)
+            ),
+        ).all()
+        for relation in orphan_relations:
+            db.delete(relation)
+            stats["orphan_relations_deleted"] += 1
+
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return stats
+
+
+def clear_class_graph_contributions(
+    db: Session,
+    *,
+    class_id: str,
+    commit: bool = False,
+) -> dict[str, int]:
+    stats = {
+        "relations_deleted": 0,
+        "entities_deleted": 0,
+    }
+
+    relations = db.query(KnowledgeRelation).filter(KnowledgeRelation.class_id == class_id).all()
+    for relation in relations:
+        db.delete(relation)
+        stats["relations_deleted"] += 1
+
+    entities = db.query(KnowledgeEntity).filter(KnowledgeEntity.class_id == class_id).all()
+    for entity in entities:
+        db.delete(entity)
+        stats["entities_deleted"] += 1
+
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return stats
+
+
+def _mark_parse_task_failed(
+    db: Session,
+    task: FileParseTask | None,
+    *,
+    material: Material,
+    file_hash: str | None,
+    max_attempts: int,
+    error_message: str,
+    error_category: str = "system",
+    event_type: str = "attempt_done",
+) -> FileParseTask:
+    kb_space = _ensure_kb_space(db, course_id=material.course_id, class_id=material.class_id)
+    if not task:
+        task = FileParseTask(
+            kb_space_id=kb_space.id,
+            course_id=material.course_id,
+            class_id=material.class_id,
+            material_id=material.id,
+            parser_name=settings.RAG_ENGINE,
+            status="failed",
+        )
+    task.status = "failed"
+    task.error_message = error_message
+    material.kb_status = "failed"
+    material.kb_error = error_message
+    _upsert_ingest_meta(
+        task,
+        file_hash=file_hash,
+        max_attempts=max_attempts,
+        retry_available=True,
+        last_error_category=error_category,
+        append_event={
+            "type": event_type,
+            "status": "failed",
+            "error": error_message[:200],
+            "error_category": error_category,
+            "at": _utc_now_iso(),
+        },
+    )
+    db.add(material)
+    db.add(task)
+    db.commit()
+    return task
+
+
+async def delete_material_index_artifacts(
+    *,
+    class_id: str,
+    material_id: str,
+    delete_llm_cache: bool = False,
+) -> dict[str, Any]:
+    try:
+        rag = get_rag_engine()
+    except Exception as exc:
+        logger.warning(
+            "material_index_delete_engine_unavailable",
+            class_id=class_id,
+            material_id=material_id,
+            error=str(exc),
+        )
+        return {
+            "supported": False,
+            "deleted": False,
+            "reason": "rag_engine_unavailable",
+            "error": str(exc),
+        }
+    delete_method = getattr(rag, "delete_material_index", None)
+    if not callable(delete_method):
+        return {"supported": False, "deleted": False, "reason": "rag_engine_delete_not_supported"}
+    result = delete_method(
+        class_id=class_id,
+        material_id=material_id,
+        delete_llm_cache=delete_llm_cache,
+    )
+    if hasattr(result, "__await__"):
+        result = await result
+    return result if isinstance(result, dict) else {"supported": True, "deleted": bool(result)}
 
 
 def list_course_files(db: Session, course_id: str, user: User) -> list[dict]:
@@ -296,7 +548,14 @@ def _material_parse_payload(db: Session, course_id: str, file_id: str, user: Use
 
 def search_course_content(db: Session, course_id: str, query: str, user: User) -> list[dict]:
     ensure_course_access(db, course_id, user)
-    tasks = db.query(FileParseTask).filter(FileParseTask.course_id == course_id, FileParseTask.status == "completed").all()
+    tasks = db.query(FileParseTask).join(
+        Material,
+        Material.id == FileParseTask.material_id,
+    ).filter(
+        FileParseTask.course_id == course_id,
+        FileParseTask.status == "completed",
+        Material.is_active == True,
+    ).all()
     query_terms = _terms(query)
     results = []
     for task in tasks:
@@ -402,6 +661,14 @@ def prepare_parse_task_for_enqueue(
     material.kb_status = "pending"
     if force:
         material.kb_error = None
+        graph_cleanup = remove_material_graph_contributions(
+            db,
+            class_id=cls.id,
+            material_id=material.id,
+            commit=False,
+        )
+    else:
+        graph_cleanup = None
     db.add(material)
 
     _upsert_ingest_meta(
@@ -412,6 +679,7 @@ def prepare_parse_task_for_enqueue(
         append_event={
             "type": "queue_prepare",
             "force": force,
+            "graph_cleanup": graph_cleanup,
             "at": _utc_now_iso(),
         },
     )
@@ -597,6 +865,48 @@ async def ingest_material_with_retry(
         return existing_task, "already_processing"
 
     action = "indexed"
+    if force:
+        graph_cleanup = remove_material_graph_contributions(
+            db,
+            class_id=cls.id,
+            material_id=material_id,
+            commit=False,
+        )
+        index_cleanup = await delete_material_index_artifacts(
+            class_id=cls.id,
+            material_id=material_id,
+        )
+        if existing_task:
+            _upsert_ingest_meta(
+                existing_task,
+                file_hash=file_hash,
+                max_attempts=max_attempts,
+                retry_available=True,
+                append_event={
+                    "type": "force_cleanup",
+                    "graph": graph_cleanup,
+                    "index": index_cleanup,
+                    "at": _utc_now_iso(),
+                },
+            )
+            db.add(existing_task)
+        db.commit()
+        if index_cleanup.get("supported") and not index_cleanup.get("deleted"):
+            task = _mark_parse_task_failed(
+                db,
+                existing_task,
+                material=material,
+                file_hash=file_hash,
+                max_attempts=max_attempts,
+                error_message=(
+                    "force_reindex_aborted: failed to delete old document index; "
+                    f"{index_cleanup.get('error') or index_cleanup.get('reason') or 'unknown_error'}"
+                ),
+                error_category="system",
+                event_type="force_cleanup_failed",
+            )
+            return task, "failed"
+
     task = existing_task
     for _ in range(max_attempts):
         task = db.query(FileParseTask).filter(FileParseTask.material_id == material_id).first()

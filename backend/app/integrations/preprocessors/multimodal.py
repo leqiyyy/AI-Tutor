@@ -218,9 +218,10 @@ def _extract_structured_markdown_items(
 
     items: list[dict[str, Any]] = []
     for index, table_markdown in enumerate(_extract_markdown_tables(text), start=1):
+        table_text = _markdown_table_to_fact_text(table_markdown, file_name=file_name, index=index)
         items.append({
             "type": "table",
-            "text": f"Markdown table extracted from {file_name}:\n{table_markdown}",
+            "text": table_text or f"Markdown table extracted from {file_name}:\n{table_markdown}",
             "table_markdown": table_markdown,
             "page_idx": 0,
             "metadata": {
@@ -229,6 +230,7 @@ def _extract_structured_markdown_items(
                 "source_type": "table",
                 "origin": "markdown_table",
                 "content_index": index,
+                "table_text": table_text,
             },
         })
 
@@ -282,6 +284,67 @@ def _looks_like_table_separator(line: str) -> bool:
         return False
     cells = [cell.strip() for cell in stripped.split("|")]
     return all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+
+def _markdown_table_to_fact_text(table_markdown: str, *, file_name: str, index: int) -> str:
+    rows = _parse_markdown_table(table_markdown)
+    if not rows:
+        return ""
+
+    facts = [f"文件 {file_name} 中的第 {index} 个 Markdown 表格包含以下结构化信息："]
+    for row_number, row in enumerate(rows, start=1):
+        cells = [
+            f"{header}：{value}"
+            for header, value in row.items()
+            if str(value or "").strip()
+        ]
+        if cells:
+            facts.append(f"第 {row_number} 行，" + "；".join(cells) + "。")
+    return "\n".join(facts)[:4000]
+
+
+def _parse_markdown_table(table_markdown: str) -> list[dict[str, str]]:
+    lines = [
+        line.strip()
+        for line in str(table_markdown or "").splitlines()
+        if _looks_like_table_row(line)
+    ]
+    if len(lines) < 2:
+        return []
+
+    header_index = 0
+    separator_index = next(
+        (idx for idx, line in enumerate(lines[1:], start=1) if _looks_like_table_separator(line)),
+        None,
+    )
+    if separator_index is None:
+        return []
+
+    headers = _split_markdown_table_row(lines[header_index])
+    if not headers:
+        return []
+
+    parsed_rows: list[dict[str, str]] = []
+    for line in lines[separator_index + 1:]:
+        if _looks_like_table_separator(line):
+            continue
+        values = _split_markdown_table_row(line)
+        if not any(values):
+            continue
+        row: dict[str, str] = {}
+        for cell_index, header in enumerate(headers):
+            label = header or f"第{cell_index + 1}列"
+            row[label] = values[cell_index] if cell_index < len(values) else ""
+        parsed_rows.append(row)
+    return parsed_rows
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    return [
+        re.sub(r"\s+", " ", cell).strip()
+        for cell in stripped.split("|")
+    ]
 
 
 def _extract_markdown_formulas(text: str) -> list[str]:

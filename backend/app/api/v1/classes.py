@@ -219,7 +219,7 @@ async def upload_material(
 
 
 @router.delete("/{class_id}/materials/{material_id}", response_model=None)
-def delete_material(
+async def delete_material(
     class_id: str,
     material_id: str,
     db: Session = Depends(get_db),
@@ -231,9 +231,24 @@ def delete_material(
     ).first()
     if not material:
         raise NotFoundException("Material not found")
+    graph_cleanup = kb_service.remove_material_graph_contributions(
+        db,
+        class_id=class_id,
+        material_id=material.id,
+        commit=False,
+    )
+    index_cleanup = await kb_service.delete_material_index_artifacts(
+        class_id=class_id,
+        material_id=material.id,
+    )
     material.is_active = False
+    material.kb_status = "pending"
     db.commit()
-    return ok(message="Material deleted")
+    return ok(data={
+        "material_id": material.id,
+        "graph_cleanup": graph_cleanup,
+        "index_cleanup": index_cleanup,
+    }, message="Material deleted")
 
 
 @router.get("/{class_id}/tasks", response_model=None)

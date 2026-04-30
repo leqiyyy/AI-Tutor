@@ -81,6 +81,8 @@ type BackendMessage = {
     confidence?: number;
     chunk_id?: string;
     chunkId?: string;
+    material_id?: string;
+    materialId?: string;
     snippet?: string;
     raw_text?: string;
     rawText?: string;
@@ -138,6 +140,7 @@ function normalizeSource(source: NonNullable<BackendMessage["sources"]>[number])
     relevanceScore: source.relevance_score ?? source.relevanceScore,
     confidence: source.confidence,
     chunkId: source.chunk_id ?? source.chunkId,
+    materialId: source.material_id ?? source.materialId,
     snippet: source.snippet,
     rawText: source.raw_text ?? source.rawText,
   };
@@ -316,13 +319,6 @@ export const aiService = {
       reverseSessionIdMap.set(result.session_id, localConversationId);
     }
 
-    const userMessage: AiMessage = {
-      id: Date.now(),
-      role: "user",
-      content: payload.content,
-      time: new Date().toISOString(),
-      attachments,
-    };
     const reply: AiMessage = {
       id: Math.abs(hashString(result.message_id || `${Date.now()}`)),
       role: "ai",
@@ -343,7 +339,7 @@ export const aiService = {
       title: payload.content.slice(0, 24) || "附件问答",
       createdAt: new Date().toISOString(),
       lastMessage: reply.content.slice(0, 40),
-      messages: [userMessage, reply],
+      messages: [],
     };
 
     return { conversation, reply };

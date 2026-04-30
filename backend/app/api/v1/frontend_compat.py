@@ -1,14 +1,18 @@
 from datetime import datetime, timezone
 import math
+import os
+import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.v1 import kb as kb_api
 from app.core.deps import get_current_admin, get_current_student, get_current_teacher, get_current_user
-from app.core.exceptions import ForbiddenException
+from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.response import ok
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Task
@@ -21,6 +25,63 @@ from app.services import course_service, kb_service
 router = APIRouter(tags=["frontend-compat"])
 
 COLORS = ["blue", "green", "purple", "orange", "teal", "pink", "amber"]
+GRAPH_ENTITY_LIMIT = 80
+GRAPH_ENTITY_FETCH_LIMIT = 300
+GRAPH_ROOT_EDGE_LIMIT = 24
+GRAPH_HIDDEN_ENTITY_KINDS = {
+    "material",
+    "content_item",
+    "candidate_concept_identifier",
+}
+GRAPH_HIDDEN_RELATION_KINDS = {
+    "entity_material_link",
+    "candidate_material_link",
+    "candidate_material_link_existing",
+    "material_content_link",
+}
+GRAPH_FILE_LABEL_RE = re.compile(
+    r"\.(?:txt|pdf|docx?|pptx?|xlsx?|csv|md|png|jpe?g|gif|webp|mp4|mov|avi|zip)$",
+    re.IGNORECASE,
+)
+GRAPH_UUID_RE = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+    re.IGNORECASE,
+)
+GRAPH_FILE_HASH_RE = re.compile(
+    r"(?:^|[._-])[a-f0-9]{8,}(?:$|[._-])",
+    re.IGNORECASE,
+)
+
+
+class TeacherNoticeRequest(BaseModel):
+    title: str
+    content: str
+    importance: str = "normal"
+    scope: str = "all"
+    attachments: list[str] = Field(default_factory=list)
+
+
+class TeacherHomeworkRequest(BaseModel):
+    title: str
+    deadline: Any | None = None
+    allowLate: bool = False
+    questions: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: list[str] = Field(default_factory=list)
+
+
+class TeacherExamRequest(BaseModel):
+    name: str
+    startTime: Any | None = None
+    endTime: Any | None = None
+    duration: int = 90
+    totalScore: int = 100
+    questions: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: list[str] = Field(default_factory=list)
+
+
+class TeacherTaskStatusRequest(BaseModel):
+    status: str | None = None
+    is_published: bool | None = None
 
 
 def _iso(value: Any) -> str:
@@ -33,6 +94,22 @@ def _date(value: Any) -> str:
     if isinstance(value, datetime):
         return value.date().isoformat()
     return ""
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _size_text(size: int | None) -> str:
@@ -130,6 +207,39 @@ def _notifications_for_user(db: Session, user_id: str, limit: int = 20) -> list[
     ]
 
 
+def _student_home_task_item(task: Task) -> dict:
+    deadline = task.due_date
+    now = datetime.now(deadline.tzinfo) if deadline and deadline.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
+    urgent = bool(deadline and deadline <= now.replace(hour=23, minute=59, second=59, microsecond=999999))
+    icon = "ri-file-edit-line" if task.task_type == "exam" else "ri-file-list-3-line"
+    return {
+        "title": task.title,
+        "deadline": _iso(deadline) if deadline else "未设置截止时间",
+        "urgent": urgent,
+        "icon": icon,
+    }
+
+
+def _student_home_update_item(notification: Notification) -> dict:
+    color_map = {
+        "exam": "bg-purple-50 text-purple-600",
+        "deadline": "bg-orange-50 text-orange-600",
+        "system": "bg-blue-50 text-blue-600",
+    }
+    icon_map = {
+        "exam": "ri-file-edit-line",
+        "deadline": "ri-time-line",
+        "system": "ri-notification-3-line",
+    }
+    return {
+        "type": notification.type,
+        "title": notification.title,
+        "time": _date(notification.created_at),
+        "color": color_map.get(notification.type, "bg-gray-50 text-gray-600"),
+        "icon": icon_map.get(notification.type, "ri-notification-line"),
+    }
+
+
 def _course_summary(db: Session, cls: Class) -> dict:
     course = _get_course(db, cls.course_id)
     teacher = _get_teacher(db, cls.teacher_id)
@@ -154,6 +264,113 @@ def _class_or_404_with_access(db: Session, class_id: str, user: User) -> Class:
     cls = course_service.get_class_or_404(db, class_id)
     _assert_class_access(db, cls, user)
     return cls
+
+
+def _teacher_class_or_404(db: Session, class_id: str, user: User) -> Class:
+    cls = course_service.get_class_or_404(db, class_id)
+    if user.role != "admin" and cls.teacher_id != user.id:
+        raise ForbiddenException("Only the class teacher can manage this class")
+    return cls
+
+
+def _task_status(task: Task) -> str:
+    if not task.is_published:
+        return "草稿"
+    if task.task_type == "exam":
+        start_at = _extract_exam_start_time(task.description)
+        if start_at:
+            now = datetime.now(start_at.tzinfo) if start_at.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
+            if start_at > now:
+                return "未开始"
+    if task.due_date:
+        now = datetime.now(task.due_date.tzinfo) if task.due_date.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
+        if task.due_date < now:
+            return "已结束"
+    return "进行中"
+
+
+def _extract_exam_start_time(description: str | None) -> datetime | None:
+    if not description:
+        return None
+    match = re.search(r"开始时间：([^\n]+)", description)
+    if not match:
+        return None
+    return _parse_datetime(match.group(1))
+
+
+def _publish_class_notifications(
+    db: Session,
+    class_id: str,
+    notification_type: str,
+    title: str,
+    content: str,
+    extra_data: dict[str, Any] | None = None,
+) -> int:
+    recipients = db.query(ClassMember).filter(
+        ClassMember.class_id == class_id,
+        ClassMember.role == "student",
+    ).all()
+    for recipient in recipients:
+        db.add(Notification(
+            user_id=recipient.user_id,
+            type=notification_type,
+            title=title,
+            content=content,
+            extra_data={
+                "class_id": class_id,
+                **(extra_data or {}),
+            },
+        ))
+    return len(recipients)
+
+
+def _teacher_task_item(task: Task, total: int) -> dict:
+    return {
+        "id": task.id,
+        "type": task.task_type or "homework",
+        "title": task.title,
+        "deadline": _iso(task.due_date),
+        "submitted": len(task.submissions or []),
+        "total": total,
+        "status": _task_status(task),
+        "publishDate": _date(task.created_at),
+        "attachments": [],
+        "_sortAt": _iso(task.created_at),
+    }
+
+
+def _notice_rows_for_class(db: Session, class_id: str) -> list[Notification]:
+    rows = (
+        db.query(Notification)
+        .filter(Notification.type == "system")
+        .order_by(Notification.created_at.desc())
+        .limit(500)
+        .all()
+    )
+    notices: dict[str, Notification] = {}
+    for row in rows:
+        extra = row.extra_data or {}
+        if extra.get("class_id") != class_id or extra.get("source") != "teacher_notice":
+            continue
+        notice_id = extra.get("notice_id") or row.id
+        notices.setdefault(str(notice_id), row)
+    return list(notices.values())
+
+
+def _notice_task_item(row: Notification, total: int) -> dict:
+    extra = row.extra_data or {}
+    return {
+        "id": extra.get("notice_id") or row.id,
+        "type": "notice",
+        "title": row.title,
+        "deadline": "-",
+        "submitted": total,
+        "total": total,
+        "status": "已发布",
+        "publishDate": _date(row.created_at),
+        "attachments": extra.get("attachments") or [],
+        "_sortAt": _iso(row.created_at),
+    }
 
 
 @router.get("/student/dashboard", response_model=None)
@@ -462,6 +679,106 @@ async def teacher_upload_course_files(
     return ok(data={"files": results}, message="Files uploaded")
 
 
+@router.delete("/teacher/courses/{class_id}/files/{file_id}", response_model=None)
+async def teacher_delete_course_file(
+    class_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
+    if material.class_id != cls.id:
+        raise NotFoundException("Material not found")
+    graph_cleanup = kb_service.remove_material_graph_contributions(
+        db,
+        class_id=cls.id,
+        material_id=material.id,
+        commit=False,
+    )
+    index_cleanup = await kb_service.delete_material_index_artifacts(
+        class_id=cls.id,
+        material_id=material.id,
+    )
+    material.is_active = False
+    material.kb_status = "pending"
+    db.commit()
+    return ok(data={
+        "file_id": material.id,
+        "graph_cleanup": graph_cleanup,
+        "index_cleanup": index_cleanup,
+    }, message="File deleted")
+
+
+@router.post("/teacher/courses/{class_id}/files/{file_id}/kb/retry", response_model=None)
+async def teacher_retry_course_file_index(
+    class_id: str,
+    file_id: str,
+    async_retry: bool = Query(True),
+    force: bool = Query(True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    return await kb_api.retry_file_index(
+        course_id=cls.course_id,
+        file_id=file_id,
+        force=force,
+        async_retry=async_retry,
+        db=db,
+        current_user=current_user,
+    )
+
+
+@router.post("/teacher/courses/{class_id}/kb/rebuild", response_model=None)
+def teacher_rebuild_course_kb(
+    class_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    materials = db.query(Material).filter(
+        Material.class_id == cls.id,
+        Material.is_active == True,
+    ).order_by(Material.created_at.asc()).all()
+    graph_cleanup = kb_service.clear_class_graph_contributions(
+        db,
+        class_id=cls.id,
+        commit=False,
+    )
+
+    queue_results = []
+    for material in materials:
+        parse_task = kb_service.prepare_parse_task_for_enqueue(
+            db,
+            cls=cls,
+            material=material,
+            file_hash=None,
+            force=True,
+        )
+        queue_info = kb_service.enqueue_parse_task(
+            db,
+            parse_task=parse_task,
+            force=True,
+        )
+        queue_results.append({
+            "file_id": material.id,
+            "task_id": parse_task.id,
+            "queue_task_id": queue_info.get("queue_task_id"),
+            "queue_status": queue_info.get("queue_status"),
+        })
+
+    if not materials:
+        db.commit()
+
+    return ok(data={
+        "class_id": cls.id,
+        "queued_count": len(queue_results),
+        "files": queue_results,
+        "graph_cleanup": graph_cleanup,
+    }, message="Course knowledge base rebuild queued")
+
+
 @router.get("/teacher/courses/{class_id}/materials/{file_id}/analysis", response_model=None)
 def teacher_course_material_analysis(
     class_id: str,
@@ -552,24 +869,227 @@ def teacher_course_tasks(
     current_user: User = Depends(get_current_teacher),
 ):
     _class_or_404_with_access(db, class_id, current_user)
-    tasks = course_service.list_tasks(db, class_id, published_only=False)
     total = _student_count(db, class_id)
+    task_rows = db.query(Task).filter(Task.class_id == class_id).all()
+    items = [_teacher_task_item(task, total) for task in task_rows]
+    items.extend(_notice_task_item(row, total) for row in _notice_rows_for_class(db, class_id))
+    items.sort(key=lambda item: item.pop("_sortAt", ""), reverse=True)
     return ok(data={
-        "tasks": [
-            {
-                "id": item["id"],
-                "type": item.get("task_type") or "homework",
-                "title": item["title"],
-                "deadline": _iso(item.get("due_date")),
-                "submitted": item.get("submission_count") or 0,
-                "total": total,
-                "status": "已发布" if item.get("is_published") else "草稿",
-                "publishDate": _date(item.get("created_at")),
-                "attachments": [],
-            }
-            for item in tasks
-        ]
+        "tasks": items
     })
+
+
+@router.get("/teacher/courses/{class_id}/tasks/{task_id}", response_model=None)
+def teacher_course_task_detail(
+    class_id: str,
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _teacher_class_or_404(db, class_id, current_user)
+    total = _student_count(db, class_id)
+    task = db.query(Task).filter(Task.id == task_id, Task.class_id == class_id).first()
+    if task:
+        item = _teacher_task_item(task, total)
+        item.pop("_sortAt", None)
+        scores = [submission.score for submission in task.submissions if submission.score is not None]
+        return ok(data={
+            **item,
+            "description": task.description or "",
+            "requirements": [],
+            "participantCount": total,
+            "averageScore": round(sum(scores) / len(scores), 1) if scores else 0,
+            "highestScore": max(scores) if scores else 0,
+            "lowestScore": min(scores) if scores else 0,
+            "submissions": [
+                {
+                    "id": submission.id,
+                    "studentName": submission.student.real_name if submission.student else "",
+                    "studentId": submission.student.student_id if submission.student else "",
+                    "groupName": "未分组",
+                    "status": "graded" if submission.score is not None else "submitted",
+                    "submittedAt": _iso(submission.submitted_at),
+                    "score": submission.score,
+                }
+                for submission in task.submissions
+            ],
+        })
+
+    notice = next(
+        (row for row in _notice_rows_for_class(db, class_id)
+         if str((row.extra_data or {}).get("notice_id") or row.id) == str(task_id)),
+        None,
+    )
+    if not notice:
+        raise NotFoundException("Task not found")
+    item = _notice_task_item(notice, total)
+    item.pop("_sortAt", None)
+    return ok(data={
+        **item,
+        "description": notice.content,
+        "requirements": [],
+        "participantCount": total,
+        "submissions": [],
+    })
+
+
+@router.patch("/teacher/courses/{class_id}/tasks/{task_id}/status", response_model=None)
+def teacher_course_task_status(
+    class_id: str,
+    task_id: str,
+    body: TeacherTaskStatusRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _teacher_class_or_404(db, class_id, current_user)
+    task = db.query(Task).filter(Task.id == task_id, Task.class_id == class_id).first()
+    if not task:
+        raise NotFoundException("Task not found")
+    if body.is_published is not None:
+        task.is_published = body.is_published
+    elif body.status:
+        task.is_published = body.status in {"已发布", "进行中", "未开始"}
+    else:
+        task.is_published = not task.is_published
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return ok(data={"id": task.id, "is_published": task.is_published, "status": _task_status(task)})
+
+
+@router.post("/teacher/courses/{class_id}/notices", response_model=None)
+def teacher_publish_notice(
+    class_id: str,
+    body: TeacherNoticeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _teacher_class_or_404(db, class_id, current_user)
+    notice_id = str(uuid.uuid4())
+    cls.announcement = f"{body.title}\n{body.content}".strip()
+    cls.updated_at = datetime.now(timezone.utc)
+    notice_extra = {
+        "source": "teacher_notice",
+        "notice_id": notice_id,
+        "importance": body.importance,
+        "scope": body.scope,
+        "attachments": body.attachments,
+    }
+    recipient_count = _publish_class_notifications(
+        db,
+        class_id=class_id,
+        notification_type="system",
+        title=body.title,
+        content=body.content,
+        extra_data=notice_extra,
+    )
+    db.add(Notification(
+        user_id=current_user.id,
+        type="system",
+        title=body.title,
+        content=body.content,
+        extra_data={
+            "class_id": class_id,
+            **notice_extra,
+        },
+    ))
+    db.commit()
+    return ok(data={
+        "id": notice_id,
+        "title": body.title,
+        "recipientCount": recipient_count,
+    }, message="Notice published")
+
+
+@router.post("/teacher/courses/{class_id}/homeworks", response_model=None)
+def teacher_create_homework(
+    class_id: str,
+    body: TeacherHomeworkRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _teacher_class_or_404(db, class_id, current_user)
+    question_text = "\n".join(
+        f"{index}. {question.get('description', '')}".strip()
+        for index, question in enumerate(body.questions, start=1)
+        if question.get("description")
+    )
+    task = Task(
+        class_id=class_id,
+        created_by=current_user.id,
+        title=body.title,
+        description=question_text,
+        task_type="homework",
+        due_date=_parse_datetime(body.deadline),
+        max_score=100,
+        is_published=True,
+    )
+    db.add(task)
+    db.flush()
+    _publish_class_notifications(
+        db,
+        class_id=class_id,
+        notification_type="deadline",
+        title=f"新作业：{body.title}",
+        content=f"作业已发布，请在截止时间前完成。截止时间：{body.deadline or '未设置'}",
+        extra_data={
+            "source": "teacher_homework",
+            "task_id": task.id,
+            "allow_late": body.allowLate,
+            "attachments": body.attachments,
+        },
+    )
+    db.commit()
+    db.refresh(task)
+    return ok(data={"id": task.id, "title": task.title}, message="Homework created")
+
+
+@router.post("/teacher/courses/{class_id}/exams", response_model=None)
+def teacher_create_exam(
+    class_id: str,
+    body: TeacherExamRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _teacher_class_or_404(db, class_id, current_user)
+    question_text = "\n".join(
+        f"{index}. [{question.get('type', '题目')}] {question.get('content', '')}".strip()
+        for index, question in enumerate(body.questions, start=1)
+        if question.get("content")
+    )
+    description = (
+        f"开始时间：{body.startTime or '未设置'}\n"
+        f"结束时间：{body.endTime or '未设置'}\n"
+        f"考试时长：{body.duration} 分钟\n\n"
+        f"{question_text}"
+    ).strip()
+    task = Task(
+        class_id=class_id,
+        created_by=current_user.id,
+        title=body.name,
+        description=description,
+        task_type="exam",
+        due_date=_parse_datetime(body.endTime),
+        max_score=body.totalScore,
+        is_published=True,
+    )
+    db.add(task)
+    db.flush()
+    _publish_class_notifications(
+        db,
+        class_id=class_id,
+        notification_type="exam",
+        title=f"新考试：{body.name}",
+        content=f"考试已发布。开始时间：{body.startTime or '未设置'}，结束时间：{body.endTime or '未设置'}。",
+        extra_data={
+            "source": "teacher_exam",
+            "task_id": task.id,
+            "duration": body.duration,
+            "attachments": body.attachments,
+        },
+    )
+    db.commit()
+    db.refresh(task)
+    return ok(data={"id": task.id, "title": task.title}, message="Exam created")
 
 
 @router.get("/student/courses/{class_id}/home", response_model=None)
@@ -579,6 +1099,24 @@ def student_course_home(
     current_user: User = Depends(get_current_student),
 ):
     cls = _class_or_404_with_access(db, class_id, current_user)
+    tasks = (
+        db.query(Task)
+        .filter(Task.class_id == class_id, Task.is_published == True)
+        .order_by(Task.due_date.asc().nullslast(), Task.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    notifications = (
+        db.query(Notification)
+        .filter(Notification.user_id == current_user.id)
+        .order_by(Notification.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    class_notifications = [
+        item for item in notifications
+        if (item.extra_data or {}).get("class_id") == class_id
+    ][:5]
     return ok(data={
         "welcome": {
             "studentName": current_user.real_name,
@@ -598,8 +1136,8 @@ def student_course_home(
             "important": False,
             "tag": "公告",
         }] if cls.announcement else [],
-        "upcomingTasks": [],
-        "todayUpdates": [],
+        "upcomingTasks": [_student_home_task_item(task) for task in tasks],
+        "todayUpdates": [_student_home_update_item(item) for item in class_notifications],
         "classActivities": [],
         "milestones": [],
         "progress": {
@@ -652,17 +1190,125 @@ def teacher_course_knowledge_graph(
     return _knowledge_graph_payload(db, cls)
 
 
+def _graph_source_kind(value: dict[str, Any] | None) -> str:
+    return str((value or {}).get("kind") or "").strip().lower()
+
+
+def _looks_like_graph_noise_label(label: str | None) -> bool:
+    normalized = str(label or "").strip()
+    if not normalized:
+        return True
+
+    normalized_key = re.sub(r"[\s_-]+", "_", normalized.lower())
+    if normalized_key in {"unknown", "unknown_entity", "none", "null", "undefined"}:
+        return True
+
+    basename = os.path.basename(normalized)
+    if GRAPH_FILE_LABEL_RE.search(basename):
+        return True
+    if GRAPH_UUID_RE.fullmatch(normalized):
+        return True
+    if GRAPH_FILE_HASH_RE.search(normalized):
+        return True
+    if re.fullmatch(r"[a-f0-9]{12,}", normalized, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r"[A-Za-z0-9_-]{16,}", normalized) and any(char.isdigit() for char in normalized):
+        return True
+    if "/" in normalized or "\\" in normalized:
+        return True
+    return False
+
+
+def _is_default_graph_entity(entity: KnowledgeEntity) -> bool:
+    kind = _graph_source_kind(entity.source_span)
+    entity_type = str(entity.entity_type or "").strip().lower()
+
+    if kind in GRAPH_HIDDEN_ENTITY_KINDS or entity_type == "material":
+        return False
+    if _looks_like_graph_noise_label(entity.name):
+        return False
+    if kind.startswith("candidate_") and float(entity.confidence or 0.0) < 0.7:
+        return False
+    return True
+
+
+def _graph_node_color(entity_type: str | None) -> str:
+    type_colors = {
+        "algorithm": "#7c3aed",
+        "formula": "#dc2626",
+        "table": "#059669",
+        "image": "#ea580c",
+        "concept": "#0891b2",
+        "conception": "#0891b2",
+        "category": "#0f766e",
+        "candidate_concept": "#0f766e",
+    }
+    return type_colors.get((entity_type or "").lower(), "#475569")
+
+
+def _build_graph_positions(entities: list[KnowledgeEntity]) -> dict[str, tuple[float, float]]:
+    positions: dict[str, tuple[float, float]] = {}
+    for index, entity in enumerate(entities, start=1):
+        angle = (2 * math.pi * index) / max(len(entities), 1)
+        radius = 220 + 36 * (index % 4)
+        positions[entity.id] = (round(math.cos(angle) * radius, 2), round(math.sin(angle) * radius, 2))
+    return positions
+
+
+def _graph_record_material_ids(record: Any) -> set[str]:
+    material_ids: set[str] = set()
+    provenance = getattr(record, "provenance", None)
+    if isinstance(provenance, dict):
+        raw_ids = provenance.get("source_material_ids") or provenance.get("material_ids") or []
+        if not isinstance(raw_ids, list):
+            raw_ids = [raw_ids]
+        material_ids.update(str(item) for item in raw_ids if item)
+
+    source_span = getattr(record, "source_span", None)
+    if isinstance(source_span, dict):
+        for key in ("material_id", "source_material_id", "doc_id", "full_doc_id"):
+            value = source_span.get(key)
+            if value:
+                material_ids.add(str(value))
+
+    source_material_id = getattr(record, "source_material_id", None)
+    if source_material_id:
+        material_ids.add(str(source_material_id))
+    return material_ids
+
+
+def _graph_record_has_active_material(record: Any, active_material_ids: set[str]) -> bool:
+    material_ids = _graph_record_material_ids(record)
+    return bool(material_ids & active_material_ids)
+
+
 def _knowledge_graph_payload(db: Session, cls: Class):
     course = _get_course(db, cls.course_id)
     root_id = cls.course_id
-    entities = (
+    active_material_ids = {
+        str(row[0])
+        for row in db.query(Material.id).filter(
+            Material.class_id == cls.id,
+            Material.is_active == True,
+        ).all()
+        if row[0]
+    }
+    raw_entities = (
         db.query(KnowledgeEntity)
         .filter(KnowledgeEntity.class_id == cls.id)
         .filter(KnowledgeEntity.status != "rejected")
         .order_by(KnowledgeEntity.confidence.desc(), KnowledgeEntity.created_at.desc())
-        .limit(80)
+        .limit(GRAPH_ENTITY_FETCH_LIMIT)
         .all()
     )
+    active_raw_entities = [
+        entity for entity in raw_entities
+        if _graph_record_has_active_material(entity, active_material_ids)
+    ]
+    entities = [
+        entity for entity in active_raw_entities
+        if _is_default_graph_entity(entity)
+    ][:GRAPH_ENTITY_LIMIT]
     entity_ids = {entity.id for entity in entities}
     relations = (
         db.query(KnowledgeRelation)
@@ -675,21 +1321,26 @@ def _knowledge_graph_payload(db: Session, cls: Class):
         if entity_ids
         else []
     )
-
-    preferred_kinds = {"material", "raganything_entity", "raganything_relation", "content_item", "entity_material_link"}
-    has_explicit_entities = any((entity.source_span or {}).get("kind") == "raganything_entity" for entity in entities)
-    if has_explicit_entities:
-        entities = [
-            entity for entity in entities
-            if (entity.source_span or {}).get("kind") in preferred_kinds
-        ]
-        entity_ids = {entity.id for entity in entities}
-        relations = [
-            relation for relation in relations
-            if relation.source_id in entity_ids
-            and relation.target_id in entity_ids
-            and (relation.source_span or {}).get("kind") in preferred_kinds
-        ]
+    relations = [
+        relation for relation in relations
+        if _graph_source_kind(relation.source_span) not in GRAPH_HIDDEN_RELATION_KINDS
+        and _graph_record_has_active_material(relation, active_material_ids)
+    ]
+    connected_entity_ids = {
+        relation.source_id
+        for relation in relations
+    } | {
+        relation.target_id
+        for relation in relations
+    }
+    root_entity_ids = connected_entity_ids or {
+        entity.id for entity in sorted(
+            entities,
+            key=lambda item: (float(item.confidence or 0.0), str(item.created_at or "")),
+            reverse=True,
+        )[:GRAPH_ROOT_EDGE_LIMIT]
+    }
+    positions = _build_graph_positions(entities)
 
     nodes = [
         {
@@ -703,25 +1354,14 @@ def _knowledge_graph_payload(db: Session, cls: Class):
             "expandable": True,
         }
     ]
-    type_colors = {
-        "material": "#64748b",
-        "algorithm": "#7c3aed",
-        "formula": "#dc2626",
-        "table": "#059669",
-        "image": "#ea580c",
-        "concept": "#0891b2",
-        "conception": "#0891b2",
-        "category": "#0f766e",
-    }
-    for index, entity in enumerate(entities, start=1):
-        angle = (2 * math.pi * index) / max(len(entities), 1)
-        radius = 180 + 30 * (index % 3)
+    for entity in entities:
+        x, y = positions.get(entity.id, (0, 0))
         nodes.append({
             "id": entity.id,
             "label": entity.name,
-            "x": round(math.cos(angle) * radius, 2),
-            "y": round(math.sin(angle) * radius, 2),
-            "color": type_colors.get((entity.entity_type or "").lower(), "#475569"),
+            "x": x,
+            "y": y,
+            "color": _graph_node_color(entity.entity_type),
             "type": entity.entity_type or "concept",
             "description": entity.description or "",
             "confidence": entity.confidence,
@@ -735,11 +1375,11 @@ def _knowledge_graph_payload(db: Session, cls: Class):
             "id": f"{root_id}->{entity.id}",
             "source": root_id,
             "target": entity.id,
-            "label": "includes",
+            "label": "concept",
             "weight": 0.3,
         }
         for entity in entities
-        if (entity.source_span or {}).get("kind") == "material"
+        if entity.id in root_entity_ids
     ]
     edges.extend([
         {
@@ -763,7 +1403,11 @@ def _knowledge_graph_payload(db: Session, cls: Class):
             "layout": "force",
             "entityCount": len(entities),
             "relationCount": len(relations),
+            "rawEntityCount": len(raw_entities),
+            "activeRawEntityCount": len(active_raw_entities),
+            "filteredEntityCount": max(0, len(raw_entities) - len(entities)),
             "source": "knowledge_entities",
+            "defaultView": "concept_graph",
         },
     })
 

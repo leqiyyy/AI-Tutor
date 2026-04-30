@@ -36,6 +36,29 @@ EN_STOPWORDS = {
 # Keep ASCII defaults for deterministic behavior across mixed file encodings.
 ZH_STOPWORDS: set[str] = set()
 
+COURSE_DOMAIN_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("链路层", "数据链路层"),
+        ("数据链路层", "链路层", "成帧", "差错控制", "流量控制", "媒体访问控制", "MAC", "CRC", "CSMA/CD"),
+    ),
+    (
+        ("协议层", "分层模型", "层次模型", "OSI", "TCP/IP模型", "TCP/IP五层", "协议栈"),
+        ("网络分层", "协议层", "协议栈", "OSI模型", "TCP/IP模型", "五层模型", "应用层", "传输层", "网络层", "数据链路层", "物理层", "封装"),
+    ),
+    (
+        ("网络层", "IP层"),
+        ("网络层", "IP", "路由选择", "转发", "寻址", "ICMP"),
+    ),
+    (
+        ("传输层", "TCP", "UDP"),
+        ("传输层", "TCP", "UDP", "可靠传输", "流量控制", "拥塞控制", "端到端"),
+    ),
+    (
+        ("应用层", "HTTP", "DNS"),
+        ("应用层", "HTTP", "DNS", "SMTP", "FTP", "客户服务器", "进程通信"),
+    ),
+)
+
 
 def build_query_rewrite_bundle(
     *,
@@ -80,14 +103,30 @@ def _generate_variants(question: str, mode: str) -> list[str]:
     filtered_terms = _filtered_terms(question)
     outputs: list[str] = []
 
+    domain_query = " ".join(_domain_expansion_terms(question, limit=20)).strip()
     compact_query = " ".join(filtered_terms[:12]).strip()
     keyword_query = " ".join(_keyword_terms(filtered_terms, limit=6)).strip()
 
+    if domain_query:
+        outputs.append(domain_query)
     if mode in {"hybrid", "compact"} and compact_query:
         outputs.append(compact_query)
     if mode in {"hybrid", "keywords"} and keyword_query:
         outputs.append(keyword_query)
     return outputs
+
+
+def _domain_expansion_terms(question: str, limit: int) -> list[str]:
+    text = question or ""
+    terms: list[str] = []
+    for triggers, expansions in COURSE_DOMAIN_EXPANSIONS:
+        if not any(trigger and trigger in text for trigger in triggers):
+            continue
+        for term in expansions:
+            _append_unique(terms, term)
+            if len(terms) >= limit:
+                return terms
+    return terms
 
 
 def _filtered_terms(question: str) -> list[str]:

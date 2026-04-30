@@ -153,6 +153,72 @@ def test_raganything_query_uses_mode_for_kwargs_methods(monkeypatch):
     assert "query_mode" not in fake.kwargs
 
 
+def test_lightrag_reference_query_modes_include_global_for_mix():
+    adapter = RAGAnythingAdapter()
+
+    assert adapter._lightrag_reference_query_modes("mix") == [
+        "hybrid",
+        "global",
+        "local",
+        "naive",
+    ]
+
+
+def test_llm_history_messages_normalize_ai_role_for_model_apis():
+    adapter = RAGAnythingAdapter()
+
+    normalized = adapter._normalize_llm_history_messages([
+        {"role": "user", "content": "链路层是什么？"},
+        {"role": "ai", "content": "链路层负责相邻节点间的数据传输。"},
+        {"role": "system", "content": ""},
+    ])
+
+    assert normalized == [
+        {"role": "user", "content": "链路层是什么？"},
+        {"role": "assistant", "content": "链路层负责相邻节点间的数据传输。"},
+    ]
+
+
+def test_llm_history_messages_skip_garbled_assistant_answers():
+    adapter = RAGAnythingAdapter()
+
+    normalized = adapter._normalize_llm_history_messages([
+        {"role": "user", "content": "链路层和协议层的关系是什么？"},
+        {
+            "role": "ai",
+            "content": (
+                "关键词 词汇表 内容提由文字 协议里关键词二 关键词查看代码 "
+                "\\修 \\修 \\修 \\修 \\修 \\修 \\修 \\修 \\修 \\修"
+            ),
+        },
+        {"role": "user", "content": "传输层呢？"},
+    ])
+
+    assert normalized == [
+        {"role": "user", "content": "链路层和协议层的关系是什么？"},
+        {"role": "user", "content": "传输层呢？"},
+    ]
+
+
+def test_answer_repair_detects_lightrag_keyword_gibberish():
+    adapter = RAGAnythingAdapter()
+
+    assert adapter._answer_needs_repair(
+        "关键词 词汇表 内容提由文字 协议里关键词二 关键词查看代码 "
+        "\\修 \\修 \\修 \\修 \\修 \\修 \\修 \\修 \\修 \\修"
+    )
+
+
+def test_answer_generation_prompt_recognizes_lightrag_rag_prompt():
+    adapter = RAGAnythingAdapter()
+
+    assert adapter._is_answer_generation_prompt(
+        "User Query: 链路层的功能是什么\nReference Document List: [1] note.md",
+        "You answer by only using the information within the provided Context.",
+        False,
+    )
+
+
 def test_raganything_main_chain_sources_can_be_reranked(monkeypatch):
     reset_reranker_cache()
     monkeypatch.setattr(settings, "RERANKER_PROVIDER", "mock")
@@ -195,6 +261,57 @@ def test_raganything_main_chain_sources_can_be_reranked(monkeypatch):
     assert result.meta["reranker_provider"] == "mock"
     assert result.meta["reranked_main_chain_sources"] is True
     assert result.sources[0]["chunk_id"] == "tcp"
+    reset_reranker_cache()
+
+
+def test_raganything_main_chain_sources_are_limited_to_answer_top_k(monkeypatch):
+    reset_reranker_cache()
+    monkeypatch.setattr(settings, "RERANKER_PROVIDER", "mock")
+    monkeypatch.setattr(settings, "RAG_ANSWER_TOP_K", 1)
+    adapter = _build_adapter_with_db_free_mocks(monkeypatch)
+
+    class FakeRag:
+        async def aquery(self, query, mode=None):
+            return {
+                "answer": "Use slow start to grow cwnd until ssthresh.",
+                "sources": [
+                    {
+                        "name": "queueing.md",
+                        "score": 0.5,
+                        "chunk_id": "queue",
+                        "content": "Queue management and packet scheduling.",
+                    },
+                    {
+                        "name": "tcp.md",
+                        "score": 0.55,
+                        "chunk_id": "tcp",
+                        "content": "TCP slow start grows the congestion window each RTT.",
+                    },
+                    {
+                        "name": "routing.md",
+                        "score": 0.4,
+                        "chunk_id": "routing",
+                        "content": "Routing protocols exchange reachability information.",
+                    },
+                ],
+                "confidence": 0.7,
+            }
+
+    monkeypatch.setattr(adapter, "_get_instance", lambda class_id: FakeRag())
+
+    result = asyncio.run(
+        adapter.query(
+            question="Explain TCP slow start",
+            class_id="class-demo",
+            history=[],
+            attachments=[],
+        )
+    )
+
+    assert [source["chunk_id"] for source in result.sources] == ["tcp"]
+    assert result.meta["candidate_count"] == 3
+    assert result.meta["selected_count"] == 1
+    assert result.meta["source_top_k"] == 1
     reset_reranker_cache()
 
 

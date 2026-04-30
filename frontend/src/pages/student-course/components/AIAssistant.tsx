@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
+import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
 import { aiService } from '@/services/ai';
 import type {
   AiAttachment as AttachedFile,
@@ -97,22 +98,6 @@ function getSourceIconClass(type: string) {
   if (type === 'ppt' || type === 'pptx') return 'ri-file-ppt-line text-orange-500';
   if (type === 'image') return 'ri-image-line text-green-600';
   return 'ri-file-text-line text-teal-600';
-}
-
-function getSourceScore(source: AiMessageSource) {
-  return source.score ?? source.rerankScore ?? source.relevanceScore ?? source.confidence ?? null;
-}
-
-function formatSourceScore(source: AiMessageSource) {
-  const value = getSourceScore(source);
-  if (value === null || Number.isNaN(value)) return null;
-  const percent = value > 1 ? value : value * 100;
-  return `${Math.round(percent)}%`;
-}
-
-function getSourceSnippet(source: AiMessageSource) {
-  const text = (source.snippet || source.rawText || '').replace(/\s+/g, ' ').trim();
-  return text.length > 180 ? `${text.slice(0, 180)}...` : text;
 }
 
 export default function AIAssistant() {
@@ -691,14 +676,18 @@ export default function AIAssistant() {
                   {/* 引用来源标签 */}
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
-                      {msg.sources.map((s, i) => (
-                        <span key={i} className="flex items-center gap-1 px-2 py-0.5 bg-teal-50 border border-teal-100 rounded-full text-xs text-teal-700 cursor-pointer hover:bg-teal-100 transition-colors">
-                          <i className={`text-sm ${getSourceIconClass(s.type)}`}></i>
-                          {s.name.length > 14 ? s.name.slice(0, 14) + '…' : s.name}
-                          {s.page > 0 && ` · P${s.page}`}
-                          {formatSourceScore(s) && ` · ${formatSourceScore(s)}`}
+                      {summarizeSourcesByFile(msg.sources).slice(0, 4).map(source => (
+                        <span key={source.key} className="flex items-center gap-1 px-2 py-0.5 bg-teal-50 border border-teal-100 rounded-full text-xs text-teal-700 cursor-pointer hover:bg-teal-100 transition-colors">
+                          <i className={`text-sm ${getSourceIconClass(source.type)}`}></i>
+                          {compactSourceFileName(source.name, 14)}
+                          {formatSourceFilePages(source.pages) && ` · ${formatSourceFilePages(source.pages)}`}
                         </span>
                       ))}
+                      {summarizeSourcesByFile(msg.sources).length > 4 && (
+                        <span className="px-2 py-0.5 rounded-full border border-teal-100 bg-teal-50 text-xs text-teal-700">
+                          +{summarizeSourcesByFile(msg.sources).length - 4} 个文件
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -1034,23 +1023,17 @@ export default function AIAssistant() {
                   </div>
                 ) : (
                   <div className={isRightPanelWide ? 'grid grid-cols-1 gap-3 xl:grid-cols-2' : 'space-y-2'}>
-                    {currentSources.map((s, i) => (
-                      <div key={i} className="flex min-w-0 items-start gap-2.5 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50 cursor-pointer">
+                    {summarizeSourcesByFile(currentSources).map(source => (
+                      <div key={source.key} className="flex min-w-0 items-start gap-2.5 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50 cursor-pointer">
                         <div className="w-8 h-8 flex items-center justify-center flex-shrink-0">
-                          <i className={`text-xl ${getSourceIconClass(s.type)}`}></i>
+                          <i className={`text-xl ${getSourceIconClass(source.type)}`}></i>
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="break-words text-xs font-medium leading-snug text-gray-800">{s.name}</div>
+                          <div className="break-words text-xs font-medium leading-snug text-gray-800">{source.name}</div>
                           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                            {s.page > 0 && <span className="text-teal-600">第 {s.page} 页</span>}
-                            {formatSourceScore(s) && <span className="text-gray-500">相关度 {formatSourceScore(s)}</span>}
-                            {s.chunkId && <span className="max-w-full truncate text-gray-400">Chunk {s.chunkId}</span>}
+                            {formatSourceFilePages(source.pages) && <span className="text-teal-600">{formatSourceFilePages(source.pages)}</span>}
+                            <span className="text-gray-500">引用 {source.count} 处</span>
                           </div>
-                          {getSourceSnippet(s) && (
-                            <div className="mt-2 line-clamp-3 text-xs leading-relaxed text-gray-600">
-                              {getSourceSnippet(s)}
-                            </div>
-                          )}
                         </div>
                       </div>
                     ))}

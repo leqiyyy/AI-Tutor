@@ -14,6 +14,7 @@ export interface AiMessageSource {
   relevanceScore?: number;
   confidence?: number;
   chunkId?: string;
+  materialId?: string;
   snippet?: string;
   rawText?: string;
 }

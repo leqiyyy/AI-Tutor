@@ -30,6 +30,25 @@ def test_conversation_followup_rewrite_uses_last_user_anchor():
     assert "第二点" in rewritten
 
 
+def test_complete_short_question_is_not_rewritten_as_followup():
+    history = [
+        {"role": "user", "content": "计算机网络里成帧是属于哪一层的任务"},
+        {"role": "ai", "content": "成帧属于链路层的任务。"},
+    ]
+
+    question = "链路层和协议层的关系是什么"
+    intent = classify_context_intent(history, question)
+    rewritten = rewrite_standalone_question(
+        history=history,
+        summary="",
+        question=question,
+        intent=intent,
+    )
+
+    assert intent == "new_topic"
+    assert rewritten == question
+
+
 def test_recommendation_ranker_prefers_mastery_gap_and_relevance():
     ranked = rank_candidates([
         RecommendationCandidate(
@@ -86,4 +105,3 @@ def test_learning_graph_projection_normalizes_relation_types():
 
     assert concepts[0].importance == 0.8
     assert relations[0].relation_type == "prerequisite"
-

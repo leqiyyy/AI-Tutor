@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.database import SessionLocal
-from app.models.course import Material
-from app.models.knowledge import FileParseTask
+from app.models.course import Class, Material
+from app.models.knowledge import FileParseTask, KnowledgeEntity, KnowledgeRelation
 from app.services import kb_service
 
 
@@ -492,7 +492,8 @@ def test_content_items_multimodal_mapping_v1():
 def test_graph_provenance_updates_on_incremental_ingest(client, teacher_headers):
     course_id = client.get("/api/v1/courses", headers=teacher_headers).json()["data"][0]["id"]
     marker = uuid.uuid4().hex[:8]
-    token = f"qosalpha{marker}"
+    letter_marker = "".join(chr(ord("a") + int(char, 16)) for char in marker)
+    token = f"qosalpha{letter_marker}"
     payload1 = f"{token} appears in the first file with congestion notes.".encode("utf-8")
     payload2 = f"{token} appears again in the second file with queue notes.".encode("utf-8")
 
@@ -538,3 +539,83 @@ def test_graph_provenance_updates_on_incremental_ingest(client, teacher_headers)
         edge = graph_data["edges"][0]
         assert "confidence" in edge
         assert "provenance" in edge
+
+
+def test_frontend_knowledge_graph_hides_material_and_noise_nodes(client, teacher_headers):
+    course_id = client.get("/api/v1/courses", headers=teacher_headers).json()["data"][0]["id"]
+    class_id = _create_temp_class(client, teacher_headers, course_id)
+    material_id = str(uuid.uuid4())
+    concept_id = str(uuid.uuid4())
+    noise_id = str(uuid.uuid4())
+
+    with SessionLocal() as db:
+        cls = db.query(Class).filter_by(id=class_id).first()
+        assert cls is not None
+        db.add(Material(
+            id=material_id,
+            class_id=class_id,
+            uploaded_by=cls.teacher_id,
+            title="TCP Notes",
+            file_name="tcp_notes_705e220aa.txt",
+            file_path="/tmp/tcp_notes_705e220aa.txt",
+            mime_type="text/plain",
+            file_type="txt",
+            file_size=128,
+            kb_status="indexed",
+        ))
+        material = KnowledgeEntity(
+            id=str(uuid.uuid4()),
+            class_id=class_id,
+            name="tcp_notes_705e220aa.txt",
+            entity_type="material",
+            source_material_id=material_id,
+            confidence=0.95,
+            source_span={"kind": "material"},
+            provenance={"source_material_ids": [material_id]},
+            status="approved",
+        )
+        concept = KnowledgeEntity(
+            id=concept_id,
+            class_id=class_id,
+            name="拥塞控制",
+            entity_type="concept",
+            description="控制网络拥塞的机制",
+            source_material_id=material_id,
+            confidence=0.9,
+            source_span={"kind": "raganything_entity"},
+            provenance={"source_material_ids": [material_id]},
+            status="approved",
+        )
+        noise = KnowledgeEntity(
+            id=noise_id,
+            class_id=class_id,
+            name="schema_705e220aa.txt",
+            entity_type="candidate_concept",
+            source_material_id=material_id,
+            confidence=0.82,
+            source_span={"kind": "candidate_concept", "keyword": "schema_705e220aa.txt"},
+            provenance={"source_material_ids": [material_id]},
+            status="approved",
+        )
+        db.add_all([material, concept, noise])
+        db.flush()
+        db.add(KnowledgeRelation(
+            class_id=class_id,
+            source_id=concept.id,
+            target_id=material.id,
+            relation_type="appears_in",
+            confidence=0.8,
+            source_span={"kind": "entity_material_link"},
+            provenance={"source_material_ids": [material_id]},
+        ))
+        db.commit()
+
+    graph = client.get(f"/api/v1/teacher/courses/{class_id}/knowledge-graph", headers=teacher_headers)
+    assert graph.status_code == 200
+    graph_data = graph.json()["data"]
+    labels = {node["label"] for node in graph_data["nodes"]}
+    assert "拥塞控制" in labels
+    assert "tcp_notes_705e220aa.txt" not in labels
+    assert "schema_705e220aa.txt" not in labels
+    assert graph_data["meta"]["defaultView"] == "concept_graph"
+    assert graph_data["meta"]["filteredEntityCount"] >= 2
