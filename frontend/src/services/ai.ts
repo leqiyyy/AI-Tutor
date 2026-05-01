@@ -534,12 +534,12 @@ export const aiService = {
       return;
     }
 
-    await http<void>(
-      `${conversationBasePath(role)}/conversations/${conversationId}`,
-      {
-        method: "DELETE",
-      },
-    );
+    void role;
+    const backendId = sessionIdMap.get(conversationId);
+    if (!backendId) return;
+    await http<void>(`/chat/sessions/${backendId}`, { method: "DELETE" });
+    sessionIdMap.delete(conversationId);
+    reverseSessionIdMap.delete(backendId);
   },
 
   async sendMessage(

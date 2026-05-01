@@ -217,6 +217,16 @@ def get_messages(
     return ok(data=data)
 
 
+@router.delete("/sessions/{session_id}", response_model=None)
+def delete_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    data = chat_service.delete_session(db, session_id, current_user.id)
+    return ok(data=data, message="Conversation deleted")
+
+
 @router.post("/send", response_model=None)
 async def send_message(
     body: SendMessageRequest,

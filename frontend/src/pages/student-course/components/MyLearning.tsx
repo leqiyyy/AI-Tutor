@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { learningService } from '@/services/learning';
-import type { LearningOverviewData } from '@/types/learning';
+import type { LearningOverviewData, LearningReportData } from '@/types/learning';
 
 interface WordItem {
   word: string;
@@ -23,6 +23,12 @@ const EMPTY_LEARNING_OVERVIEW: LearningOverviewData = {
 };
 
 const PALETTE = ['#0d9488', '#0891b2', '#0284c7', '#059669', '#7c3aed', '#be123c', '#d97706', '#16a34a'];
+const REPORT_CARD_CLASSES: Record<string, { box: string; value: string }> = {
+  teal: { box: 'bg-teal-50 border-teal-100', value: 'text-teal-600' },
+  green: { box: 'bg-green-50 border-green-100', value: 'text-green-600' },
+  sky: { box: 'bg-sky-50 border-sky-100', value: 'text-sky-600' },
+  violet: { box: 'bg-violet-50 border-violet-100', value: 'text-violet-600' },
+};
 
 function hexPoints(cx: number, cy: number, r: number, n: number): [number, number][] {
   return Array.from({ length: n }, (_, i) => {
@@ -118,7 +124,11 @@ export default function MyLearning({ courseId }: MyLearningProps) {
   const [showMonthlyModal, setShowMonthlyModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState('csv');
+  const [exportPeriod, setExportPeriod] = useState<'weekly' | 'monthly'>('weekly');
   const [exportFields, setExportFields] = useState({ studyTime: true, homework: true, aiQuestions: true, attendance: true, grades: true });
+  const [weeklyReport, setWeeklyReport] = useState<LearningReportData | null>(null);
+  const [monthlyReport, setMonthlyReport] = useState<LearningReportData | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const { summaryCards, radarData, keywordData, weekHours, chapterProgress } = overview;
 
   const rebuildCloud = useCallback((w: number, h: number) => {
@@ -130,6 +140,11 @@ export default function MyLearning({ courseId }: MyLearningProps) {
 
   useEffect(() => {
     let mounted = true;
+
+    void learningService.recordLearningEvent(courseId, {
+      activity_type: 'view_learning_profile',
+      duration_seconds: 45,
+    }).catch(() => undefined);
 
     learningService
       .getLearningOverview(courseId)
@@ -144,6 +159,22 @@ export default function MyLearning({ courseId }: MyLearningProps) {
       mounted = false;
     };
   }, [courseId]);
+
+  useEffect(() => {
+    if (!showWeeklyModal || weeklyReport) return;
+    setReportLoading(true);
+    learningService.getLearningReport(courseId, 'weekly')
+      .then(setWeeklyReport)
+      .finally(() => setReportLoading(false));
+  }, [courseId, showWeeklyModal, weeklyReport]);
+
+  useEffect(() => {
+    if (!showMonthlyModal || monthlyReport) return;
+    setReportLoading(true);
+    learningService.getLearningReport(courseId, 'monthly')
+      .then(setMonthlyReport)
+      .finally(() => setReportLoading(false));
+  }, [courseId, showMonthlyModal, monthlyReport]);
 
   useEffect(() => {
     const measure = () => {
@@ -188,10 +219,92 @@ export default function MyLearning({ courseId }: MyLearningProps) {
   const handleExportLearningData = async () => {
     await learningService.exportLearningData(courseId, {
       format: exportFormat,
+      period: exportPeriod,
       fields: exportFields,
     });
     setShowExportModal(false);
-    alert('学习数据导出任务已提交');
+  };
+
+  const renderReportModal = (
+    report: LearningReportData | null,
+    period: 'weekly' | 'monthly',
+    onClose: () => void,
+  ) => {
+    const title = report?.title || (period === 'weekly' ? '学习周报' : '学习月报');
+    const rangeLabel = report?.rangeLabel || (period === 'weekly' ? '本周' : '本月');
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+            <h2 className="text-base font-semibold text-gray-900">{title} · {rangeLabel}</h2>
+            <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer">
+              <i className="ri-close-line text-xl"></i>
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-6 space-y-5">
+            {reportLoading && !report ? (
+              <div className="py-16 text-center text-sm text-gray-500">报告生成中...</div>
+            ) : (
+              <>
+                <div className="grid grid-cols-4 gap-3">
+                  {(report?.cards || []).map((s, i) => {
+                    const cls = REPORT_CARD_CLASSES[s.color] || REPORT_CARD_CLASSES.teal;
+                    return (
+                      <div key={i} className={`p-3 rounded-lg border text-center ${cls.box}`}>
+                        <div className={`text-xl font-bold ${cls.value}`}>{s.value}</div>
+                        <div className="text-xs text-gray-500 mt-1">{s.label}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {report?.summary && (
+                  <div className="p-4 bg-slate-50 rounded-lg border border-slate-100 text-sm text-gray-700">
+                    {report.summary}
+                  </div>
+                )}
+                <div className="p-4 bg-amber-50 rounded-lg border border-amber-100">
+                  <div className="text-xs font-semibold text-amber-700 mb-2">薄弱知识点</div>
+                  <div className="space-y-1 text-xs text-gray-700">
+                    {(report?.weakTopics?.length ? report.weakTopics : ['暂无明显薄弱点']).map((topic, i) => (
+                      <div key={i}>• {topic}</div>
+                    ))}
+                  </div>
+                </div>
+                <div className="p-4 bg-green-50 rounded-lg border border-green-100">
+                  <div className="text-xs font-semibold text-green-700 mb-2">本阶段亮点</div>
+                  <div className="space-y-1 text-xs text-gray-700">
+                    {(report?.highlights?.length ? report.highlights : ['继续积累学习记录后将生成更多亮点']).map((item, i) => (
+                      <div key={i}>• {item}</div>
+                    ))}
+                  </div>
+                </div>
+                <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
+                  <div className="text-xs font-semibold text-sky-700 mb-2">AI 学习建议</div>
+                  <div className="space-y-1 text-xs text-gray-700">
+                    {(report?.suggestions?.length ? report.suggestions : ['保持稳定学习节奏，优先复习错题相关知识点']).map((item, i) => (
+                      <div key={i}>• {item}</div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-2 flex-shrink-0">
+            <button
+              onClick={() => {
+                setExportPeriod(period);
+                onClose();
+                setShowExportModal(true);
+              }}
+              className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 cursor-pointer whitespace-nowrap"
+            >
+              <i className="ri-download-line mr-1"></i>导出 CSV
+            </button>
+            <button onClick={onClose} className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 cursor-pointer whitespace-nowrap">关闭</button>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -471,107 +584,12 @@ export default function MyLearning({ courseId }: MyLearningProps) {
 
       {/* 周报弹窗 */}
       {showWeeklyModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-              <h2 className="text-base font-semibold text-gray-900">学习周报 · 2026.04.04 - 04.10</h2>
-              <button onClick={() => setShowWeeklyModal(false)} className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer">
-                <i className="ri-close-line text-xl"></i>
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-6 space-y-5">
-              <div className="grid grid-cols-4 gap-3">
-                {[
-                  { label: '学习时长', value: '18.5h', color: 'teal' },
-                  { label: '作业完成', value: '92%', color: 'green' },
-                  { label: 'AI提问', value: '47次', color: 'sky' },
-                  { label: '闪卡复习', value: '156张', color: 'violet' },
-                ].map((s, i) => (
-                  <div key={i} className={`p-3 bg-${s.color}-50 rounded-lg border border-${s.color}-100 text-center`}>
-                    <div className={`text-xl font-bold text-${s.color}-600`}>{s.value}</div>
-                    <div className="text-xs text-gray-500 mt-1">{s.label}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="p-4 bg-amber-50 rounded-lg border border-amber-100">
-                <div className="text-xs font-semibold text-amber-700 mb-2">薄弱知识点</div>
-                <div className="space-y-1 text-xs text-gray-700">
-                  <div>• TCP拥塞控制：建议重温慢启动与拥塞避免的临界条件</div>
-                  <div>• 子网划分：CIDR 表示法练习不足，建议多做计算题</div>
-                </div>
-              </div>
-              <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                <div className="text-xs font-semibold text-sky-700 mb-2">AI 学习建议</div>
-                <div className="space-y-1 text-xs text-gray-700">
-                  <div>• 本周时长充足，但分布不均，建议工作日保持 2h 以上</div>
-                  <div>• 应用层（HTTP、DNS）是下周重点，提前预习效果更佳</div>
-                  <div>• 闪卡复习习惯良好，继续保持每日打卡</div>
-                </div>
-              </div>
-            </div>
-            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-2 flex-shrink-0">
-              <button onClick={() => setShowWeeklyModal(false)} className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 cursor-pointer whitespace-nowrap">
-                <i className="ri-download-line mr-1"></i>下载 PDF
-              </button>
-              <button onClick={() => setShowWeeklyModal(false)} className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 cursor-pointer whitespace-nowrap">关闭</button>
-            </div>
-          </div>
-        </div>
+        renderReportModal(weeklyReport, 'weekly', () => setShowWeeklyModal(false))
       )}
 
       {/* 月报弹窗 */}
       {showMonthlyModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-              <h2 className="text-base font-semibold text-gray-900">学习月报 · 2026年3月</h2>
-              <button onClick={() => setShowMonthlyModal(false)} className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer">
-                <i className="ri-close-line text-xl"></i>
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-6 space-y-5">
-              <div className="grid grid-cols-4 gap-3">
-                {[
-                  { label: '总学习时长', value: '76.5h', color: 'teal' },
-                  { label: '作业完成', value: '15/16', color: 'green' },
-                  { label: 'AI提问', value: '189次', color: 'sky' },
-                  { label: '闪卡复习', value: '628张', color: 'violet' },
-                ].map((s, i) => (
-                  <div key={i} className={`p-3 bg-${s.color}-50 rounded-lg border border-${s.color}-100 text-center`}>
-                    <div className={`text-xl font-bold text-${s.color}-600`}>{s.value}</div>
-                    <div className="text-xs text-gray-500 mt-1">{s.label}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <div className="text-xs text-gray-500 mb-1">月度平均分</div>
-                  <div className="text-2xl font-bold text-gray-900">89.5</div>
-                  <div className="text-xs text-green-600 mt-1"><i className="ri-arrow-up-line"></i> 较上月 +5.2</div>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <div className="text-xs text-gray-500 mb-1">班级排名</div>
-                  <div className="text-2xl font-bold text-gray-900">8 / 45</div>
-                  <div className="text-xs text-green-600 mt-1"><i className="ri-arrow-up-line"></i> 较上月上升 3名</div>
-                </div>
-              </div>
-              <div className="p-4 bg-green-50 rounded-lg border border-green-100 space-y-2">
-                <div className="text-xs font-semibold text-green-700">本月亮点</div>
-                {['获得"学习达人"徽章 · 连续打卡30天', '第5章作业获满分 · 教师好评', '提问质量高 · 3次被推荐为精华问题'].map((t, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs text-gray-700">
-                    <i className="ri-star-fill text-green-500"></i>{t}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-2 flex-shrink-0">
-              <button onClick={() => setShowMonthlyModal(false)} className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 cursor-pointer whitespace-nowrap">
-                <i className="ri-download-line mr-1"></i>下载 PDF
-              </button>
-              <button onClick={() => setShowMonthlyModal(false)} className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 cursor-pointer whitespace-nowrap">关闭</button>
-            </div>
-          </div>
-        </div>
+        renderReportModal(monthlyReport, 'monthly', () => setShowMonthlyModal(false))
       )}
 
       {/* 导出弹窗 */}
@@ -585,7 +603,7 @@ export default function MyLearning({ courseId }: MyLearningProps) {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-3">导出格式</label>
                 <div className="flex gap-3">
-                  {[{ v: 'csv', label: 'CSV', sub: '适合 Excel' }, { v: 'excel', label: 'Excel', sub: '含图表格式' }].map(opt => (
+                  {[{ v: 'csv', label: 'CSV', sub: '适合 Excel' }].map(opt => (
                     <label key={opt.v} className={`flex-1 flex items-center gap-3 p-3 border-2 rounded-lg cursor-pointer transition-colors ${exportFormat === opt.v ? 'border-teal-400 bg-teal-50' : 'border-gray-200 hover:border-teal-200'}`}>
                       <input type="radio" name="fmt" value={opt.v} checked={exportFormat === opt.v} onChange={() => setExportFormat(opt.v)} className="w-4 h-4 accent-teal-600" />
                       <div>
@@ -593,6 +611,24 @@ export default function MyLearning({ courseId }: MyLearningProps) {
                         <div className="text-xs text-gray-500">{opt.sub}</div>
                       </div>
                     </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-3">报告周期</label>
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { v: 'weekly' as const, label: '周报' },
+                    { v: 'monthly' as const, label: '月报' },
+                  ].map(opt => (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      onClick={() => setExportPeriod(opt.v)}
+                      className={`px-3 py-2 text-sm rounded-lg border transition-colors ${exportPeriod === opt.v ? 'border-teal-400 bg-teal-50 text-teal-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+                    >
+                      {opt.label}
+                    </button>
                   ))}
                 </div>
               </div>

@@ -127,6 +127,21 @@ def get_session_messages(db: Session, session_id: str, user_id: str) -> List[dic
     return [_msg_to_dict(message) for message in messages]
 
 
+def delete_session(db: Session, session_id: str, user_id: str) -> dict:
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id,
+        ChatSession.user_id == user_id,
+        ChatSession.is_active == True,
+    ).first()
+    if not session:
+        raise NotFoundException("Chat session not found")
+    session.is_active = False
+    session.updated_at = datetime.now(timezone.utc)
+    db.add(session)
+    db.commit()
+    return {"id": session.id, "deleted": True}
+
+
 def _msg_to_dict(message: ChatMessage) -> dict:
     sources = message.sources
     if not sources and message.citations:

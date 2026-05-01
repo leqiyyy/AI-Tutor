@@ -538,7 +538,7 @@ export default function StudentCourse() {
   };
 
   // 新增：标记错题为已掌握
-  const handleMarkMastered = async (mistakeId: number) => {
+  const handleMarkMastered = async (mistakeId: string | number) => {
     await learningService.markMistakeMastered(courseId, mistakeId);
     setMistakes(prev => prev.map(m => 
       m.id === mistakeId ? { ...m, mastered: true, lastPracticeTime: new Date().toISOString().split('T')[0] } : m

@@ -1,5 +1,5 @@
 export interface LearningMistake {
-  id: number;
+  id: string | number;
   question: string;
   chapter: string;
   wrongCount: number;
@@ -29,7 +29,7 @@ export interface Flashcard {
 }
 
 export interface FlashcardDeck {
-  id: number;
+  id: string | number;
   name: string;
   cards: number;
   mastered: number;
@@ -49,7 +49,7 @@ export interface CreateFlashcardDeckRequest {
 }
 
 export interface SubmitFlashcardReviewRequest {
-  deckId: number;
+  deckId: string | number;
   cardIndex: number;
   difficulty: "forget" | "hard" | "good" | "easy";
 }
@@ -96,5 +96,43 @@ export interface LearningOverviewData {
 
 export interface ExportLearningDataRequest {
   format: string;
+  period?: "weekly" | "monthly";
   fields: Record<string, boolean>;
+}
+
+export interface LearningReportCard {
+  label: string;
+  value: string;
+  color: string;
+}
+
+export interface LearningReportData {
+  period: "weekly" | "monthly";
+  title: string;
+  rangeLabel: string;
+  generatedAt: string;
+  summary: string;
+  cards: LearningReportCard[];
+  metrics: {
+    studyHours: number;
+    questionCount: number;
+    taskCompleted: number;
+    taskPublished: number;
+    taskCompletionRate: number;
+    flashcardReviews: number;
+    mistakeCount: number;
+    masteredMistakeCount: number;
+    learningEvents: number;
+  };
+  weakTopics: string[];
+  strongTopics: string[];
+  suggestions: string[];
+  highlights: string[];
+}
+
+export interface LearningEventRequest {
+  activity_type: string;
+  ref_id?: string;
+  duration_seconds?: number;
+  extra_data?: Record<string, unknown>;
 }
