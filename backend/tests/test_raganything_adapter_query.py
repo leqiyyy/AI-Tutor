@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.integrations.rag import raganything_adapter as raganything_adapter_module
+from app.integrations.rag.query_rewrite import build_query_rewrite_bundle
 from app.integrations.rag.raganything_adapter import RAGAnythingAdapter
+from app.integrations.rag.storage_config import build_runtime_rag_storage_config_snapshot
 from app.integrations.reranker import reset_reranker_cache
 from app.models.course import Class, Course, Material
 from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, KnowledgeRelation
@@ -53,6 +56,125 @@ def test_raganything_llm_func_prefers_dedicated_extract_route(monkeypatch):
     assert captured["model"] == "extract-model"
     assert captured["base_url"] == "https://extract.example/v1"
     assert captured["api_key"] == "extract-key"
+
+
+def test_raganything_llm_func_records_query_trace(monkeypatch):
+    adapter = _build_adapter_with_db_free_mocks(monkeypatch)
+    trace = {}
+    token = raganything_adapter_module._QUERY_TRACE_CONTEXT.set(trace)
+
+    async def fake_call_llm_api(**kwargs):
+        return "ok"
+
+    monkeypatch.setattr(adapter, "_call_llm_api", fake_call_llm_api)
+    llm_func = adapter._build_llm_func({
+        "generation": {
+            "model": "generation-model",
+            "api_base": "https://generation.example/v1",
+        }
+    })
+
+    try:
+        result = asyncio.run(
+            llm_func(
+                "Provided context:\nTCP slow start.\n\nUser query: explain it",
+                system_prompt="Answer using the provided context.",
+                history_messages=[{"role": "user", "content": "之前的问题"}],
+            )
+        )
+    finally:
+        raganything_adapter_module._QUERY_TRACE_CONTEXT.reset(token)
+
+    assert result == "ok"
+    assert trace["llm_call_count"] == 1
+    assert trace["llm_calls"][0]["purpose"] == "answer_generation"
+    assert trace["final_generation_input"]["model"] == "generation-model"
+    assert trace["final_generation_input"]["prompt_chars"] > 0
+
+
+def test_raganything_effective_query_submits_compact_terms_only():
+    adapter = RAGAnythingAdapter()
+    bundle = build_query_rewrite_bundle(
+        question="TCP 和 UDP 的区别是什么？",
+        enabled=True,
+        mode="hybrid",
+        max_variants=4,
+    )
+
+    query_text = adapter._build_effective_query_text(
+        question="TCP 和 UDP 的区别是什么？",
+        rewrite_bundle=bundle,
+    )
+
+    assert "检索辅助信息" not in query_text
+    assert "问题意图" not in query_text
+    assert "回答时必须以原始问题为准" not in query_text
+    assert query_text.startswith("TCP 和 UDP 的区别是什么？")
+    assert len(query_text.splitlines()) <= 2
+    assert any(term in query_text for term in ("TCP/IP", "传输层", "可靠传输", "适用场景"))
+
+
+def test_raganything_compact_retrieval_terms_filters_meta_noise():
+    adapter = RAGAnythingAdapter()
+    terms = adapter._compact_retrieval_terms(
+        question="链路层的功能是什么？",
+        rewrite_bundle={
+            "queries": [
+                "链路层的功能是什么？",
+                "检索辅助信息 问题意图 查找 资料 回答 数据链路层 成帧 CRC",
+            ],
+            "retrieval_focus_terms": ["检索焦点", "核心特征", "资料"],
+        },
+        max_terms=8,
+    )
+
+    assert "数据链路层" in terms
+    assert "成帧" in terms
+    assert "CRC" in terms
+    assert "检索辅助信息" not in terms
+    assert "问题意图" not in terms
+    assert "资料" not in terms
+
+
+def test_raganything_aquery_history_keeps_only_related_context(monkeypatch):
+    adapter = RAGAnythingAdapter()
+    monkeypatch.setattr(settings, "RAG_AQUERY_HISTORY_POLICY", "compact")
+    monkeypatch.setattr(settings, "RAG_AQUERY_HISTORY_MAX_MESSAGES", 4)
+    monkeypatch.setattr(settings, "RAG_AQUERY_HISTORY_MESSAGE_MAX_CHARS", 80)
+
+    history, meta = adapter._build_aquery_history(
+        history=[
+            {"role": "user", "content": "DNS 的递归查询是什么？"},
+            {"role": "assistant", "content": "DNS 递归查询会由递归解析器继续代查。"},
+            {"role": "user", "content": "TCP 拥塞控制有哪些阶段？"},
+            {"role": "assistant", "content": "TCP 拥塞控制包括慢启动、拥塞避免、快重传和快恢复。"},
+        ],
+        query_text="TCP 拥塞控制。追问：继续解释第二点",
+    )
+
+    assert meta["policy"] == "compact"
+    assert meta["submitted_count"] == 2
+    assert all("DNS" not in item["content"] for item in history)
+    assert any("TCP" in item["content"] for item in history)
+    assert any("慢启动" in item["content"] for item in history)
+
+
+def test_raganything_aquery_history_drops_unrelated_new_topic(monkeypatch):
+    adapter = RAGAnythingAdapter()
+    monkeypatch.setattr(settings, "RAG_AQUERY_HISTORY_POLICY", "compact")
+    monkeypatch.setattr(settings, "RAG_AQUERY_HISTORY_MAX_MESSAGES", 4)
+
+    history, meta = adapter._build_aquery_history(
+        history=[
+            {"role": "user", "content": "TCP 拥塞控制有哪些阶段？"},
+            {"role": "assistant", "content": "慢启动、拥塞避免、快重传和快恢复是常见阶段。"},
+        ],
+        query_text="请解释 DNS 的递归查询过程",
+    )
+
+    assert history == []
+    assert meta["submitted_count"] == 0
+    assert meta["dropped_count"] == 2
 
 
 def test_raganything_processing_error_is_extracted_from_raw_status():
@@ -209,6 +331,15 @@ def test_answer_repair_detects_lightrag_keyword_gibberish():
     )
 
 
+def test_answer_repair_detects_code_like_gibberish():
+    adapter = RAGAnythingAdapter()
+
+    assert adapter._answer_needs_repair(
+        "订单抽象\\6 \\; parseInt stdClass IP IP TCP UDP ACK SYN FIN "
+        "\\IP \\TCP \\UDP \\ACK \\SYN \\FIN \\PIP \\CPI \\ping"
+    )
+
+
 def test_answer_generation_prompt_recognizes_lightrag_rag_prompt():
     adapter = RAGAnythingAdapter()
 
@@ -261,6 +392,10 @@ def test_raganything_main_chain_sources_can_be_reranked(monkeypatch):
     assert result.meta["reranker_provider"] == "mock"
     assert result.meta["reranked_main_chain_sources"] is True
     assert result.sources[0]["chunk_id"] == "tcp"
+    assert result.meta["query_trace"]["rerank"]["applied"] is True
+    assert result.meta["query_trace"]["rerank"]["before"]["count"] == 2
+    assert result.meta["query_trace"]["rerank"]["after"]["items"][0]["chunk_id"] == "tcp"
+    assert result.meta["query_trace"]["sources_final"]["items"][0]["chunk_id"] == "tcp"
     reset_reranker_cache()
 
 
@@ -445,7 +580,7 @@ def test_raganything_query_does_not_fallback_when_main_chain_fails(monkeypatch):
         )
     )
 
-    assert "RAG-Anything main-chain retrieval is currently unavailable" in result.answer
+    assert "我暂时没有从当前课程资料中检索到足够依据" in result.answer
     assert result.sources == []
     assert result.confidence == 0.0
     assert result.meta["used_fallback"] is False
@@ -523,6 +658,104 @@ def test_raganything_text_query_disables_vlm_enhancement(monkeypatch):
     assert captured["kwargs"]["vlm_enhanced"] is False
 
 
+def test_raganything_content_items_get_stable_atomic_ids():
+    adapter = RAGAnythingAdapter()
+    items = adapter._annotate_content_items(
+        [
+            {
+                "type": "table",
+                "text": "第 1 行，指标：throughput；数值：125。",
+                "table_markdown": "| metric | value |\n| --- | --- |\n| throughput | 125 |",
+                "page_idx": 0,
+                "metadata": {"source_type": "table"},
+            }
+        ],
+        material_id="mat-1",
+        file_name="lesson.md",
+    )
+
+    assert len(items) == 1
+    assert items[0]["atomic_id"].startswith("mat-1-au-1-")
+    assert items[0]["item_id"] == items[0]["atomic_id"]
+    assert items[0]["modality"] == "table"
+    assert items[0]["metadata"]["material_id"] == "mat-1"
+    assert items[0]["metadata"]["source_name"] == "lesson.md"
+
+
+def test_raganything_projection_rejects_table_artifact_entities():
+    adapter = RAGAnythingAdapter()
+
+    assert adapter._is_projection_course_entity("拥塞控制", entity_type="course_concept")
+    assert not adapter._is_projection_course_entity("表的结构", entity_type="concept")
+    assert not adapter._is_projection_course_entity("Table Structure", entity_type="concept")
+    assert not adapter._is_projection_course_entity("lesson.md", entity_type="concept")
+
+
+def test_raganything_query_rewrite_trace_records_submitted_query_policy():
+    adapter = RAGAnythingAdapter()
+    bundle = build_query_rewrite_bundle(
+        question="TCP 和 UDP 的区别是什么？",
+        enabled=True,
+        mode="hybrid",
+        max_variants=4,
+    )
+    effective_question = adapter._build_effective_query_text(
+        question="TCP 和 UDP 的区别是什么？",
+        rewrite_bundle=bundle,
+    )
+
+    trace = adapter._build_query_rewrite_trace(
+        question="TCP 和 UDP 的区别是什么？",
+        effective_question=effective_question,
+        rewrite_bundle=bundle,
+    )
+
+    assert trace["submitted_query_policy"] == "original_question_plus_compact_terms"
+    assert trace["submitted_compact_terms"]
+    assert "检索辅助信息" not in " ".join(trace["submitted_compact_terms"])
+    assert trace["effective_question_preview"].startswith("TCP 和 UDP 的区别是什么？")
+
+
+def test_structured_table_query_terms_extract_target_term():
+    adapter = RAGAnythingAdapter()
+
+    terms = adapter._structured_table_query_terms("在中英对照表格中，协议是什么意思")
+
+    assert "协议" in terms
+    assert "中英对照" not in terms
+    assert adapter._is_structured_table_lookup_question("在中英对照表格中，协议是什么意思")
+
+
+def test_structured_table_matches_are_merged_before_rerank(monkeypatch):
+    adapter = RAGAnythingAdapter()
+
+    monkeypatch.setattr(
+        adapter,
+        "_lookup_structured_table_sources",
+        lambda **kwargs: [{
+            "chunk_id": "table-protocol",
+            "source_name": "notes.md",
+            "raw_text": "第 7 行，中英对照：协议（protocol）；概念：网络协议的简称，是通信计算机双方必须共同遵守的约定。",
+            "retrieval_score": 1.0,
+        }],
+    )
+
+    sources, meta = adapter._augment_sources_with_structured_table_matches(
+        question="在中英对照表格中，协议是什么意思",
+        sources=[{
+            "chunk_id": "generic-table",
+            "source_name": "notes.md",
+            "raw_text": "Table Analysis: table structure and organization",
+            "retrieval_score": 0.0,
+        }],
+        class_id="class-demo",
+    )
+
+    assert meta["enabled"] is True
+    assert meta["matched_count"] == 1
+    assert sources[0]["chunk_id"] == "table-protocol"
+
+
 def test_lightrag_reference_query_uses_stable_hybrid_for_mix(monkeypatch):
     adapter = RAGAnythingAdapter()
     calls = []
@@ -562,6 +795,87 @@ def test_lightrag_reference_query_uses_stable_hybrid_for_mix(monkeypatch):
     assert method == "lightrag_aquery_llm:hybrid"
     assert raw["metadata"]["adapter_requested_mode"] == "mix"
     assert raw["metadata"]["adapter_effective_mode"] == "hybrid"
+    assert raw["metadata"]["adapter_include_references_requested"] is True
+
+
+def test_lightrag_query_param_enables_rerank_when_supported(monkeypatch):
+    adapter = RAGAnythingAdapter()
+    monkeypatch.setattr(settings, "RERANKER_PROVIDER", "api")
+
+    class FakeQueryParam:
+        def __init__(self, mode, include_references, conversation_history, enable_rerank=False):
+            self.mode = mode
+            self.include_references = include_references
+            self.conversation_history = conversation_history
+            self.enable_rerank = enable_rerank
+
+    param = adapter._build_lightrag_query_param(
+        QueryParam=FakeQueryParam,
+        mode="hybrid",
+        history=[],
+        role="student",
+    )
+
+    assert param.enable_rerank is True
+
+
+def test_raganything_query_trace_counts_raw_payload(monkeypatch):
+    adapter = RAGAnythingAdapter()
+    monkeypatch.setattr(settings, "RERANKER_PROVIDER", "local")
+
+    trace = adapter._build_query_trace(
+        raw={
+            "llm_response": {"content": "answer"},
+            "metadata": {
+                "adapter_effective_mode": "hybrid",
+                "adapter_attempted_modes": ["hybrid"],
+                "adapter_include_references_requested": True,
+                "adapter_lightrag_rerank_requested": True,
+            },
+            "data": {
+                "chunks": [{"content": "chunk"}],
+                "entities": [{"name": "TCP"}],
+                "relationships": [{"source": "TCP", "target": "拥塞控制"}],
+            },
+        },
+        query_method="lightrag_aquery_llm:hybrid",
+        requested_mode="mix",
+        has_image=False,
+    )
+
+    assert trace["effective_mode"] == "hybrid"
+    assert trace["raw_source_counts"]["data_chunks"] == 1
+    assert trace["raw_source_counts"]["data_entities"] == 1
+    assert trace["raw_context"]["data_chunks"]["text_chars"] == len("chunk")
+    assert trace["lightrag_internal_rerank_requested"] is True
+
+
+def test_raganything_source_atomic_metadata_matches_chunk():
+    adapter = RAGAnythingAdapter()
+    task = SimpleNamespace(
+        chunks=[
+            {
+                "chunk_id": "chunk-1",
+                "text": "TCP slow start doubles the congestion window.",
+                "metadata": {
+                    "atomic_id": "atomic-1",
+                    "item_id": "item-1",
+                    "modality": "text",
+                    "content_index": 1,
+                },
+            }
+        ],
+        extra_data={"content_items": []},
+    )
+
+    payload = adapter._source_atomic_metadata(
+        {"chunk_id": "chunk-1", "snippet": "TCP slow start doubles the congestion window."},
+        task,
+    )
+
+    assert payload["atomic_id"] == "atomic-1"
+    assert payload["item_id"] == "item-1"
+    assert payload["modality"] == "text"
 
 
 def test_raganything_processing_quality_labels():
@@ -735,8 +1049,8 @@ def test_raganything_get_instance_passes_official_storage_plan(monkeypatch):
 def test_raganything_adapter_restores_kb_compatibility_methods():
     adapter = RAGAnythingAdapter()
     marker = uuid.uuid4().hex[:8]
-    node_label = f"rag-node-{marker}"
-    related_label = f"rag-related-{marker}"
+    node_label = f"拥塞控制{marker[:4]}"
+    related_label = f"慢启动{marker[:4]}"
 
     with SessionLocal() as db:
         base_class = db.query(Class).first()
@@ -790,6 +1104,7 @@ def test_raganything_adapter_restores_kb_compatibility_methods():
         db.add(material)
         db.flush()
 
+        storage_snapshot = build_runtime_rag_storage_config_snapshot()
         task = FileParseTask(
             kb_space_id=kb_space.id,
             course_id=cls.course_id,
@@ -807,6 +1122,13 @@ def test_raganything_adapter_restores_kb_compatibility_methods():
                 "raganything_status": {"entrypoint": "insert_file"},
                 "raganything_quality": {"quality_level": "complete"},
                 "graph_projection": {"entity_count": 2, "relation_count": 1},
+                "raganything_storage": {
+                    **storage_snapshot,
+                    "active_lightrag_storage": {
+                        "requested_backend": storage_snapshot.get("requested_backend"),
+                        "effective_backend": storage_snapshot.get("effective_backend"),
+                    },
+                },
                 "ingest": {
                     "attempt_count": 2,
                     "max_attempts": 5,
@@ -1098,6 +1420,7 @@ def test_raganything_metadata_payload_can_read_official_output_files(monkeypatch
         class_id=class_id,
         status={"entrypoint": "process_document_complete"},
         preprocess_result=preprocess,
+        material_id="material-output",
         file_path=str(Path("fixture_notes.txt")),
         mime_type="text/plain",
         file_name="fixture_notes.txt",

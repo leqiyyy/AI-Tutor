@@ -6,8 +6,10 @@ import re
 import sys
 import asyncio
 import hashlib
+import contextvars
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -32,6 +34,11 @@ from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, Knowle
 from app.services import model_routing_service
 
 logger = get_logger(__name__)
+
+_QUERY_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "raganything_query_trace",
+    default=None,
+)
 
 PROJECTION_FILE_LABEL_RE = re.compile(
     r"\.(?:txt|pdf|docx?|pptx?|xlsx?|csv|md|png|jpe?g|gif|webp|mp4|mov|avi|zip)$",
@@ -65,6 +72,40 @@ PROJECTION_STOPWORDS = {
     "through",
     "upload",
     "xlsx",
+}
+PROJECTION_COURSE_ARTIFACT_TERMS = {
+    "表",
+    "表格",
+    "表格结构",
+    "表的结构",
+    "表的组织",
+    "表头",
+    "行",
+    "列",
+    "单元格",
+    "图片",
+    "图像",
+    "公式",
+    "文件",
+    "文档",
+    "材料",
+    "页面",
+    "markdown",
+    "markdown table",
+    "table",
+    "table structure",
+    "table organization",
+    "row",
+    "column",
+    "cell",
+    "header",
+    "image",
+    "figure",
+    "equation",
+    "formula",
+    "document",
+    "file",
+    "material",
 }
 
 
@@ -289,6 +330,15 @@ class RAGAnythingAdapter:
             base_url = generation_base if use_generation_model else extract_base
             api_key = generation_api_key if use_generation_model else extract_api_key
             wire_api = settings.LLM_WIRE_API if use_generation_model else settings.EXTRACT_WIRE_API
+            self._record_llm_trace(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                keyword_extraction=keyword_extraction,
+                use_generation_model=use_generation_model,
+                model=model,
+                wire_api=wire_api,
+            )
             return await self._call_llm_api(
                 prompt=prompt,
                 system_prompt=system_prompt,
@@ -300,6 +350,51 @@ class RAGAnythingAdapter:
             )
 
         return _llm
+
+    def _record_llm_trace(
+        self,
+        *,
+        prompt: Any,
+        system_prompt: Any,
+        history_messages: list[dict] | None,
+        keyword_extraction: bool,
+        use_generation_model: bool,
+        model: str,
+        wire_api: str,
+    ) -> None:
+        if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
+            return
+        trace = _QUERY_TRACE_CONTEXT.get()
+        if not isinstance(trace, dict):
+            return
+
+        calls = trace.setdefault("llm_calls", [])
+        if not isinstance(calls, list):
+            return
+
+        purpose = "answer_generation" if use_generation_model else "knowledge_extraction"
+        if keyword_extraction:
+            purpose = "keyword_extraction"
+
+        prompt_text = str(prompt or "")
+        system_text = str(system_prompt or "")
+        normalized_history = self._normalize_llm_history_messages(history_messages)
+        call_trace = {
+            "index": len(calls) + 1,
+            "purpose": purpose,
+            "keyword_extraction": bool(keyword_extraction),
+            "model": model,
+            "wire_api": wire_api,
+            "prompt_chars": len(prompt_text),
+            "system_prompt_chars": len(system_text),
+            "history_message_count": len(normalized_history),
+            "prompt_preview": self._trace_preview(prompt_text),
+            "system_prompt_preview": self._trace_preview(system_text, limit=500),
+        }
+        calls.append(call_trace)
+        trace["llm_call_count"] = len(calls)
+        if purpose == "answer_generation":
+            trace["final_generation_input"] = call_trace
 
     def _normalize_llm_history_messages(self, history_messages: list[dict] | None) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []
@@ -324,6 +419,89 @@ class RAGAnythingAdapter:
                 continue
             normalized.append({"role": role, "content": content})
         return normalized
+
+    def _build_aquery_history(
+        self,
+        *,
+        history: list[dict] | None,
+        query_text: str,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        policy = str(getattr(settings, "RAG_AQUERY_HISTORY_POLICY", "compact") or "compact").strip().lower()
+        normalized_history = self._normalize_llm_history_messages(history)
+        max_messages = max(0, int(getattr(settings, "RAG_AQUERY_HISTORY_MAX_MESSAGES", 4) or 0))
+        max_chars = max(80, int(getattr(settings, "RAG_AQUERY_HISTORY_MESSAGE_MAX_CHARS", 500) or 500))
+        meta: dict[str, Any] = {
+            "policy": policy,
+            "input_count": len(normalized_history),
+            "max_messages": max_messages,
+            "message_max_chars": max_chars,
+            "submitted_count": 0,
+            "dropped_count": len(normalized_history),
+        }
+        if policy in {"none", "off", "disabled"} or max_messages <= 0 or not normalized_history:
+            return [], meta
+
+        candidates = normalized_history[-max_messages:] if policy == "full" else self._select_compact_aquery_history(
+            history=normalized_history,
+            query_text=query_text,
+            max_messages=max_messages,
+        )
+        submitted = [
+            {
+                "role": item["role"],
+                "content": self._truncate_history_content(item["content"], max_chars=max_chars),
+            }
+            for item in candidates[-max_messages:]
+        ]
+        meta.update({
+            "submitted_count": len(submitted),
+            "dropped_count": max(0, len(normalized_history) - len(submitted)),
+            "submitted_roles": [item["role"] for item in submitted],
+        })
+        return submitted, meta
+
+    def _select_compact_aquery_history(
+        self,
+        *,
+        history: list[dict[str, str]],
+        query_text: str,
+        max_messages: int,
+    ) -> list[dict[str, str]]:
+        query_terms = set(self._history_overlap_terms(query_text))
+        if not query_terms:
+            return []
+        selected: list[dict[str, str]] = []
+        for message in reversed(history[-max(max_messages * 3, max_messages):]):
+            content = message.get("content") or ""
+            message_terms = set(self._history_overlap_terms(content))
+            if not message_terms:
+                continue
+            if query_terms.intersection(message_terms) or self._history_text_overlaps_query(content, query_text):
+                selected.append(message)
+                if len(selected) >= max_messages:
+                    break
+        return list(reversed(selected))
+
+    def _history_overlap_terms(self, text: str) -> list[str]:
+        normalized = str(text or "").lower()
+        latin = re.findall(r"[a-z][a-z0-9_./-]{1,}", normalized)
+        cjk = re.findall(r"[\u4e00-\u9fff]{2,8}", normalized)
+        terms = [term for term in [*latin, *cjk] if not self._is_noisy_retrieval_term(term)]
+        return terms[:80]
+
+    def _history_text_overlaps_query(self, content: str, query_text: str) -> bool:
+        content_norm = re.sub(r"\s+", " ", str(content or "")).strip().lower()
+        query_norm = re.sub(r"\s+", " ", str(query_text or "")).strip().lower()
+        if len(content_norm) < 8 or len(query_norm) < 8:
+            return False
+        probe = content_norm[:120]
+        return probe in query_norm or query_norm[:120] in content_norm
+
+    def _truncate_history_content(self, content: str, *, max_chars: int) -> str:
+        text = re.sub(r"\s+", " ", str(content or "")).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "..."
 
     def _is_answer_generation_prompt(
         self,
@@ -1167,6 +1345,118 @@ class RAGAnythingAdapter:
             "content_item_count": len(preprocess_result.content_list),
         }
 
+    def _annotate_content_items(
+        self,
+        content_items: list[dict[str, Any]] | None,
+        *,
+        material_id: str,
+        file_name: str,
+    ) -> list[dict[str, Any]]:
+        annotated: list[dict[str, Any]] = []
+        for index, item in enumerate(content_items or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            next_item = dict(item)
+            metadata = dict(next_item.get("metadata") or {})
+            raw_type = str(next_item.get("type") or metadata.get("source_type") or "text").strip().lower()
+            modality = self._normalize_content_modality(raw_type)
+            content_fingerprint = {
+                "material_id": material_id,
+                "index": index,
+                "type": raw_type,
+                "page": next_item.get("page_idx") or next_item.get("page") or metadata.get("page_idx") or metadata.get("page"),
+                "text": str(
+                    next_item.get("text")
+                    or next_item.get("caption")
+                    or next_item.get("ocr_text")
+                    or next_item.get("table_markdown")
+                    or next_item.get("equation")
+                    or next_item.get("formula_latex")
+                    or next_item.get("img_path")
+                    or next_item.get("image_path")
+                    or ""
+                )[:2000],
+            }
+            digest = hashlib.sha256(
+                json.dumps(content_fingerprint, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()[:16]
+            atomic_id = str(
+                next_item.get("atomic_id")
+                or next_item.get("item_id")
+                or metadata.get("atomic_id")
+                or f"{material_id}-au-{index}-{digest[:8]}"
+            )
+            metadata.update({
+                "atomic_id": atomic_id,
+                "content_index": metadata.get("content_index") or index,
+                "material_id": material_id,
+                "source_name": metadata.get("source_name") or next_item.get("source_name") or file_name,
+                "modality": metadata.get("modality") or modality,
+            })
+            next_item["atomic_id"] = atomic_id
+            next_item["item_id"] = str(next_item.get("item_id") or next_item.get("id") or atomic_id)
+            next_item["modality"] = next_item.get("modality") or modality
+            next_item["metadata"] = metadata
+            annotated.append(next_item)
+        return annotated
+
+    def _normalize_content_modality(self, value: str) -> str:
+        normalized = str(value or "text").strip().lower()
+        mapping = {
+            "paragraph": "text",
+            "figure": "image",
+            "equation": "formula",
+            "formula": "formula",
+            "dataframe": "table",
+            "csv": "table",
+            "spreadsheet": "table",
+        }
+        return mapping.get(normalized, normalized or "text")
+
+    def _build_index_quality_report(
+        self,
+        *,
+        preprocess_result: PreprocessResult,
+        parsed: dict[str, Any],
+        status: dict[str, Any],
+        graph_projection: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        content_items = [item for item in (parsed.get("content_items") or []) if isinstance(item, dict)]
+        modality_counts: dict[str, int] = {}
+        items_missing_atomic_id = 0
+        table_items_with_rows = 0
+        for item in content_items:
+            modality = self._normalize_content_modality(
+                str(item.get("modality") or item.get("type") or (item.get("metadata") or {}).get("modality") or "text")
+            )
+            modality_counts[modality] = modality_counts.get(modality, 0) + 1
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if not (item.get("atomic_id") or item.get("item_id") or metadata.get("atomic_id")):
+                items_missing_atomic_id += 1
+            if modality == "table" and (item.get("table_rows") or metadata.get("row_count")):
+                table_items_with_rows += 1
+
+        graph_projection = graph_projection or {}
+        explicit_entity_count = len(self._extract_graph_entities(status))
+        explicit_relation_count = len(self._extract_graph_relations(status))
+        return {
+            "content_item_count": len(content_items),
+            "modality_counts": modality_counts,
+            "chunk_count": len(parsed.get("chunks") or []),
+            "items_missing_atomic_id": items_missing_atomic_id,
+            "table_items_with_rows": table_items_with_rows,
+            "metadata_source": parsed.get("metadata_source"),
+            "entrypoint": status.get("entrypoint") or preprocess_result.metadata.get("raganything_entrypoint"),
+            "text_processed": bool(status.get("text_processed")),
+            "multimodal_processed": bool(status.get("multimodal_processed")),
+            "fully_processed": bool(status.get("fully_processed")),
+            "explicit_entity_count": explicit_entity_count,
+            "explicit_relation_count": explicit_relation_count,
+            "graph_used_explicit_entities": bool(graph_projection.get("used_explicit_raganything_graph")),
+            "graph_entity_count": graph_projection.get("entity_count"),
+            "graph_relation_count": graph_projection.get("relation_count"),
+        }
+
     def _find_payload_list(self, payload: Any, keys: set[str]) -> list[Any]:
         found = self._find_payload_value(payload, keys)
         if isinstance(found, list):
@@ -1220,13 +1510,19 @@ class RAGAnythingAdapter:
                 continue
             metadata = item.get("metadata") or {}
             source_name = metadata.get("source_name") or item.get("source_name") or file_name
+            atomic_id = item.get("atomic_id") or item.get("item_id") or metadata.get("atomic_id")
             chunks.append({
-                "chunk_id": item.get("chunk_id") or f"{Path(file_name).stem}-raganything-item-{index}",
+                "chunk_id": item.get("chunk_id") or atomic_id or f"{Path(file_name).stem}-raganything-item-{index}",
                 "text": str(text)[:2000],
                 "page": item.get("page_idx") or item.get("page") or metadata.get("page") or index,
                 "source_name": source_name,
                 "source_type": metadata.get("source_type") or item.get("type") or "content_item",
-                "metadata": metadata,
+                "metadata": {
+                    **metadata,
+                    "atomic_id": atomic_id,
+                    "item_id": item.get("item_id") or atomic_id,
+                    "modality": item.get("modality") or metadata.get("modality"),
+                },
             })
         return chunks
 
@@ -1302,7 +1598,15 @@ class RAGAnythingAdapter:
         explicit_entities = self._extract_graph_entities(status) or storage_graph.get("entities", [])
         explicit_relations = self._extract_graph_relations(status) or storage_graph.get("relations", [])
         entity_by_name: dict[str, KnowledgeEntity] = {material_entity.name.lower(): material_entity}
-        for item in explicit_entities[:48]:
+        projectable_explicit_entities = [
+            item for item in explicit_entities[:48]
+            if self._is_projection_course_entity(
+                item.get("name"),
+                entity_type=item.get("entity_type"),
+                description=item.get("description"),
+            )
+        ]
+        for item in projectable_explicit_entities:
             entity = self._upsert_graph_entity(
                 db,
                 class_id=class_id,
@@ -1329,7 +1633,7 @@ class RAGAnythingAdapter:
                 relation_count += 1
 
         candidate_keywords = self._projection_candidate_keywords(parsed, limit=80)
-        if not explicit_entities:
+        if not projectable_explicit_entities:
             for keyword in candidate_keywords[:12]:
                 normalized_keyword = str(keyword or "").strip()[:300]
                 if not self._is_projection_candidate_concept(normalized_keyword):
@@ -1449,47 +1753,15 @@ class RAGAnythingAdapter:
                 ):
                     relation_count += 1
 
-        for index, item in enumerate((parsed.get("content_items") or [])[:16], start=1):
-            if not isinstance(item, dict):
-                continue
-            content_type = str(item.get("type") or item.get("metadata", {}).get("source_type") or "content").lower()
-            if content_type == "text":
-                continue
-            display = (
-                item.get("caption")
-                or item.get("text")
-                or item.get("table_markdown")
-                or item.get("equation")
-                or f"{content_type} item {index}"
-            )
-            entity = self._upsert_graph_entity(
-                db,
-                class_id=class_id,
-                name=f"{file_name}::{content_type}-{index}",
-                entity_type=content_type,
-                description=str(display)[:500],
-                material_id=material_id,
-                confidence=0.7,
-                source_span={**source_span_seed, "kind": "content_item", "content_index": index},
-                provenance={**provenance_base, "content_item": item},
-            )
-            entity_count += 1
-            if self._upsert_graph_relation(
-                db,
-                class_id=class_id,
-                source=material_entity,
-                target=entity,
-                relation_type="contains",
-                confidence=0.72,
-                source_span={**source_span_seed, "kind": "material_content_link", "content_index": index},
-                provenance=provenance_base,
-            ):
-                relation_count += 1
-
         for item in explicit_relations[:64]:
             source_name = item.get("source") or item.get("source_entity") or item.get("head")
             target_name = item.get("target") or item.get("target_entity") or item.get("tail")
             if not source_name or not target_name:
+                continue
+            if not (
+                self._is_projection_course_entity(source_name)
+                and self._is_projection_course_entity(target_name)
+            ):
                 continue
             source = entity_by_name.get(str(source_name).lower()) or self._upsert_graph_entity(
                 db,
@@ -1534,7 +1806,8 @@ class RAGAnythingAdapter:
             "graph_source": "raganything_projection",
             "entity_count": entity_count,
             "relation_count": relation_count,
-            "used_explicit_raganything_graph": bool(explicit_entities),
+            "used_explicit_raganything_graph": bool(projectable_explicit_entities),
+            "filtered_explicit_entity_count": max(0, len(explicit_entities[:48]) - len(projectable_explicit_entities)),
             "explicit_graph_source": storage_graph.get("source") if storage_graph.get("entities") else "raganything_status",
         }
 
@@ -1619,6 +1892,8 @@ class RAGAnythingAdapter:
             return False
         if self._is_low_quality_projection_keyword(normalized):
             return False
+        if self._is_projection_artifact_label(normalized):
+            return False
         if normalized.lower() in PROJECTION_STOPWORDS:
             return False
         if re.search(r"[\u4e00-\u9fff]", normalized):
@@ -1636,6 +1911,77 @@ class RAGAnythingAdapter:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]+", normalized):
             return False
         return any(char.isdigit() for char in normalized)
+
+    def _is_projection_course_entity(
+        self,
+        name: Any,
+        *,
+        entity_type: Any = None,
+        description: Any = None,
+    ) -> bool:
+        normalized = str(name or "").strip()
+        if not normalized or len(normalized) > 120:
+            return False
+        if self._is_low_quality_projection_keyword(normalized):
+            return False
+        if self._is_projection_artifact_label(normalized):
+            return False
+
+        entity_type_text = str(entity_type or "").strip().lower()
+        if entity_type_text in {"material", "document", "file", "page", "chunk", "table", "image", "figure"}:
+            return False
+
+        description_text = str(description or "")
+        artifact_hits = sum(
+            1
+            for term in ("表格结构", "表的结构", "表头", "行列", "markdown table", "table structure", "image path")
+            if term.lower() in description_text.lower()
+        )
+        if artifact_hits and not self._has_course_semantic_signal(normalized, description_text):
+            return False
+        return True
+
+    def _is_projection_artifact_label(self, label: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(label or "").strip()).lower()
+        if not normalized:
+            return True
+        compact = re.sub(r"[\s_：:：-]+", "", normalized)
+        if normalized in PROJECTION_COURSE_ARTIFACT_TERMS or compact in {
+            re.sub(r"[\s_：:：-]+", "", item.lower())
+            for item in PROJECTION_COURSE_ARTIFACT_TERMS
+        }:
+            return True
+        artifact_patterns = (
+            r"^(?:第?\d+[行列]|row\s*\d+|column\s*\d+)$",
+            r"^(?:表格?|table)\s*(?:\d+|结构|内容|组织|摘要|描述)?$",
+            r"^(?:图片|图像|figure|image)\s*(?:\d+|内容|描述|摘要)?$",
+            r"^(?:公式|equation|formula)\s*(?:\d+|内容|描述|摘要)?$",
+            r"^(?:页码|页面|page)\s*\d*$",
+        )
+        return any(re.fullmatch(pattern, normalized, flags=re.IGNORECASE) for pattern in artifact_patterns)
+
+    def _has_course_semantic_signal(self, *values: str) -> bool:
+        name = str(values[0] if values else "").strip()
+        if re.search(r"[\u4e00-\u9fff]{2,}", name) and not self._is_projection_artifact_label(name):
+            return True
+        text = " ".join(str(value or "") for value in values).lower()
+        course_markers = (
+            "concept",
+            "algorithm",
+            "theorem",
+            "formula",
+            "model",
+            "method",
+            "protocol",
+            "network",
+            "learning",
+            "objective",
+            "example",
+            "exercise",
+            "dataset",
+            "experiment",
+        )
+        return any(marker in text for marker in course_markers)
 
     def _material_ids_referencing_projection_keyword(
         self,
@@ -2114,6 +2460,11 @@ class RAGAnythingAdapter:
                 mime_type=mime_type,
                 file_name=material.file_name,
             )
+            preprocess_result.content_list = self._annotate_content_items(
+                preprocess_result.content_list,
+                material_id=material_id,
+                file_name=material.file_name,
+            )
             if (
                 preprocess_result.metadata.get("preprocess_quality") == "metadata_only"
                 and not settings.MULTIMODAL_ALLOW_METADATA_ONLY_INDEX
@@ -2162,6 +2513,15 @@ class RAGAnythingAdapter:
                 file_path=file_path,
                 mime_type=mime_type,
                 file_name=material.file_name,
+            )
+            parsed["content_items"] = self._annotate_content_items(
+                parsed.get("content_items") or [],
+                material_id=material_id,
+                file_name=material.file_name,
+            )
+            parsed["chunks"] = self._merge_metadata_chunks(
+                [],
+                parsed.get("chunks") or self._chunks_from_content_items(parsed["content_items"], material.file_name),
             )
 
             text_processed = bool(status.get("text_processed"))
@@ -2220,9 +2580,16 @@ class RAGAnythingAdapter:
                 parsed=parsed,
                 status=status,
             )
+            index_quality = self._build_index_quality_report(
+                preprocess_result=preprocess_result,
+                parsed=parsed,
+                status=status,
+                graph_projection=graph_projection,
+            )
             task.extra_data = {
                 **(task.extra_data or {}),
                 "graph_projection": graph_projection,
+                "index_quality": index_quality,
             }
 
             completed_tasks = db.query(FileParseTask).filter(
@@ -2239,6 +2606,7 @@ class RAGAnythingAdapter:
                 "last_status": status,
                 "last_quality": quality,
                 "last_graph_projection": graph_projection,
+                "last_index_quality": index_quality,
             }
             db.commit()
             return task.status == "completed"
@@ -2251,27 +2619,40 @@ class RAGAnythingAdapter:
         attachments=None,
         role: str = "student",
     ) -> RAGResult:
+        query_started = perf_counter()
+        outer_stage_timings_ms: dict[str, float] = {}
+
+        def mark(stage: str, started: float) -> None:
+            outer_stage_timings_ms[stage] = round((perf_counter() - started) * 1000, 2)
+
         query_mode = settings.RAGANYTHING_QUERY_MODE or "mix"
         routing_snapshot = self._load_runtime_routing_snapshot()
         routing_meta = model_routing_service.flatten_routing_snapshot(routing_snapshot)
+        stage_started = perf_counter()
         rewrite_bundle = build_query_rewrite_bundle(
             question=question,
             enabled=bool(settings.RAG_QUERY_REWRITE_ENABLED),
             mode=settings.RAG_QUERY_REWRITE_MODE,
             max_variants=settings.RAG_QUERY_REWRITE_MAX_VARIANTS,
         )
+        mark("query_rewrite", stage_started)
+        stage_started = perf_counter()
         effective_question = self._build_effective_query_text(
             question=question,
             rewrite_bundle=rewrite_bundle,
         )
+        mark("effective_query_build", stage_started)
 
         image_contexts = []
+        stage_started = perf_counter()
         for attachment in attachments or []:
             if attachment.get("file_type") == "image":
                 description = await self._describe_image_attachment(attachment, question)
                 if description:
                     image_contexts.append(description)
+        mark("image_attachment_description", stage_started)
 
+        stage_started = perf_counter()
         raganything_result, fallback_reason, query_method, query_error_detail = await self._query_with_raganything(
             question=effective_question,
             original_question=question,
@@ -2282,7 +2663,37 @@ class RAGAnythingAdapter:
             query_mode=query_mode,
             role=role,
         )
+        mark("raganything_main_chain", stage_started)
         if raganything_result is not None:
+            query_trace = dict((raganything_result.meta or {}).get("query_trace") or {})
+            existing_stage_timings = dict(query_trace.get("stage_timings_ms") or {})
+            query_trace.update({
+                "class_id": class_id,
+                "role": role,
+                "query_mode": query_mode,
+                "original_question_preview": self._trace_preview(question),
+                "effective_query_preview": self._trace_preview(effective_question),
+                "query_rewrite": self._build_query_rewrite_trace(
+                    question=question,
+                    effective_question=effective_question,
+                    rewrite_bundle=rewrite_bundle,
+                ),
+                "attachment_count": len(attachments or []),
+                "image_context_count": len(image_contexts),
+                "image_context_chars": sum(len(item) for item in image_contexts),
+                "history_message_count": len(history or []),
+                "outer_stage_timings_ms": outer_stage_timings_ms,
+                "adapter_total_latency_ms": round((perf_counter() - query_started) * 1000, 2),
+            })
+            if existing_stage_timings:
+                query_trace["stage_timings_ms"] = existing_stage_timings
+            logger.info(
+                "raganything_query_trace",
+                class_id=class_id,
+                query_mode=query_mode,
+                query_method=query_method,
+                trace=query_trace,
+            )
             raganything_result.meta = {
                 **(raganything_result.meta or {}),
                 "engine": "raganything",
@@ -2307,6 +2718,12 @@ class RAGAnythingAdapter:
                 "query_rewrite_mode": rewrite_bundle["mode"],
                 "query_variant_count": rewrite_bundle["variant_count"],
                 "query_rewrite_queries": rewrite_bundle["queries"],
+                "question_intent": rewrite_bundle.get("intent"),
+                "question_intent_confidence": rewrite_bundle.get("intent_confidence"),
+                "question_intent_signals": rewrite_bundle.get("intent_signals"),
+                "retrieval_focus_terms": rewrite_bundle.get("retrieval_focus_terms"),
+                "answer_focus": rewrite_bundle.get("answer_focus"),
+                "query_trace": query_trace,
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -2339,6 +2756,33 @@ class RAGAnythingAdapter:
                 "query_rewrite_mode": rewrite_bundle["mode"],
                 "query_variant_count": rewrite_bundle["variant_count"],
                 "query_rewrite_queries": rewrite_bundle["queries"],
+                "question_intent": rewrite_bundle.get("intent"),
+                "question_intent_confidence": rewrite_bundle.get("intent_confidence"),
+                "question_intent_signals": rewrite_bundle.get("intent_signals"),
+                "retrieval_focus_terms": rewrite_bundle.get("retrieval_focus_terms"),
+                "answer_focus": rewrite_bundle.get("answer_focus"),
+                "query_trace": {
+                    "trace_version": 2,
+                    "class_id": class_id,
+                    "role": role,
+                    "query_mode": query_mode,
+                    "query_method": query_method,
+                    "fallback_reason": fallback_reason or "main_chain_unavailable",
+                    "query_error_detail": query_error_detail,
+                    "original_question_preview": self._trace_preview(question),
+                    "effective_query_preview": self._trace_preview(effective_question),
+                    "query_rewrite": self._build_query_rewrite_trace(
+                        question=question,
+                        effective_question=effective_question,
+                        rewrite_bundle=rewrite_bundle,
+                    ),
+                    "attachment_count": len(attachments or []),
+                    "image_context_count": len(image_contexts),
+                    "image_context_chars": sum(len(item) for item in image_contexts),
+                    "history_message_count": len(history or []),
+                    "outer_stage_timings_ms": outer_stage_timings_ms,
+                    "adapter_total_latency_ms": round((perf_counter() - query_started) * 1000, 2),
+                },
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -2361,131 +2805,225 @@ class RAGAnythingAdapter:
         query_mode: str,
         role: str = "student",
     ) -> tuple[RAGResult | None, str | None, str | None, str | None]:
-        retrieval_question = original_question or question
-        query_parts = [question]
-        attachment_contexts = [
-            (attachment or {}).get("attachment_context")
-            for attachment in (attachments or [])
-            if (attachment or {}).get("attachment_context")
-        ]
-        if image_contexts:
-            query_parts.append(
-                "Image-derived context:\n"
-                + "\n".join(f"- {content}" for content in image_contexts[:2])
-            )
-        if attachment_contexts:
-            query_parts.append(
-                "Attachment-derived context:\n"
-                + "\n\n".join(str(content) for content in attachment_contexts[:3])
-            )
-        query_text = "\n\n".join(query_parts)
+        query_started = perf_counter()
+        stage_timings_ms: dict[str, float] = {}
+        live_trace: dict[str, Any] = {
+            "trace_version": 2,
+            "class_id": class_id,
+            "role": role,
+            "requested_query_mode": query_mode,
+            "llm_calls": [],
+        }
+        trace_token = _QUERY_TRACE_CONTEXT.set(live_trace) if bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)) else None
+
+        def mark(stage: str, started: float) -> None:
+            stage_timings_ms[stage] = round((perf_counter() - started) * 1000, 2)
 
         try:
-            rag = self._get_instance(class_id)
-        except Exception as exc:
-            logger.warning(
-                "raganything_instance_fallback",
-                class_id=class_id,
-                reason=str(exc),
-            )
-            return None, "instance_init_failed", None, self._safe_error_detail(exc)
-
-        try:
-            await self._ensure_rag_query_ready(rag)
-        except Exception as exc:
-            logger.warning(
-                "raganything_query_init_failed",
-                class_id=class_id,
-                mode=query_mode,
-                reason=str(exc),
-            )
-            return None, "query_init_failed", None, self._safe_error_detail(exc)
-
-        has_image = any((attachment or {}).get("file_type") == "image" for attachment in (attachments or []))
-        logger.info(
-            "raganything_query_attempt",
-            class_id=class_id,
-            mode=query_mode,
-            has_image=has_image,
-        )
-        try:
-            raw, query_method = await self._invoke_rag_query(
-                rag=rag,
-                query_text=query_text,
-                query_mode=query_mode,
+            retrieval_question = original_question or question
+            query_parts = [question]
+            attachment_contexts = [
+                (attachment or {}).get("attachment_context")
+                for attachment in (attachments or [])
+                if (attachment or {}).get("attachment_context")
+            ]
+            if image_contexts:
+                query_parts.append(
+                    "Image-derived context:\n"
+                    + "\n".join(f"- {content}" for content in image_contexts[:2])
+                )
+            if attachment_contexts:
+                query_parts.append(
+                    "Attachment-derived context:\n"
+                    + "\n\n".join(str(content) for content in attachment_contexts[:3])
+                )
+            query_text = "\n\n".join(query_parts)
+            live_trace.update({
+                "retrieval_question_chars": len(str(retrieval_question or "")),
+                "rag_query_text_chars": len(query_text),
+                "rag_query_text_preview": self._trace_preview(query_text),
+                "attachment_context_count": len(attachment_contexts),
+                "attachment_context_chars": sum(len(str(item)) for item in attachment_contexts),
+            })
+            aquery_history, aquery_history_meta = self._build_aquery_history(
                 history=history or [],
-                attachments=attachments or [],
-                prefer_multimodal=has_image,
-                class_id=class_id,
-                role=role,
+                query_text=query_text,
             )
-        except Exception as exc:
-            logger.warning(
-                "raganything_query_fallback",
-                class_id=class_id,
-                mode=query_mode,
-                reason=str(exc),
-            )
-            return None, "query_exception", None, self._safe_error_detail(exc)
+            live_trace["aquery_history"] = aquery_history_meta
 
-        answer, sources, confidence = self._normalize_rag_query_output(raw)
-        if not answer:
-            logger.warning(
-                "raganything_query_empty_answer",
-                class_id=class_id,
-                mode=query_mode,
-            )
-            return None, "empty_answer", query_method, None
+            stage_started = perf_counter()
+            try:
+                rag = self._get_instance(class_id)
+            except Exception as exc:
+                logger.warning(
+                    "raganything_instance_fallback",
+                    class_id=class_id,
+                    reason=str(exc),
+                )
+                return None, "instance_init_failed", None, self._safe_error_detail(exc)
+            mark("get_instance", stage_started)
 
-        sources, rerank_meta = await self._rerank_main_chain_sources(
-            question=retrieval_question,
-            sources=sources,
-        )
-        sources = self._enrich_sources_with_material_metadata(sources, class_id)
-        source_count_before_active_filter = len(sources or [])
-        sources = self._filter_sources_to_active_materials(sources, class_id)
-        if source_count_before_active_filter and not sources:
+            stage_started = perf_counter()
+            try:
+                await self._ensure_rag_query_ready(rag)
+            except Exception as exc:
+                logger.warning(
+                    "raganything_query_init_failed",
+                    class_id=class_id,
+                    mode=query_mode,
+                    reason=str(exc),
+                )
+                return None, "query_init_failed", None, self._safe_error_detail(exc)
+            mark("ensure_query_ready", stage_started)
+
+            has_image = any((attachment or {}).get("file_type") == "image" for attachment in (attachments or []))
             logger.info(
-                "raganything_query_sources_filtered_to_inactive_materials",
+                "raganything_query_attempt",
                 class_id=class_id,
                 mode=query_mode,
+                has_image=has_image,
             )
-            return None, "inactive_sources_filtered", query_method, None
-        if source_count_before_active_filter != len(sources or []):
-            rerank_meta = {
-                **rerank_meta,
-                "source_selected_count": len(sources or []),
-            }
-        if bool(settings.RAG_ANSWER_REPAIR_ENABLED) and self._answer_needs_repair(answer) and sources:
-            repaired_answer = await self._repair_answer_from_sources(
+            stage_started = perf_counter()
+            try:
+                raw, query_method = await self._invoke_rag_query(
+                    rag=rag,
+                    query_text=query_text,
+                    query_mode=query_mode,
+                    history=aquery_history,
+                    attachments=attachments or [],
+                    prefer_multimodal=has_image,
+                    class_id=class_id,
+                    role=role,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "raganything_query_fallback",
+                    class_id=class_id,
+                    mode=query_mode,
+                    reason=str(exc),
+                )
+                return None, "query_exception", None, self._safe_error_detail(exc)
+            mark("invoke_rag_query", stage_started)
+
+            stage_started = perf_counter()
+            answer, sources, confidence = self._normalize_rag_query_output(raw)
+            mark("normalize_output", stage_started)
+            query_trace = self._build_query_trace(
+                raw=raw,
+                query_method=query_method,
+                requested_mode=query_mode,
+                has_image=has_image,
+                live_trace=live_trace,
+            )
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["source_count_initial"] = len(sources or [])
+            query_trace["sources_initial"] = self._source_trace_summary(sources)
+            if not answer:
+                logger.warning(
+                    "raganything_query_empty_answer",
+                    class_id=class_id,
+                    mode=query_mode,
+                )
+                return None, "empty_answer", query_method, None
+
+            stage_started = perf_counter()
+            sources, structured_match_meta = self._augment_sources_with_structured_table_matches(
                 question=retrieval_question,
-                answer=answer,
                 sources=sources,
-                role=role,
+                class_id=class_id,
             )
-            if repaired_answer:
-                answer = repaired_answer
+            mark("structured_table_match", stage_started)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["structured_table_match"] = structured_match_meta
+            query_trace["source_count_after_structured_table_match"] = len(sources or [])
+            query_trace["sources_after_structured_table_match"] = self._source_trace_summary(sources)
+
+            stage_started = perf_counter()
+            sources, rerank_meta = await self._rerank_main_chain_sources(
+                question=retrieval_question,
+                sources=sources,
+            )
+            mark("rerank_sources", stage_started)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["source_count_after_rerank"] = len(sources or [])
+            query_trace["rerank"] = rerank_meta.get("rerank_trace")
+            stage_started = perf_counter()
+            sources = self._enrich_sources_with_material_metadata(sources, class_id)
+            mark("metadata_enrichment", stage_started)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["source_count_after_metadata_enrichment"] = len(sources or [])
+            query_trace["sources_after_metadata_enrichment"] = self._source_trace_summary(sources)
+            source_count_before_active_filter = len(sources or [])
+            stage_started = perf_counter()
+            sources = self._filter_sources_to_active_materials(sources, class_id)
+            mark("active_material_filter", stage_started)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["source_count_after_active_filter"] = len(sources or [])
+            query_trace["sources_final"] = self._source_trace_summary(sources)
+            if source_count_before_active_filter and not sources:
+                logger.info(
+                    "raganything_query_sources_filtered_to_inactive_materials",
+                    class_id=class_id,
+                    mode=query_mode,
+                )
+                return None, "inactive_sources_filtered", query_method, None
+            if source_count_before_active_filter != len(sources or []):
                 rerank_meta = {
                     **rerank_meta,
-                    "answer_repaired": True,
-                    "answer_repair_reason": "low_readability_generation",
+                    "source_selected_count": len(sources or []),
                 }
-        if confidence <= 0:
-            top_score = next((source.get("score") for source in sources if source.get("score") is not None), None)
-            confidence = min(0.95, max(0.55, float(top_score))) if top_score is not None else 0.6
+            force_structured_table_answer = bool(
+                (structured_match_meta or {}).get("matched_count")
+                and (structured_match_meta or {}).get("enabled")
+            )
+            if bool(settings.RAG_ANSWER_REPAIR_ENABLED) and sources and (
+                self._answer_needs_repair(answer) or force_structured_table_answer
+            ):
+                stage_started = perf_counter()
+                repaired_answer = await self._repair_answer_from_sources(
+                    question=retrieval_question,
+                    answer=answer,
+                    sources=sources,
+                    role=role,
+                )
+                mark("answer_repair", stage_started)
+                query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+                if repaired_answer:
+                    answer = repaired_answer
+                    rerank_meta = {
+                        **rerank_meta,
+                        "answer_repaired": True,
+                        "answer_repair_reason": (
+                            "structured_table_grounding"
+                            if force_structured_table_answer
+                            else "low_readability_generation"
+                        ),
+                    }
+                    query_trace["answer_repaired"] = True
+                    query_trace["answer_repair_reason"] = rerank_meta["answer_repair_reason"]
+            if confidence <= 0:
+                top_score = next((source.get("score") for source in sources if source.get("score") is not None), None)
+                confidence = min(0.95, max(0.55, float(top_score))) if top_score is not None else 0.6
+            query_trace["answer_chars"] = len(str(answer or ""))
+            query_trace["answer_preview"] = self._trace_preview(answer, limit=700)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["total_latency_ms"] = round((perf_counter() - query_started) * 1000, 2)
 
-        return (
-            RAGResult(
-                answer=answer,
-                sources=sources,
-                confidence=confidence,
-                suggestions=self._suggestions(retrieval_question),
-                meta=rerank_meta,
-            ),
-            None,
-            query_method,
-            None,
-        )
+            return (
+                RAGResult(
+                    answer=answer,
+                    sources=sources,
+                    confidence=confidence,
+                    suggestions=self._suggestions(retrieval_question),
+                    meta={**rerank_meta, "query_trace": query_trace},
+                ),
+                None,
+                query_method,
+                None,
+            )
+        finally:
+            if trace_token is not None:
+                _QUERY_TRACE_CONTEXT.reset(trace_token)
 
     def _build_effective_query_text(self, *, question: str, rewrite_bundle: dict[str, Any]) -> str:
         queries = [
@@ -2500,11 +3038,542 @@ class RAGAnythingAdapter:
         if not extra_queries:
             return question
 
-        return (
-            f"{question.strip()}\n\n"
-            "检索扩展关键词："
-            + "；".join(extra_queries[:3])
-        ).strip()
+        retrieval_terms = self._compact_retrieval_terms(
+            question=question,
+            rewrite_bundle=rewrite_bundle,
+            max_terms=8,
+        )
+        if not retrieval_terms:
+            return question
+
+        # Keep the submitted query clean for LightRAG keyword extraction:
+        # original standalone question + terse terms only, no instructional prose.
+        return (question.strip() + "\n" + "；".join(retrieval_terms)).strip()
+
+    def _compact_retrieval_terms(
+        self,
+        *,
+        question: str,
+        rewrite_bundle: dict[str, Any],
+        max_terms: int = 8,
+    ) -> list[str]:
+        original = re.sub(r"\s+", " ", str(question or "")).strip()
+        original_key = self._term_key(original)
+        candidates: list[str] = []
+        rejected: list[str] = []
+
+        queries = [
+            re.sub(r"\s+", " ", str(item or "").strip())
+            for item in (rewrite_bundle.get("queries") or [])
+            if str(item or "").strip()
+        ]
+        for query in queries[1:]:
+            candidates.extend(self._split_retrieval_query_terms(query))
+        for term in rewrite_bundle.get("retrieval_focus_terms", []) or []:
+            candidates.append(str(term or "").strip())
+
+        terms: list[str] = []
+        seen: set[str] = {original_key} if original_key else set()
+        for candidate in candidates:
+            normalized = self._normalize_retrieval_term(candidate)
+            key = self._term_key(normalized)
+            if not normalized or not key or key in seen:
+                continue
+            if self._is_noisy_retrieval_term(normalized):
+                rejected.append(normalized)
+                continue
+            seen.add(key)
+            terms.append(normalized)
+            if len(terms) >= max(1, int(max_terms)):
+                break
+
+        if bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
+            trace = _QUERY_TRACE_CONTEXT.get()
+            if trace is not None:
+                trace["compact_retrieval_terms"] = terms
+                trace["compact_retrieval_terms_rejected"] = rejected[:12]
+        return terms
+
+    def _split_retrieval_query_terms(self, value: str) -> list[str]:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return []
+        if len(text) <= 24 and not re.search(r"[;；,，、\n]", text):
+            return [text]
+        parts = re.split(r"[;；,，、\n]+|\s{1,}", text)
+        return [part.strip() for part in parts if part.strip()]
+
+    def _normalize_retrieval_term(self, value: str) -> str:
+        term = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n-:：;；,，、。")
+        if len(term) > 48:
+            term = term[:48].rstrip()
+        return term
+
+    def _term_key(self, value: str) -> str:
+        return re.sub(r"[\s\-_：:；;,，、。]+", "", str(value or "").strip().lower())
+
+    def _is_noisy_retrieval_term(self, term: str) -> bool:
+        normalized = self._term_key(term)
+        if not normalized:
+            return True
+        if len(normalized) <= 1:
+            return True
+        if len(normalized) > 40 and not re.search(r"[A-Za-z]", normalized):
+            return True
+        noisy_terms = {
+            "检索",
+            "检索词",
+            "检索焦点",
+            "检索辅助信息",
+            "扩展词",
+            "问题",
+            "问题意图",
+            "回答",
+            "资料",
+            "课程资料",
+            "查找",
+            "课程",
+            "内容",
+            "证据",
+            "原始问题",
+            "仅用于召回课程资料",
+            "回答时必须以原始问题为准",
+            "userquery",
+            "query",
+            "context",
+            "providedcontext",
+            "documentchunks",
+        }
+        if normalized in {self._term_key(item) for item in noisy_terms}:
+            return True
+        if re.fullmatch(r"\d+", normalized):
+            return True
+        return False
+
+    def _trace_preview(self, value: Any, *, limit: int | None = None) -> str:
+        if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
+            return ""
+        max_chars = int(limit if limit is not None else getattr(settings, "RAG_QUERY_TRACE_PREVIEW_CHARS", 1200) or 1200)
+        if max_chars <= 0:
+            return ""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "..."
+
+    def _build_query_rewrite_trace(
+        self,
+        *,
+        question: str,
+        effective_question: str,
+        rewrite_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        queries = [
+            str(item).strip()
+            for item in (rewrite_bundle.get("queries") or [])
+            if str(item).strip()
+        ]
+        compact_terms = self._compact_retrieval_terms(
+            question=question,
+            rewrite_bundle=rewrite_bundle,
+            max_terms=8,
+        )
+        return {
+            "enabled": bool(rewrite_bundle.get("enabled")),
+            "mode": rewrite_bundle.get("mode"),
+            "variant_count": rewrite_bundle.get("variant_count", len(queries)),
+            "queries": queries[: int(getattr(settings, "RAG_QUERY_REWRITE_MAX_VARIANTS", 3) or 3)],
+            "submitted_query_policy": "original_question_plus_compact_terms",
+            "submitted_compact_terms": compact_terms,
+            "intent": rewrite_bundle.get("intent"),
+            "intent_confidence": rewrite_bundle.get("intent_confidence"),
+            "intent_signals": rewrite_bundle.get("intent_signals"),
+            "retrieval_focus_terms": rewrite_bundle.get("retrieval_focus_terms"),
+            "answer_focus": rewrite_bundle.get("answer_focus"),
+            "original_question_chars": len(str(question or "")),
+            "effective_question_chars": len(str(effective_question or "")),
+            "effective_question_preview": self._trace_preview(effective_question),
+        }
+
+    def _source_trace_item(self, source: dict[str, Any], index: int) -> dict[str, Any]:
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        evidence_text = self._source_evidence_text(source)
+        return {
+            "index": index,
+            "chunk_id": source.get("chunk_id") or source.get("id") or source.get("reference_id"),
+            "source_name": source.get("source_name") or source.get("name") or source.get("file_name"),
+            "material_id": source.get("material_id") or metadata.get("material_id"),
+            "atomic_id": source.get("atomic_id") or metadata.get("atomic_id"),
+            "modality": source.get("modality") or metadata.get("modality"),
+            "page": source.get("page") or metadata.get("page") or metadata.get("page_idx"),
+            "score": source.get("score"),
+            "retrieval_score": source.get("retrieval_score"),
+            "rerank_score": source.get("rerank_score"),
+            "text_chars": len(evidence_text),
+            "text_preview": self._trace_preview(evidence_text, limit=500),
+        }
+
+    def _source_trace_summary(self, sources: list[dict] | None, *, limit: int = 8) -> dict[str, Any]:
+        normalized_sources = [source for source in (sources or []) if isinstance(source, dict)]
+        return {
+            "count": len(normalized_sources),
+            "items": [
+                self._source_trace_item(source, index)
+                for index, source in enumerate(normalized_sources[:limit], start=1)
+            ],
+        }
+
+    def _raw_context_trace(self, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            text = str(raw or "")
+            return {
+                "raw_text_chars": len(text),
+                "raw_text_preview": self._trace_preview(text, limit=500),
+            }
+
+        def text_from_item(item: Any) -> str:
+            if isinstance(item, str):
+                return item
+            if not isinstance(item, dict):
+                return ""
+            return str(
+                item.get("content")
+                or item.get("text")
+                or item.get("snippet")
+                or item.get("description")
+                or item.get("name")
+                or item.get("entity_name")
+                or ""
+            )
+
+        def list_stats(value: Any) -> dict[str, Any]:
+            if not isinstance(value, list):
+                return {"count": 0, "text_chars": 0}
+            texts = [text_from_item(item) for item in value]
+            return {
+                "count": len(value),
+                "text_chars": sum(len(text) for text in texts),
+                "first_preview": self._trace_preview(next((text for text in texts if text.strip()), ""), limit=350),
+            }
+
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+        llm_response = raw.get("llm_response") if isinstance(raw.get("llm_response"), dict) else {}
+        answer = (
+            llm_response.get("content")
+            or raw.get("answer")
+            or raw.get("response")
+            or raw.get("output")
+            or raw.get("text")
+            or ""
+        )
+        return {
+            "answer_chars": len(str(answer or "")),
+            "answer_preview": self._trace_preview(answer, limit=500),
+            "sources": list_stats(raw.get("sources")),
+            "citations": list_stats(raw.get("citations")),
+            "references": list_stats(raw.get("references")),
+            "chunks": list_stats(raw.get("chunks")),
+            "evidence": list_stats(raw.get("evidence")),
+            "data_chunks": list_stats(data.get("chunks")),
+            "data_references": list_stats(data.get("references")),
+            "data_entities": list_stats(data.get("entities")),
+            "data_relationships": list_stats(data.get("relationships")),
+            "context_sources": list_stats(context.get("sources")),
+            "context_chunks": list_stats(context.get("chunks")),
+        }
+
+    def _build_query_trace(
+        self,
+        *,
+        raw: Any,
+        query_method: str | None,
+        requested_mode: str,
+        has_image: bool,
+        live_trace: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        trace: dict[str, Any] = {
+            "trace_version": 2,
+            "query_method": query_method,
+            "requested_mode": requested_mode,
+            "used_multimodal_input": bool(has_image),
+            "raw_type": type(raw).__name__,
+            "lightrag_internal_rerank_requested": self._lightrag_internal_rerank_enabled(),
+        }
+        if live_trace:
+            trace.update({
+                key: value
+                for key, value in live_trace.items()
+                if key not in {"stage_timings_ms"}
+            })
+        trace["raw_context"] = self._raw_context_trace(raw)
+        if not isinstance(raw, dict):
+            trace["raw_has_content"] = bool(str(raw or "").strip()) if raw is not None else False
+            return trace
+
+        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+
+        trace.update({
+            "effective_mode": metadata.get("adapter_effective_mode"),
+            "attempted_modes": metadata.get("adapter_attempted_modes"),
+            "include_references_requested": metadata.get("adapter_include_references_requested"),
+            "lightrag_rerank_requested": metadata.get("adapter_lightrag_rerank_requested"),
+            "metadata_keys": sorted(str(key) for key in metadata.keys())[:24],
+            "top_level_keys": sorted(str(key) for key in raw.keys())[:24],
+        })
+
+        count_sources = lambda value: len(value) if isinstance(value, list) else 0
+        trace["raw_source_counts"] = {
+            "sources": count_sources(raw.get("sources")),
+            "citations": count_sources(raw.get("citations")),
+            "references": count_sources(raw.get("references")),
+            "chunks": count_sources(raw.get("chunks")),
+            "evidence": count_sources(raw.get("evidence")),
+            "data_chunks": count_sources(data.get("chunks")),
+            "data_references": count_sources(data.get("references")),
+            "data_entities": count_sources(data.get("entities")),
+            "data_relationships": count_sources(data.get("relationships")),
+            "context_sources": count_sources(context.get("sources")),
+            "context_chunks": count_sources(context.get("chunks")),
+        }
+        answer_key = next(
+            (
+                key for key in ("llm_response", "answer", "response", "output", "text")
+                if raw.get(key)
+            ),
+            None,
+        )
+        trace["answer_key"] = answer_key
+        return trace
+
+    def _lightrag_internal_rerank_enabled(self) -> bool:
+        provider = str(getattr(settings, "RERANKER_PROVIDER", "") or "").strip().lower()
+        return provider not in {"", "none", "mock"}
+
+    def _augment_sources_with_structured_table_matches(
+        self,
+        *,
+        question: str,
+        sources: list[dict],
+        class_id: str,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        if not self._is_structured_table_lookup_question(question):
+            return sources, {"enabled": False, "reason": "not_table_lookup"}
+
+        matched_sources = self._lookup_structured_table_sources(
+            question=question,
+            class_id=class_id,
+            limit=5,
+        )
+        if not matched_sources:
+            return sources, {"enabled": True, "matched_count": 0}
+
+        merged: list[dict] = []
+        seen: set[str] = set()
+
+        def source_key(source: dict[str, Any]) -> str:
+            metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+            explicit = source.get("chunk_id") or source.get("id") or metadata.get("chunk_id")
+            if explicit:
+                return str(explicit)
+            return self._source_evidence_text(source)[:500].lower()
+
+        for source in list(matched_sources) + list(sources or []):
+            if not isinstance(source, dict):
+                continue
+            key = source_key(source)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(source)
+
+        return merged, {
+            "enabled": True,
+            "matched_count": len(matched_sources),
+            "matched": self._source_trace_summary(matched_sources),
+        }
+
+    def _is_structured_table_lookup_question(self, question: str) -> bool:
+        text = str(question or "").strip().lower()
+        if not text:
+            return False
+        table_markers = ("表格", "表中", "中英对照", "markdown 表", "markdown table", "table")
+        lookup_markers = ("是什么", "什么意思", "含义", "定义", "解释", "对应", "哪一行", "在哪")
+        return any(marker in text for marker in table_markers) and any(marker in text for marker in lookup_markers)
+
+    def _lookup_structured_table_sources(
+        self,
+        *,
+        question: str,
+        class_id: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        query_terms = self._structured_table_query_terms(question)
+        if not query_terms:
+            return []
+
+        try:
+            db = SessionLocal()
+            tasks = (
+                db.query(FileParseTask, Material)
+                .join(Material, Material.id == FileParseTask.material_id)
+                .filter(
+                    FileParseTask.class_id == class_id,
+                    FileParseTask.status == "completed",
+                    Material.class_id == class_id,
+                    Material.is_active == True,
+                    Material.kb_status == "indexed",
+                )
+                .all()
+            )
+        except Exception as exc:
+            logger.warning("structured_table_source_lookup_failed", class_id=class_id, error=str(exc))
+            try:
+                db.close()
+            except Exception:
+                pass
+            return []
+        finally:
+            if "db" in locals():
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+        context_terms = ["中英对照", "表格", "markdown 表格", "结构化信息"]
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for task, material in tasks:
+            for index, chunk in enumerate(task.chunks or [], start=1):
+                if not isinstance(chunk, dict):
+                    continue
+                metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+                text = str(chunk.get("text") or chunk.get("content") or metadata.get("table_text") or "")
+                if not text.strip():
+                    continue
+                metadata_text = json.dumps(metadata, ensure_ascii=False).lower()
+                is_structured_table = (
+                    metadata.get("origin") == "markdown_table"
+                    or str(metadata.get("source_type") or "").lower() == "table"
+                    or "markdown 表格" in text.lower()
+                    or "结构化信息" in text
+                    or "markdown_table" in metadata_text
+                )
+                if not is_structured_table:
+                    continue
+
+                normalized_text = text.lower()
+                score = 0.0
+                exact_term_hits = 0
+                for term in query_terms:
+                    if term and term.lower() in normalized_text:
+                        exact_term_hits += 1
+                        score += 3.0 + min(2.0, len(term) / 4)
+                if exact_term_hits <= 0:
+                    continue
+                for term in context_terms:
+                    if term.lower() in normalized_text or term.lower() in metadata_text:
+                        score += 0.5
+                if metadata.get("origin") == "markdown_table":
+                    score += 1.0
+                if "第 " in text and " 行" in text:
+                    score += 0.5
+
+                chunk_id = str(
+                    chunk.get("chunk_id")
+                    or metadata.get("chunk_id")
+                    or metadata.get("atomic_id")
+                    or f"{task.material_id}-structured-table-{index}"
+                )
+                scored.append((
+                    score,
+                    {
+                        "chunk_id": chunk_id,
+                        "name": material.file_name or material.title,
+                        "source_name": material.file_name or material.title,
+                        "file_name": material.file_name or material.title,
+                        "source_type": "structured_table",
+                        "type": "table",
+                        "page": chunk.get("page") or metadata.get("page") or metadata.get("page_idx"),
+                        "material_id": material.id,
+                        "snippet": text[:1200],
+                        "raw_text": text,
+                        "retrieval_score": round(min(1.0, score / 10), 4),
+                        "metadata": {
+                            **metadata,
+                            "material_id": material.id,
+                            "source_name": material.file_name or material.title,
+                            "structured_table_match": True,
+                            "structured_table_score": round(score, 4),
+                            "structured_table_query_terms": query_terms,
+                        },
+                    },
+                ))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [source for _, source in scored[:limit]]
+
+    def _structured_table_query_terms(self, question: str) -> list[str]:
+        text = re.sub(r"\s+", " ", str(question or "")).strip()
+        if not text:
+            return []
+
+        terms: list[str] = []
+        for pattern in (
+            r"[“\"']([^“”\"']{2,30})[”\"']",
+            r"[，,、\s]([^，,、\s？?]{2,30})(?:是什么意思|是什么|的含义|含义|定义)",
+            r"([^，,、\s？?]{2,30})(?:是什么意思|是什么|的含义|含义|定义)",
+        ):
+            for match in re.findall(pattern, text):
+                cleaned = self._clean_structured_table_query_term(match)
+                if cleaned:
+                    terms.append(cleaned)
+
+        reduced = text
+        for phrase in (
+            "中英对照表格",
+            "中英对照表",
+            "中英对照",
+            "markdown表格",
+            "markdown 表格",
+            "表格",
+            "表中",
+            "里面",
+            "在",
+            "中",
+            "请问",
+            "是什么",
+            "是什么意思",
+            "什么意思",
+            "的含义",
+            "含义",
+            "定义",
+            "解释",
+        ):
+            reduced = reduced.replace(phrase, " ")
+        for token in re.split(r"[\s，,。！？?、；;：:（）()\[\]【】]+", reduced):
+            cleaned = self._clean_structured_table_query_term(token)
+            if cleaned:
+                terms.append(cleaned)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(term)
+        return deduped[:6]
+
+    def _clean_structured_table_query_term(self, value: Any) -> str:
+        term = re.sub(r"\s+", " ", str(value or "")).strip(" ：:，,。！？?、；;\"'“”")
+        if len(term) < 2 or len(term) > 30:
+            return ""
+        if term in {"表格", "中英对照", "含义", "定义", "概念", "什么", "意思", "里面", "资料"}:
+            return ""
+        return term
 
     def _filter_sources_to_active_materials(self, sources: list[dict], class_id: str) -> list[dict]:
         if not sources:
@@ -2670,8 +3739,15 @@ class RAGAnythingAdapter:
             "内容提由文字",
             "内容提取中文字",
             "在维修词语",
+            "parseInt",
+            "stdClass",
         )
         if any(marker in normalized for marker in lightrag_intermediate_markers):
+            return True
+
+        if len(re.findall(r"\\", text)) >= 8:
+            return True
+        if len(re.findall(r"(?<![A-Za-z])(?:IP|TCP|UDP|ACK|SYN|FIN)(?![A-Za-z])", text)) >= 30:
             return True
 
         repeated_backslash_words = re.findall(r"\\\s*[\u4e00-\u9fffA-Za-z]{1,6}", text)
@@ -2823,6 +3899,16 @@ class RAGAnythingAdapter:
                 "source_candidate_count": candidate_count,
                 "source_selected_count": len(selected_sources),
                 "source_top_k": top_k or None,
+                "rerank_trace": {
+                    "provider": "main_chain_native",
+                    "model": None,
+                    "applied": False,
+                    "candidate_count": candidate_count,
+                    "selected_count": len(selected_sources),
+                    "top_k": top_k or None,
+                    "before": self._source_trace_summary(sources),
+                    "after": self._source_trace_summary(selected_sources),
+                },
             }
 
         reranker = get_reranker()
@@ -2860,6 +3946,17 @@ class RAGAnythingAdapter:
             "source_candidate_count": candidate_count,
             "source_selected_count": len(normalized),
             "source_top_k": top_k or None,
+            "rerank_trace": {
+                "provider": getattr(reranker, "provider_name", "unknown"),
+                "model": getattr(reranker, "model_name", "unknown"),
+                "applied": True,
+                "candidate_count": candidate_count,
+                "candidate_with_text_count": len(candidates),
+                "selected_count": len(normalized),
+                "top_k": top_k or None,
+                "before": self._source_trace_summary(candidates),
+                "after": self._source_trace_summary(normalized),
+            },
         }
 
     def _enrich_sources_with_material_metadata(self, sources: list[dict], class_id: str) -> list[dict]:
@@ -2876,6 +3973,10 @@ class RAGAnythingAdapter:
             materials = db.query(Material).filter(
                 Material.class_id == class_id,
                 Material.is_active == True,
+            ).all()
+            parse_tasks = db.query(FileParseTask).filter(
+                FileParseTask.class_id == class_id,
+                FileParseTask.status == "completed",
             ).all()
         except Exception as exc:
             logger.warning("rag_source_material_lookup_failed", class_id=class_id, error=str(exc))
@@ -2905,6 +4006,11 @@ class RAGAnythingAdapter:
                 token = token.strip()
                 if token:
                     material_by_token[token] = material
+        task_by_material_id = {
+            str(task.material_id): task
+            for task in parse_tasks
+            if getattr(task, "material_id", None)
+        }
 
         enriched: list[dict] = []
         for source in sources:
@@ -2949,6 +4055,11 @@ class RAGAnythingAdapter:
                 next_metadata.setdefault("storage_name", storage_name)
             next_metadata.setdefault("material_title", matched.title)
             next_metadata.setdefault("material_id", matched.id)
+            atomic_payload = self._source_atomic_metadata(source, task_by_material_id.get(str(matched.id)))
+            if atomic_payload:
+                for key, value in atomic_payload.items():
+                    if value is not None:
+                        next_metadata.setdefault(key, value)
 
             enriched_source = {
                 **source,
@@ -2961,6 +4072,111 @@ class RAGAnythingAdapter:
             enriched.append(enriched_source)
 
         return enriched
+
+    def _source_atomic_metadata(self, source: dict[str, Any], task: FileParseTask | None) -> dict[str, Any]:
+        if task is None:
+            return {}
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        chunk_ids = {
+            str(value).strip()
+            for value in (
+                source.get("chunk_id"),
+                source.get("id"),
+                source.get("reference_id"),
+                metadata.get("chunk_id"),
+                metadata.get("atomic_id"),
+                metadata.get("item_id"),
+            )
+            if value
+        }
+        text = self._source_evidence_text(source)
+
+        for chunk in task.chunks or []:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+            chunk_id_values = {
+                str(value).strip()
+                for value in (
+                    chunk.get("chunk_id"),
+                    chunk.get("id"),
+                    chunk_metadata.get("chunk_id"),
+                    chunk_metadata.get("atomic_id"),
+                    chunk_metadata.get("item_id"),
+                )
+                if value
+            }
+            if chunk_ids and chunk_ids & chunk_id_values:
+                return self._atomic_payload_from_record(chunk, chunk_metadata)
+            if text and self._source_text_matches_record(text, chunk.get("text") or chunk.get("content")):
+                return self._atomic_payload_from_record(chunk, chunk_metadata)
+
+        extra = task.extra_data or {}
+        for item in extra.get("content_items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            item_id_values = {
+                str(value).strip()
+                for value in (
+                    item.get("atomic_id"),
+                    item.get("item_id"),
+                    item.get("id"),
+                    item.get("chunk_id"),
+                    item_metadata.get("atomic_id"),
+                    item_metadata.get("item_id"),
+                    item_metadata.get("chunk_id"),
+                )
+                if value
+            }
+            if chunk_ids and chunk_ids & item_id_values:
+                return self._atomic_payload_from_record(item, item_metadata)
+            item_text = (
+                item.get("text")
+                or item.get("caption")
+                or item.get("ocr_text")
+                or item.get("table_markdown")
+                or item.get("equation")
+                or item.get("formula_latex")
+            )
+            if text and self._source_text_matches_record(text, item_text):
+                return self._atomic_payload_from_record(item, item_metadata)
+        return {}
+
+    def _source_evidence_text(self, source: dict[str, Any]) -> str:
+        return re.sub(
+            r"\s+",
+            " ",
+            str(
+                source.get("raw_text")
+                or source.get("snippet")
+                or source.get("content")
+                or source.get("text")
+                or source.get("description")
+                or ""
+            ),
+        ).strip()
+
+    def _source_text_matches_record(self, source_text: str, record_text: Any) -> bool:
+        source_norm = re.sub(r"\s+", " ", str(source_text or "")).strip().lower()
+        record_norm = re.sub(r"\s+", " ", str(record_text or "")).strip().lower()
+        if not source_norm or not record_norm:
+            return False
+        source_probe = source_norm[:300]
+        record_probe = record_norm[:1200]
+        return source_probe in record_probe or record_probe[:300] in source_norm
+
+    def _atomic_payload_from_record(self, record: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "atomic_id": record.get("atomic_id") or record.get("item_id") or metadata.get("atomic_id"),
+            "item_id": record.get("item_id") or metadata.get("item_id"),
+            "modality": record.get("modality") or metadata.get("modality") or self._normalize_content_modality(
+                str(record.get("type") or metadata.get("source_type") or "")
+            ),
+            "content_index": metadata.get("content_index") or record.get("content_index"),
+            "page": record.get("page") or record.get("page_idx") or metadata.get("page") or metadata.get("page_idx"),
+            "bbox": record.get("bbox") or metadata.get("bbox"),
+        }
 
     async def _invoke_rag_query(
         self,
@@ -3077,6 +4293,9 @@ class RAGAnythingAdapter:
                 metadata = dict(raw.get("metadata") or {})
                 metadata["adapter_requested_mode"] = query_mode
                 metadata["adapter_effective_mode"] = effective_mode
+                metadata["adapter_attempted_modes"] = attempted_modes
+                metadata["adapter_include_references_requested"] = True
+                metadata["adapter_lightrag_rerank_requested"] = self._lightrag_internal_rerank_enabled()
                 raw["metadata"] = metadata
                 last_raw = raw
                 if self._query_payload_has_content(raw):
@@ -3111,10 +4330,14 @@ class RAGAnythingAdapter:
         try:
             signature = inspect.signature(QueryParam)
             supports_user_prompt = "user_prompt" in signature.parameters
+            supports_enable_rerank = "enable_rerank" in signature.parameters
         except Exception:  # pragma: no cover - optional dependency implementation detail
             supports_user_prompt = False
+            supports_enable_rerank = False
         if user_prompt and supports_user_prompt:
             kwargs["user_prompt"] = user_prompt
+        if supports_enable_rerank:
+            kwargs["enable_rerank"] = self._lightrag_internal_rerank_enabled()
         return QueryParam(**kwargs)
 
     def _query_payload_has_content(self, raw: Any) -> bool:
@@ -3687,6 +4910,11 @@ class RAGAnythingAdapter:
             if normalized_entity_type:
                 entity_query = entity_query.filter(KnowledgeEntity.entity_type == normalized_entity_type)
             entities = entity_query.all()
+            if not normalized_entity_type:
+                entities = [
+                    entity for entity in entities
+                    if self._is_course_graph_display_entity(entity)
+                ]
 
             relation_query = db.query(KnowledgeRelation).filter(
                 KnowledgeRelation.class_id.in_(class_ids),
@@ -3840,6 +5068,21 @@ class RAGAnythingAdapter:
                     }),
                 },
             }
+
+    def _is_course_graph_display_entity(self, entity: KnowledgeEntity) -> bool:
+        kind = str(((entity.source_span or {}) if isinstance(entity.source_span, dict) else {}).get("kind") or "").lower()
+        entity_type = str(entity.entity_type or "").strip().lower()
+        if kind in {"material", "content_item", "candidate_concept_identifier"}:
+            return False
+        if entity_type in {"material", "document", "file", "page", "chunk"}:
+            return False
+        if self._is_low_quality_projection_keyword(entity.name):
+            return False
+        if self._is_projection_artifact_label(entity.name):
+            return False
+        if kind.startswith("candidate_") and float(entity.confidence or 0.0) < 0.7:
+            return False
+        return True
 
     @staticmethod
     def _relation_description(

@@ -33,6 +33,39 @@ GRAPH_HIDDEN_ENTITY_KINDS = {
     "content_item",
     "candidate_concept_identifier",
 }
+GRAPH_ARTIFACT_LABELS = {
+    "表",
+    "表格",
+    "表格结构",
+    "表的结构",
+    "表的组织",
+    "表头",
+    "行",
+    "列",
+    "单元格",
+    "图片",
+    "图像",
+    "公式",
+    "文件",
+    "文档",
+    "材料",
+    "markdown",
+    "markdown table",
+    "table",
+    "table structure",
+    "table organization",
+    "row",
+    "column",
+    "cell",
+    "header",
+    "image",
+    "figure",
+    "equation",
+    "formula",
+    "document",
+    "file",
+    "material",
+}
 GRAPH_HIDDEN_RELATION_KINDS = {
     "entity_material_link",
     "candidate_material_link",
@@ -1216,6 +1249,22 @@ def _looks_like_graph_noise_label(label: str | None) -> bool:
         return True
     if "/" in normalized or "\\" in normalized:
         return True
+    compact = re.sub(r"[\s_：:：-]+", "", normalized_key)
+    artifact_compacts = {
+        re.sub(r"[\s_：:：-]+", "", item.lower())
+        for item in GRAPH_ARTIFACT_LABELS
+    }
+    if normalized.lower() in GRAPH_ARTIFACT_LABELS or compact in artifact_compacts:
+        return True
+    artifact_patterns = (
+        r"^(?:第?\d+[行列]|row\s*\d+|column\s*\d+)$",
+        r"^(?:表格?|table)\s*(?:\d+|结构|内容|组织|摘要|描述)?$",
+        r"^(?:图片|图像|figure|image)\s*(?:\d+|内容|描述|摘要)?$",
+        r"^(?:公式|equation|formula)\s*(?:\d+|内容|描述|摘要)?$",
+        r"^(?:页码|页面|page)\s*\d*$",
+    )
+    if any(re.fullmatch(pattern, normalized, flags=re.IGNORECASE) for pattern in artifact_patterns):
+        return True
     return False
 
 
@@ -1223,7 +1272,7 @@ def _is_default_graph_entity(entity: KnowledgeEntity) -> bool:
     kind = _graph_source_kind(entity.source_span)
     entity_type = str(entity.entity_type or "").strip().lower()
 
-    if kind in GRAPH_HIDDEN_ENTITY_KINDS or entity_type == "material":
+    if kind in GRAPH_HIDDEN_ENTITY_KINDS or entity_type in {"material", "document", "file", "page", "chunk"}:
         return False
     if _looks_like_graph_noise_label(entity.name):
         return False

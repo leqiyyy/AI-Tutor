@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+import contextlib
 from time import perf_counter
 from uuid import uuid4
 
@@ -28,6 +30,7 @@ from app.core.request_context import reset_request_id, reset_trace_id, set_reque
 from app.core.redis import close_redis
 from app.core.responses import ok
 from app.integrations.rag import shutdown_rag_engine
+from app.services.rag_warmup_service import schedule_rag_warmup
 
 logger = get_logger(__name__)
 
@@ -45,7 +48,12 @@ async def lifespan(_: FastAPI):
     if settings.AUTO_CREATE_TABLES:
         initialize_database()
         logger.info("database_initialized", auto_create_tables=True)
+    warmup_task = schedule_rag_warmup()
     yield
+    if warmup_task and not warmup_task.done():
+        warmup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warmup_task
     await shutdown_rag_engine()
     close_redis()
     logger.info("app_stopped")

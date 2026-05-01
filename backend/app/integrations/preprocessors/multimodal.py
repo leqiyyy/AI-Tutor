@@ -218,11 +218,20 @@ def _extract_structured_markdown_items(
 
     items: list[dict[str, Any]] = []
     for index, table_markdown in enumerate(_extract_markdown_tables(text), start=1):
-        table_text = _markdown_table_to_fact_text(table_markdown, file_name=file_name, index=index)
+        table_rows = _parse_markdown_table(table_markdown)
+        table_headers = list(table_rows[0].keys()) if table_rows else []
+        table_text = _markdown_table_to_fact_text(
+            table_markdown,
+            file_name=file_name,
+            index=index,
+            parsed_rows=table_rows,
+        )
         items.append({
             "type": "table",
             "text": table_text or f"Markdown table extracted from {file_name}:\n{table_markdown}",
             "table_markdown": table_markdown,
+            "table_headers": table_headers,
+            "table_rows": table_rows,
             "page_idx": 0,
             "metadata": {
                 "source_name": file_name,
@@ -231,6 +240,9 @@ def _extract_structured_markdown_items(
                 "origin": "markdown_table",
                 "content_index": index,
                 "table_text": table_text,
+                "table_headers": table_headers,
+                "row_count": len(table_rows),
+                "column_count": len(table_headers),
             },
         })
 
@@ -286,8 +298,14 @@ def _looks_like_table_separator(line: str) -> bool:
     return all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
 
 
-def _markdown_table_to_fact_text(table_markdown: str, *, file_name: str, index: int) -> str:
-    rows = _parse_markdown_table(table_markdown)
+def _markdown_table_to_fact_text(
+    table_markdown: str,
+    *,
+    file_name: str,
+    index: int,
+    parsed_rows: list[dict[str, str]] | None = None,
+) -> str:
+    rows = parsed_rows if parsed_rows is not None else _parse_markdown_table(table_markdown)
     if not rows:
         return ""
 

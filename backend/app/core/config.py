@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     RAGANYTHING_QUERY_MODE: str = "mix"
     RAGANYTHING_MAX_CONCURRENT_FILES: int = 1
     RAGANYTHING_DEFAULT_LLM_TIMEOUT_SECONDS: int = 180
+    RAG_WARMUP_ON_STARTUP: bool = False
+    RAG_WARMUP_MAX_CLASSES: int = 3
+    RAG_WARMUP_STARTUP_DELAY_SECONDS: float = 5.0
     RAG_EDUCATION_PROMPTS_ENABLED: bool = True
     RAG_EDUCATION_QUERY_PROMPT_ENABLED: bool = True
     RAG_EDUCATION_ENTITY_TYPES_ENABLED: bool = True
@@ -138,6 +141,11 @@ class Settings(BaseSettings):
     RAG_QUERY_REWRITE_ENABLED: bool = False
     RAG_QUERY_REWRITE_MODE: str = "hybrid"  # none | hybrid | compact | keywords; legacy simple maps to hybrid
     RAG_QUERY_REWRITE_MAX_VARIANTS: int = 3
+    RAG_QUERY_TRACE_ENABLED: bool = True
+    RAG_QUERY_TRACE_PREVIEW_CHARS: int = 1200
+    RAG_AQUERY_HISTORY_POLICY: str = "compact"  # none | compact | full
+    RAG_AQUERY_HISTORY_MAX_MESSAGES: int = 4
+    RAG_AQUERY_HISTORY_MESSAGE_MAX_CHARS: int = 500
     RAG_ANSWER_REPAIR_ENABLED: bool = True
     RERANKER_PROVIDER: str = "mock"  # mock | none | api | local
     RERANKER_MODEL: str = "mock-reranker-v1"
@@ -175,10 +183,12 @@ class Settings(BaseSettings):
         "KB_QUEUE_AUTO_RETRY_ENABLED",
         "KB_INDEX_ALERT_NOTIFY_ADMIN",
         "RAG_QUERY_REWRITE_ENABLED",
+        "RAG_QUERY_TRACE_ENABLED",
         "RAG_ANSWER_REPAIR_ENABLED",
         "RAGANYTHING_STRICT_MODE",
         "RAGANYTHING_METADATA_FALLBACK_ENABLED",
         "RAGANYTHING_REQUIRE_OFFICIAL_METADATA",
+        "RAG_WARMUP_ON_STARTUP",
         "RAG_EDUCATION_PROMPTS_ENABLED",
         "RAG_EDUCATION_QUERY_PROMPT_ENABLED",
         "RAG_EDUCATION_ENTITY_TYPES_ENABLED",

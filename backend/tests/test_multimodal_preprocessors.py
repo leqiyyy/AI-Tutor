@@ -50,6 +50,10 @@ def test_markdown_preprocessor_extracts_table_and_formula(tmp_path: Path):
     table = next(item for item in result.content_list if item["type"] == "table")
     equation = next(item for item in result.content_list if item["type"] == "equation")
     assert "throughput" in table["table_markdown"]
+    assert table["table_headers"] == ["metric", "value", "unit"]
+    assert table["table_rows"] == [{"metric": "throughput", "value": "125", "unit": "Mbps"}]
+    assert table["metadata"]["row_count"] == 1
+    assert table["metadata"]["column_count"] == 3
     assert equation["formula_latex"] == "v = d / t"
 
 

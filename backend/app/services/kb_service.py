@@ -1646,6 +1646,16 @@ def _normalize_content_items(items: Any, *, material_id: str) -> list[dict[str, 
                 metadata.get("table_markdown"),
                 metadata.get("table_md"),
             ),
+            "table_headers": item.get("table_headers") or metadata.get("table_headers"),
+            "table_rows": item.get("table_rows") or metadata.get("table_rows"),
+            "row_count": _safe_int(_coalesce(
+                item.get("row_count"),
+                metadata.get("row_count"),
+            )),
+            "column_count": _safe_int(_coalesce(
+                item.get("column_count"),
+                metadata.get("column_count"),
+            )),
             "formula_latex": _coalesce(
                 item.get("formula_latex"),
                 item.get("latex"),
