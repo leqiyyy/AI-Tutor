@@ -149,7 +149,7 @@ def _msg_to_dict(message: ChatMessage) -> dict:
         "session_id": message.session_id,
         "role": message.role,
         "content": message.content,
-        "attachments": message.attachments,
+        "attachments": sanitize_chat_attachments_for_history(message.attachments),
         "sources": sources,
         "suggestions": message.suggestions,
         "confidence": message.confidence,
@@ -213,7 +213,7 @@ async def send_message(
         session_id=session.id,
         role="user",
         content=content,
-        attachments=prepared_attachments,
+        attachments=sanitize_chat_attachments_for_history(prepared_attachments),
     )
     db.add(user_msg)
     db.flush()
@@ -1201,6 +1201,57 @@ def prepare_chat_attachments(attachments: Optional[List[dict]], user_id: str | N
         )
         prepared.append(item)
     return prepared
+
+
+def sanitize_chat_attachments_for_history(attachments: Optional[List[dict]]) -> List[dict]:
+    """Keep only display-safe attachment metadata in persisted chat history."""
+    sanitized: list[dict] = []
+    for attachment in attachments or []:
+        if not isinstance(attachment, dict):
+            continue
+        file_name = str(attachment.get("name") or attachment.get("file_name") or "attachment")
+        mime_type = str(
+            attachment.get("mime_type")
+            or attachment.get("mimeType")
+            or mimetypes.guess_type(file_name)[0]
+            or "application/octet-stream"
+        )
+        file_type = str(attachment.get("file_type") or attachment.get("fileType") or _guess_attachment_file_type(file_name, mime_type))
+        try:
+            size = int(attachment.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        item = {
+            "id": str(attachment.get("id") or attachment.get("storage_key") or attachment.get("storageKey") or file_name),
+            "name": file_name,
+            "size": size,
+            "mime_type": mime_type,
+            "file_type": file_type,
+        }
+        storage_key = attachment.get("storage_key") or attachment.get("storageKey")
+        if storage_key:
+            item["storage_key"] = str(storage_key)
+        expires_at = attachment.get("expires_at") or attachment.get("expiresAt")
+        if expires_at:
+            item["expires_at"] = expires_at
+        sanitized.append(item)
+    return sanitized
+
+
+def _guess_attachment_file_type(file_name: str, mime_type: str) -> str:
+    lower_name = file_name.lower()
+    lower_mime = mime_type.lower()
+    if lower_mime.startswith("image/"):
+        return "image"
+    if lower_mime == "application/pdf" or lower_name.endswith(".pdf"):
+        return "pdf"
+    if lower_name.endswith((".docx", ".doc")):
+        return "docx"
+    if lower_name.endswith((".md", ".markdown")):
+        return "md"
+    if lower_name.endswith((".py", ".js", ".ts", ".tsx", ".java", ".cpp", ".c", ".go", ".rs")):
+        return "code"
+    return "other"
 
 
 def _resolve_chat_attachment_file_path(attachment: dict, user_id: str | None = None) -> str | None:

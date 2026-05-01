@@ -226,15 +226,13 @@ function FeedbackDetailModal({ item, onClose, onResolve }: {
               <AiMarkdownContent content={cleanAiAnswer} />
             </div>
           </div>
-          {item.reason && (
-            <div>
-              <div className="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">学生反馈原因</div>
-              <div className="flex items-start gap-2 px-3 py-2.5 bg-orange-50 rounded-lg border border-orange-100">
-                <i className="ri-feedback-line text-orange-500 text-sm mt-0.5 flex-shrink-0"></i>
-                <span className="text-sm text-orange-800">{item.reason}</span>
-              </div>
+          <div>
+            <div className="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">学生反馈原因</div>
+            <div className="flex items-start gap-2 px-3 py-2.5 bg-orange-50 rounded-lg border border-orange-100">
+              <i className="ri-feedback-line text-orange-500 text-sm mt-0.5 flex-shrink-0"></i>
+              <span className="text-sm text-orange-800">{item.reason || '学生未填写具体原因'}</span>
             </div>
-          )}
+          </div>
           {item.status === 'pending' && (
             <div>
               <div className="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">教师纠正答案</div>
@@ -611,11 +609,16 @@ export default function TeacherAIAssistant() {
     setMessages(conv.messages.length > 0 ? conv.messages : [{ ...INIT_WELCOME }]);
     setCurrentSources([]);
     setAttachedFiles([]);
-    const loadedMessages = await aiService.getConversationMessages('teacher', convId);
-    const finalMessages = loadedMessages.length > 0 ? loadedMessages : conv.messages;
-    setMessages(finalMessages);
-    const latestAiMessage = [...finalMessages].reverse().find(msg => msg.role === 'ai' && !msg.isWelcome);
-    void syncMessageSources(latestAiMessage);
+    try {
+      const loadedMessages = await aiService.getConversationMessages('teacher', convId);
+      const finalMessages = loadedMessages.length > 0 ? loadedMessages : conv.messages;
+      setMessages(finalMessages);
+      const latestAiMessage = [...finalMessages].reverse().find(msg => msg.role === 'ai' && !msg.isWelcome);
+      void syncMessageSources(latestAiMessage);
+    } catch (error) {
+      console.error('加载历史会话失败', error);
+      setMessages(conv.messages.length > 0 ? conv.messages : [{ ...INIT_WELCOME }]);
+    }
   };
 
   const handleNewConversation = () => {
@@ -953,7 +956,7 @@ export default function TeacherAIAssistant() {
                   {msg.attachments && msg.attachments.length > 0 && (
                     <div className={`flex flex-wrap gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       {msg.attachments.map(f => {
-                        const cfg = fileTypeConfig[f.fileType];
+                        const cfg = fileTypeConfig[f.fileType] || fileTypeConfig.other;
                         return (
                           <div key={f.id} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs ${msg.role === 'user' ? 'bg-teal-50 border-teal-200' : 'bg-gray-50 border-gray-200'}`}>
                             {f.fileType === 'image' && f.preview ? (
@@ -1044,7 +1047,7 @@ export default function TeacherAIAssistant() {
               {attachedFiles.length > 0 && (
                 <div className="px-3 pt-3 pb-2 flex flex-wrap gap-2 border-b border-gray-200/60">
                   {attachedFiles.map(f => {
-                    const cfg = fileTypeConfig[f.fileType];
+                    const cfg = fileTypeConfig[f.fileType] || fileTypeConfig.other;
                     return (
                       <div key={f.id} className="group relative flex items-center gap-1.5 pl-2 pr-1 py-1 bg-white border border-gray-200 rounded-lg text-xs max-w-[180px]">
                         {f.fileType === 'image' && f.preview ? <img src={f.preview} alt={f.name} className="w-5 h-5 object-cover rounded flex-shrink-0" /> : <div className={`w-5 h-5 flex items-center justify-center rounded flex-shrink-0 ${cfg.bg}`}><i className={`${cfg.icon} ${cfg.color} text-xs`}></i></div>}

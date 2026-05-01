@@ -1,11 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import os
 import re
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.response import ok
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Task
+from app.models.chat import ChatMessage, ReviewItem
 from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.user import User
@@ -1574,13 +1575,77 @@ def ai_message_sources(
 
 
 @router.post("/ai/feedback", response_model=None)
-def ai_feedback(current_user: User = Depends(get_current_user)):
-    return ok(message="Feedback recorded")
+async def ai_feedback(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    payload = await _read_json_payload(request)
+    updated = _backfill_legacy_feedback_reason(db, current_user.id, payload)
+    return ok(data={"reason_backfilled": updated}, message="Feedback recorded")
 
 
 @router.post("/ai/escalate", response_model=None)
-def ai_escalate(current_user: User = Depends(get_current_user)):
-    return ok(message="Escalation request recorded")
+async def ai_escalate(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    payload = await _read_json_payload(request)
+    updated = _backfill_legacy_feedback_reason(db, current_user.id, payload)
+    return ok(data={"reason_backfilled": updated}, message="Escalation request recorded")
+
+
+async def _read_json_payload(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _backfill_legacy_feedback_reason(db: Session, user_id: str, payload: dict[str, Any]) -> bool:
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        return False
+
+    question = str(payload.get("questionContent") or payload.get("question_content") or "").strip()
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+    query = (
+        db.query(ReviewItem)
+        .join(ChatMessage, ChatMessage.id == ReviewItem.message_id)
+        .filter(
+            ReviewItem.student_id == user_id,
+            ReviewItem.trigger == "dislike",
+            ReviewItem.status == "pending",
+            ChatMessage.feedback == "dislike",
+            (ChatMessage.feedback_reason == None) | (ChatMessage.feedback_reason == ""),
+        )
+        .order_by(ReviewItem.created_at.desc())
+    )
+    items = query.limit(8).all()
+    target = None
+    if question:
+        target = next((item for item in items if str(item.question_content or "").strip() == question), None)
+    if target is None:
+        target = next((item for item in items if _aware_datetime(item.created_at) >= recent_cutoff), None)
+    if target is None and items:
+        target = items[0]
+    if target is None or not target.message:
+        return False
+
+    target.message.feedback_reason = reason
+    db.add(target.message)
+    db.commit()
+    return True
+
+
+def _aware_datetime(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 @router.patch("/ai/context", response_model=None)

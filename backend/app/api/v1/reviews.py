@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -30,11 +31,14 @@ class ManualEscalationRequest(BaseModel):
 def pending_reviews(
     course_id: Optional[str] = Query(None),
     class_id: Optional[str] = Query(None),
+    include_auto: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
     teacher_class_ids = [cls.id for cls in db.query(Class).filter(Class.teacher_id == current_user.id, Class.is_active == True).all()]
     query = db.query(ReviewItem).filter(ReviewItem.class_id.in_(teacher_class_ids), ReviewItem.status == "pending")
+    if not include_auto:
+        query = query.filter(ReviewItem.trigger != "low_confidence")
     if class_id:
         query = query.filter(ReviewItem.class_id == class_id)
     if course_id:
@@ -58,7 +62,7 @@ def pending_reviews(
             "question_content": item.question_content,
             "ai_answer": item.ai_answer,
             "teacher_answer": item.teacher_answer,
-            "feedback_reason": message.feedback_reason if message else None,
+            "feedback_reason": _feedback_reason_for_item(item, message),
             "status": item.status,
             "quality": build_evidence_quality(sources, confidence),
             "review_context": build_review_context(
@@ -70,6 +74,16 @@ def pending_reviews(
             "created_at": item.created_at,
         })
     return ok(data=data)
+
+
+def _feedback_reason_for_item(item: ReviewItem, message: ChatMessage | None) -> str | None:
+    if message and message.feedback_reason:
+        return message.feedback_reason
+    if item.trigger == "manual":
+        match = re.search(r"(?:Student note|学生备注)\s*[:：]\s*(.+)\s*$", item.ai_answer or "", re.I | re.S)
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 @router.post("/{review_id}/submit", response_model=None)

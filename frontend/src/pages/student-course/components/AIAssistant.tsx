@@ -227,8 +227,13 @@ export default function AIAssistant() {
     setAttachedFiles([]);
     setRecommendations(getRecommendations(conv.messages));
 
-    const loadedMessages = await aiService.getConversationMessages('student', convId);
-    setMessages(loadedMessages.length > 0 ? loadedMessages : conv.messages);
+    try {
+      const loadedMessages = await aiService.getConversationMessages('student', convId);
+      setMessages(loadedMessages.length > 0 ? loadedMessages : conv.messages);
+    } catch (error) {
+      console.error('加载历史会话失败', error);
+      setMessages(conv.messages.length > 0 ? conv.messages : [{ ...INIT_WELCOME }]);
+    }
   };
 
   const handleNewConversation = () => {
@@ -655,7 +660,7 @@ export default function AIAssistant() {
                   {msg.attachments && msg.attachments.length > 0 && (
                     <div className={`flex flex-wrap gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       {msg.attachments.map(f => {
-                        const cfg = fileTypeConfig[f.fileType];
+                        const cfg = fileTypeConfig[f.fileType] || fileTypeConfig.other;
                         return (
                           <div key={f.id} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs ${msg.role === 'user' ? 'bg-teal-50 border-teal-200' : 'bg-gray-50 border-gray-200'}`}>
                             {f.fileType === 'image' && f.preview ? (
@@ -804,7 +809,7 @@ export default function AIAssistant() {
               {attachedFiles.length > 0 && (
                 <div className="px-3 pt-3 pb-2 flex flex-wrap gap-2 border-b border-gray-200/60">
                   {attachedFiles.map(f => {
-                    const cfg = fileTypeConfig[f.fileType];
+                    const cfg = fileTypeConfig[f.fileType] || fileTypeConfig.other;
                     return (
                       <div key={f.id} className="group relative flex items-center gap-1.5 pl-2 pr-1 py-1 bg-white border border-gray-200 rounded-lg text-xs max-w-[180px]">
                         {f.fileType === 'image' && f.preview ? (

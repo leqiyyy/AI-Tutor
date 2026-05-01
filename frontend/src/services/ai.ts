@@ -65,7 +65,7 @@ type BackendMessage = {
   role: "user" | "assistant" | "ai";
   content: string;
   created_at?: string;
-  attachments?: AiAttachment[];
+  attachments?: BackendAttachment[];
   sources?: Array<{
     name?: string;
     file_name?: string;
@@ -140,11 +140,17 @@ type BackendRouteMeta = {
 
 type BackendAttachment = {
   id?: string;
-  storage_key?: string;
   name?: string;
+  file_name?: string;
+  fileName?: string;
   size?: number;
   mime_type?: string;
+  mimeType?: string;
   file_type?: AiAttachment["fileType"];
+  fileType?: AiAttachment["fileType"];
+  storage_key?: string;
+  storageKey?: string;
+  preview?: string;
 };
 
 type BackendQueryRequest = {
@@ -215,6 +221,32 @@ function normalizeSource(source: NonNullable<BackendMessage["sources"]>[number])
   };
 }
 
+function normalizeAttachment(attachment: BackendAttachment): AiAttachment | undefined {
+  const name = attachment.name || attachment.file_name || attachment.fileName || "attachment";
+  const mimeType = attachment.mime_type || attachment.mimeType || "application/octet-stream";
+  const fileType = attachment.file_type || attachment.fileType || guessFileType(name, mimeType);
+  return {
+    id: String(attachment.id || attachment.storage_key || attachment.storageKey || name),
+    name,
+    size: Number(attachment.size || 0),
+    mimeType,
+    fileType,
+    storageKey: attachment.storage_key || attachment.storageKey,
+    preview: attachment.preview,
+  };
+}
+
+function guessFileType(name: string, mimeType: string): AiAttachment["fileType"] {
+  const lowerName = name.toLowerCase();
+  const lowerMime = mimeType.toLowerCase();
+  if (lowerMime.startsWith("image/")) return "image";
+  if (lowerMime === "application/pdf" || lowerName.endsWith(".pdf")) return "pdf";
+  if (lowerName.endsWith(".docx") || lowerName.endsWith(".doc")) return "docx";
+  if (lowerName.endsWith(".md") || lowerName.endsWith(".markdown")) return "md";
+  if (/\.(py|js|ts|tsx|java|cpp|c|go|rs)$/.test(lowerName)) return "code";
+  return "other";
+}
+
 function normalizeRouteMeta(meta?: BackendRouteMeta): AiRouteMeta | undefined {
   if (!meta) return undefined;
   return {
@@ -239,7 +271,7 @@ function normalizeMessage(message: BackendMessage): AiMessage {
     role: message.role === "user" ? "user" : "ai",
     content: message.content,
     time: message.created_at || new Date().toISOString(),
-    attachments: message.attachments,
+    attachments: message.attachments?.map(normalizeAttachment).filter((item): item is AiAttachment => Boolean(item)),
     sources: message.sources?.map(normalizeSource),
     confidence: message.confidence,
     quality: message.quality,
@@ -251,10 +283,7 @@ function normalizeMessage(message: BackendMessage): AiMessage {
 
 function normalizeFeedbackItem(item: BackendReviewItem): AiFeedbackItem {
   const reviewContext = item.review_context || {};
-  const rawReasons = reviewContext["review_reasons"];
-  const reasons = Array.isArray(rawReasons)
-    ? rawReasons.join("、")
-    : "";
+  const studentReason = String(item.feedback_reason || "").trim();
   return {
     id: item.id,
     messageId: item.message_id,
@@ -270,7 +299,7 @@ function normalizeFeedbackItem(item: BackendReviewItem): AiFeedbackItem {
     questionContent: item.question_content || "",
     aiAnswer: item.ai_answer || "",
     teacherAnswer: item.teacher_answer || "",
-    reason: item.feedback_reason || reasons || "学生认为该回答需要教师审核",
+    reason: studentReason,
     timestamp: item.created_at || new Date().toISOString(),
     status: item.status === "resolved" ? "resolved" : "pending",
     trigger: item.trigger,
@@ -721,7 +750,7 @@ export const aiService = {
     return shouldUseMockApi
       ? getMockFeedbackQueue()
       : (await http<BackendReviewItem[]>("/reviews/pending", {
-          query: { class_id: classId },
+          query: { class_id: classId, include_auto: false },
         })).map(normalizeFeedbackItem);
   },
 
