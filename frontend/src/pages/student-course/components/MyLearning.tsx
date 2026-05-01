@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { learningService } from '@/services/learning';
+import { recommendationService } from '@/services/recommendations';
 import type { LearningOverviewData, LearningReportData } from '@/types/learning';
+import type { PersonalizedRecommendation } from '@/types/recommendation';
 
 interface WordItem {
   word: string;
@@ -28,6 +30,16 @@ const REPORT_CARD_CLASSES: Record<string, { box: string; value: string }> = {
   green: { box: 'bg-green-50 border-green-100', value: 'text-green-600' },
   sky: { box: 'bg-sky-50 border-sky-100', value: 'text-sky-600' },
   violet: { box: 'bg-violet-50 border-violet-100', value: 'text-violet-600' },
+};
+const RECOMMENDATION_ICON_MAP: Record<string, { icon: string; color: string; bg: string }> = {
+  material: { icon: 'ri-file-text-line', color: 'text-sky-600', bg: 'bg-sky-50' },
+  concept: { icon: 'ri-mind-map', color: 'text-teal-600', bg: 'bg-teal-50' },
+  faq: { icon: 'ri-question-answer-line', color: 'text-indigo-600', bg: 'bg-indigo-50' },
+  mistake: { icon: 'ri-error-warning-line', color: 'text-amber-600', bg: 'bg-amber-50' },
+  flashcard: { icon: 'ri-stack-line', color: 'text-emerald-600', bg: 'bg-emerald-50' },
+  path: { icon: 'ri-route-line', color: 'text-violet-600', bg: 'bg-violet-50' },
+  task: { icon: 'ri-task-line', color: 'text-orange-600', bg: 'bg-orange-50' },
+  followup: { icon: 'ri-chat-follow-up-line', color: 'text-pink-600', bg: 'bg-pink-50' },
 };
 
 function hexPoints(cx: number, cy: number, r: number, n: number): [number, number][] {
@@ -129,6 +141,7 @@ export default function MyLearning({ courseId }: MyLearningProps) {
   const [weeklyReport, setWeeklyReport] = useState<LearningReportData | null>(null);
   const [monthlyReport, setMonthlyReport] = useState<LearningReportData | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const [recommendations, setRecommendations] = useState<PersonalizedRecommendation[]>([]);
   const { summaryCards, radarData, keywordData, weekHours, chapterProgress } = overview;
 
   const rebuildCloud = useCallback((w: number, h: number) => {
@@ -153,6 +166,15 @@ export default function MyLearning({ courseId }: MyLearningProps) {
       })
       .catch(() => {
         if (mounted) setOverview(EMPTY_LEARNING_OVERVIEW);
+      });
+
+    recommendationService
+      .getPersonalized(courseId, 'my_learning', { limit: 6 })
+      .then((data) => {
+        if (mounted) setRecommendations(data.items);
+      })
+      .catch(() => {
+        if (mounted) setRecommendations([]);
       });
 
     return () => {
@@ -223,6 +245,16 @@ export default function MyLearning({ courseId }: MyLearningProps) {
       fields: exportFields,
     });
     setShowExportModal(false);
+  };
+
+  const handleRecommendationClick = (rec: PersonalizedRecommendation) => {
+    void recommendationService.recordEvent({
+      recommendation_type: rec.type,
+      target_id: rec.targetId,
+      event_type: 'click',
+      score: rec.score,
+      extra_data: { surface: rec.surface, action: rec.action?.type },
+    }).catch(() => undefined);
   };
 
   const renderReportModal = (
@@ -484,6 +516,59 @@ export default function MyLearning({ courseId }: MyLearningProps) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* 个性化推荐 */}
+      <div className="bg-white rounded-xl p-5 border border-gray-200">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">为你推荐</h2>
+            <p className="text-xs text-gray-400 mt-0.5">结合知识掌握、错题、闪卡和最近提问生成</p>
+          </div>
+          <span className="text-xs text-teal-600 bg-teal-50 border border-teal-100 rounded-full px-2 py-1">
+            {recommendations.length} 条建议
+          </span>
+        </div>
+        {recommendations.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50/80 px-4 py-8 text-center">
+            <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-gray-400">
+              <i className="ri-compass-3-line text-xl"></i>
+            </div>
+            <div className="text-xs font-medium text-gray-700">暂无可展示的个性化推荐</div>
+            <div className="mt-1 text-xs text-gray-400">完成更多问答、错题或闪卡复习后，这里会变得更准确</div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            {recommendations.map((rec) => {
+              const iconInfo = RECOMMENDATION_ICON_MAP[rec.type] || RECOMMENDATION_ICON_MAP.material;
+              return (
+                <button
+                  key={rec.id}
+                  type="button"
+                  onClick={() => handleRecommendationClick(rec)}
+                  className="text-left rounded-lg border border-gray-100 p-3 hover:border-teal-200 hover:bg-teal-50/40 transition-colors"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${iconInfo.bg}`}>
+                      <i className={`${iconInfo.icon} ${iconInfo.color} text-base`}></i>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-semibold text-gray-900 line-clamp-2">{rec.title}</div>
+                      <div className="text-xs text-gray-500 mt-1 line-clamp-2">{rec.description}</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-400 line-clamp-2">{rec.reason}</div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <div className="h-1.5 flex-1 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-teal-400 rounded-full" style={{ width: `${rec.relevance}%` }}></div>
+                    </div>
+                    <span className="text-xs font-semibold text-teal-600">{rec.relevance}%</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 课程章节进度 */}

@@ -4,6 +4,7 @@ import { AiMarkdownContent } from '@/components/AiMarkdownContent';
 import { AiProgressTimeline } from '@/components/AiProgressTimeline';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
 import { aiService } from '@/services/ai';
+import { recommendationService } from '@/services/recommendations';
 import type {
   AiAttachment as AttachedFile,
   AiAnswerMode,
@@ -12,9 +13,9 @@ import type {
   AiMessage as Message,
   AiMessageSource,
   AiProgressEvent,
-  AiResourceRecommendation as ResourceRecommendation,
   AiResponseStyle,
 } from '@/types/ai';
+import type { PersonalizedRecommendation } from '@/types/recommendation';
 
 const ANSWER_MODES: Array<{ value: AiAnswerMode; label: string; title: string }> = [
   { value: 'auto', label: '自动', title: '自动判断是否需要检索课程资料' },
@@ -45,23 +46,41 @@ function generateTitle(firstMessage: string): string {
   return firstMessage.slice(0, 18) + '…';
 }
 
-const ALL_RESOURCES: ResourceRecommendation[] = [
-  { id: 1, title: 'TCP三次握手与四次挥手详解', type: 'video', chapter: '第5章 传输层', relevance: 96, reason: '与您的TCP提问高度相关', matchKeywords: ['TCP', '握手', '连接'] },
-  { id: 2, title: '第5章 传输层.pdf', type: 'pdf', chapter: '第5章 传输层', relevance: 92, reason: '包含本次问题的详细讲解', matchKeywords: ['TCP', 'UDP', '传输层'] },
-  { id: 3, title: 'HTTP/HTTPS协议深入解析', type: 'pdf', chapter: '第6章 应用层', relevance: 88, reason: '应用层协议综合资料', matchKeywords: ['HTTP', 'HTTPS', '应用层'] },
-  { id: 4, title: '子网划分练习题集', type: 'exercise', chapter: '第4章 网络层', relevance: 85, reason: '包含大量子网掩码计算题', matchKeywords: ['子网', 'CIDR', 'IP地址'] },
-  { id: 5, title: '网络层IP协议精讲.pptx', type: 'ppt', chapter: '第4章 网络层', relevance: 82, reason: '与当前学习进度匹配', matchKeywords: ['IP', '网络层', '路由'] },
-  { id: 6, title: 'TCP拥塞控制算法动画', type: 'video', chapter: '第5章 传输层', relevance: 90, reason: '动画演示拥塞控制过程', matchKeywords: ['拥塞', '慢启动', '快速重传'] },
+const FALLBACK_RECOMMENDATIONS: PersonalizedRecommendation[] = [
+  {
+    id: 'fallback:tcp-handshake',
+    targetId: 'tcp-handshake',
+    type: 'material',
+    title: 'TCP 三次握手与四次挥手',
+    description: '适合补充复习传输层连接建立与释放过程。',
+    relevance: 86,
+    score: 0.86,
+    surface: 'ai_panel',
+    reason: '根据课程常见提问生成的备用推荐。',
+    action: { type: 'ask_ai', label: '让 AI 讲解', payload: { prompt: '请讲解 TCP 三次握手与四次挥手的过程和区别' } },
+  },
+  {
+    id: 'fallback:congestion',
+    targetId: 'tcp-congestion',
+    type: 'concept',
+    title: 'TCP 拥塞控制',
+    description: '重点理解慢启动、拥塞避免、快重传与快恢复。',
+    relevance: 82,
+    score: 0.82,
+    surface: 'ai_panel',
+    reason: '这是计算机网络课程中的高频核心知识点。',
+    action: { type: 'ask_ai', label: '继续追问', payload: { prompt: '请用图示思路解释 TCP 拥塞控制的几个阶段' } },
+  },
 ];
 
-function getRecommendations(messages: Message[]): ResourceRecommendation[] {
-  if (messages.length === 0) return ALL_RESOURCES.slice(0, 4);
+function getLocalRecommendations(messages: Message[]): PersonalizedRecommendation[] {
+  if (messages.length === 0) return FALLBACK_RECOMMENDATIONS;
   const allText = messages.filter(m => m.role === 'user').map(m => m.content.toLowerCase()).join(' ');
-  const scored = ALL_RESOURCES.map(r => {
-    const keywordScore = r.matchKeywords.filter(kw => allText.includes(kw.toLowerCase())).length;
-    return { ...r, score: keywordScore * 20 + r.relevance };
+  const scored = FALLBACK_RECOMMENDATIONS.map(r => {
+    const keywordScore = ['tcp', '拥塞', '握手', '传输层'].filter(kw => allText.includes(kw.toLowerCase())).length;
+    return { ...r, relevance: Math.min(99, r.relevance + keywordScore * 5), score: Math.min(0.99, r.score + keywordScore * 0.05) };
   });
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => b.relevance - a.relevance);
   return scored.slice(0, 4);
 }
 
@@ -122,7 +141,7 @@ export default function AIAssistant() {
   const [answerMode, setAnswerMode] = useState<AiAnswerMode>('auto');
   const [style, setStyle] = useState<AiResponseStyle>('academic');
   const [currentSources, setCurrentSources] = useState<AiMessageSource[]>([]);
-  const [recommendations, setRecommendations] = useState<ResourceRecommendation[]>([]);
+  const [recommendations, setRecommendations] = useState<PersonalizedRecommendation[]>([]);
   const [showConvList, setShowConvList] = useState(true);
   const [rightTab, setRightTab] = useState<RightTab>('quick');
   const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>('standard');
@@ -136,13 +155,26 @@ export default function AIAssistant() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const refreshRecommendations = useCallback(async (surfaceQuery?: string, sourceMessages: Message[] = messages) => {
+    try {
+      const data = await recommendationService.getPersonalized(classId, 'ai_panel', {
+        limit: 6,
+        query: surfaceQuery,
+      });
+      setRecommendations(data.items.length > 0 ? data.items : getLocalRecommendations(sourceMessages));
+    } catch (error) {
+      console.warn('加载个性化推荐失败', error);
+      setRecommendations(getLocalRecommendations(sourceMessages));
+    }
+  }, [classId, messages]);
+
   useEffect(() => {
     let mounted = true;
 
     const loadAiData = async () => {
       const [loadedConversations, loadedRecommendations] = await Promise.all([
         aiService.getStudentConversations(),
-        aiService.getRecommendations(),
+        recommendationService.getPersonalized(classId, 'ai_panel', { limit: 6 }).catch(() => null),
       ]);
 
       if (!mounted) {
@@ -150,7 +182,11 @@ export default function AIAssistant() {
       }
 
       setConversations(loadedConversations);
-      setRecommendations(loadedRecommendations);
+      setRecommendations(
+        loadedRecommendations?.items?.length
+          ? loadedRecommendations.items
+          : getLocalRecommendations([]),
+      );
     };
 
     loadAiData();
@@ -158,7 +194,7 @@ export default function AIAssistant() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [classId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -225,11 +261,12 @@ export default function AIAssistant() {
     setMessages(conv.messages.length > 0 ? conv.messages : [{ ...INIT_WELCOME }]);
     setCurrentSources([]);
     setAttachedFiles([]);
-    setRecommendations(getRecommendations(conv.messages));
+    setRecommendations(getLocalRecommendations(conv.messages));
 
     try {
       const loadedMessages = await aiService.getConversationMessages('student', convId);
       setMessages(loadedMessages.length > 0 ? loadedMessages : conv.messages);
+      await refreshRecommendations(undefined, loadedMessages.length > 0 ? loadedMessages : conv.messages);
     } catch (error) {
       console.error('加载历史会话失败', error);
       setMessages(conv.messages.length > 0 ? conv.messages : [{ ...INIT_WELCOME }]);
@@ -242,7 +279,8 @@ export default function AIAssistant() {
     setInput('');
     setAttachedFiles([]);
     setCurrentSources([]);
-    setRecommendations(getRecommendations([]));
+    setRecommendations(getLocalRecommendations([]));
+    void refreshRecommendations(undefined, []);
   };
 
   const handleKnowledgeBaseChange = async (value: AiKnowledgeBase) => {
@@ -351,7 +389,7 @@ export default function AIAssistant() {
           setRightPanelMode('standard');
         }
       }
-      setRecommendations(await aiService.getRecommendations());
+      await refreshRecommendations(text, finalMessages);
       setProgressSteps([]);
     } catch (error) {
       console.error('ai_send_message_failed', error);
@@ -362,7 +400,7 @@ export default function AIAssistant() {
       const finalMessages = [...nextMessages, aiMsg];
       setMessages(finalMessages);
       setCurrentSources([]);
-      setRecommendations(getRecommendations(finalMessages));
+      setRecommendations(getLocalRecommendations(finalMessages));
       saveCurrentConversation(finalMessages);
       setProgressSteps([]);
     } finally {
@@ -420,10 +458,42 @@ export default function AIAssistant() {
   ];
 
   const resourceIcons: Record<string, { icon: string; color: string; bg: string }> = {
-    pdf: { icon: 'ri-file-pdf-line', color: 'text-red-500', bg: 'bg-red-50' },
-    video: { icon: 'ri-video-line', color: 'text-violet-500', bg: 'bg-violet-50' },
-    ppt: { icon: 'ri-file-ppt-line', color: 'text-orange-500', bg: 'bg-orange-50' },
-    exercise: { icon: 'ri-file-list-3-line', color: 'text-green-500', bg: 'bg-green-50' },
+    material: { icon: 'ri-file-text-line', color: 'text-sky-600', bg: 'bg-sky-50' },
+    concept: { icon: 'ri-mind-map', color: 'text-teal-600', bg: 'bg-teal-50' },
+    faq: { icon: 'ri-question-answer-line', color: 'text-indigo-600', bg: 'bg-indigo-50' },
+    mistake: { icon: 'ri-error-warning-line', color: 'text-amber-600', bg: 'bg-amber-50' },
+    flashcard: { icon: 'ri-stack-line', color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    path: { icon: 'ri-route-line', color: 'text-violet-600', bg: 'bg-violet-50' },
+    task: { icon: 'ri-task-line', color: 'text-orange-600', bg: 'bg-orange-50' },
+    followup: { icon: 'ri-chat-follow-up-line', color: 'text-pink-600', bg: 'bg-pink-50' },
+  };
+
+  const handleRecommendationClick = async (rec: PersonalizedRecommendation) => {
+    void recommendationService.recordEvent({
+      recommendation_type: rec.type,
+      target_id: rec.targetId,
+      event_type: 'click',
+      class_id: classId,
+      score: rec.score,
+      extra_data: { surface: rec.surface, action: rec.action?.type },
+    }).catch(() => undefined);
+
+    const payload = rec.action?.payload || {};
+    const prompt = typeof payload.prompt === 'string' ? payload.prompt : rec.description;
+    if (rec.action?.type === 'ask_ai' && prompt) {
+      setInput(prompt);
+      textareaRef.current?.focus();
+      return;
+    }
+    if (rec.type === 'concept') {
+      setInput(`请结合课程资料讲解「${rec.title}」，并指出常见误区。`);
+      textareaRef.current?.focus();
+      return;
+    }
+    if (rec.type === 'faq') {
+      setInput(`请围绕这个教师审核问答继续讲解：${rec.title}`);
+      textareaRef.current?.focus();
+    }
   };
 
   const rightTabs: { key: RightTab; label: string; icon: string }[] = [
@@ -1008,27 +1078,46 @@ export default function AIAssistant() {
               <div className="p-4">
                 <div className="text-xs text-gray-400 mb-3 flex items-center gap-1.5">
                   <i className="ri-star-line text-amber-400"></i>
-                  根据您的对话智能推荐
+                  根据当前课程、画像和最近提问推荐
                 </div>
+                {recommendations.length === 0 && (
+                  <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/80 px-4 py-8 text-center">
+                    <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-white text-gray-400">
+                      <i className="ri-compass-3-line text-xl"></i>
+                    </div>
+                    <div className="text-xs font-medium text-gray-700">暂无个性化推荐</div>
+                    <div className="mt-1 text-xs text-gray-400">多提几个课程问题后，这里会出现更贴合你的建议</div>
+                  </div>
+                )}
                 <div className={`space-y-2 ${isRightPanelWide ? 'xl:grid xl:grid-cols-2 xl:gap-3 xl:space-y-0' : ''}`}>
                   {recommendations.map(rec => {
-                    const iconInfo = resourceIcons[rec.type];
+                    const iconInfo = resourceIcons[rec.type] || resourceIcons.material;
                     return (
-                      <div key={rec.id} className="flex items-start gap-2.5 p-3 rounded-xl border border-gray-100 hover:border-teal-200 hover:bg-teal-50/40 cursor-pointer transition-colors group">
+                      <button
+                        key={rec.id}
+                        type="button"
+                        onClick={() => handleRecommendationClick(rec)}
+                        className="w-full text-left flex items-start gap-2.5 p-3 rounded-xl border border-gray-100 hover:border-teal-200 hover:bg-teal-50/40 cursor-pointer transition-colors group"
+                      >
                         <div className={`w-8 h-8 flex items-center justify-center rounded-lg flex-shrink-0 ${iconInfo.bg}`}>
                           <i className={`${iconInfo.icon} ${iconInfo.color} text-base`}></i>
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="text-xs font-medium text-gray-800 leading-snug group-hover:text-teal-700 transition-colors line-clamp-2">{rec.title}</div>
-                          <div className="text-xs text-gray-400 mt-1">{rec.reason}</div>
+                          <div className="text-xs text-gray-500 mt-1 line-clamp-2">{rec.description}</div>
+                          <div className="text-xs text-gray-400 mt-1 line-clamp-2">{rec.reason}</div>
                           <div className="flex items-center gap-1.5 mt-1.5">
                             <div className="h-1 flex-1 bg-gray-100 rounded-full overflow-hidden">
                               <div className="h-full bg-amber-400 rounded-full" style={{ width: `${rec.relevance}%` }}></div>
                             </div>
                             <span className="text-xs text-amber-600 font-medium flex-shrink-0">{rec.relevance}%</span>
                           </div>
+                          <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-[11px] font-medium text-teal-600 border border-teal-100">
+                            {rec.action?.label || '查看'}
+                            <i className="ri-arrow-right-s-line text-xs"></i>
+                          </div>
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>

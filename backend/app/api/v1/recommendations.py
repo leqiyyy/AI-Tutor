@@ -13,6 +13,7 @@ from app.services import (
     analytics_service,
     learning_graph_service,
     learning_path_service,
+    personalized_recommendation_service,
     recommendation_service,
 )
 
@@ -94,6 +95,28 @@ def learning_path_recommendations_v2(
     )
     if persist:
         db.commit()
+    return ok(data=data)
+
+
+@router.get("/personalized", response_model=None)
+def personalized_recommendations(
+    course_id: Optional[str] = Query(None),
+    class_id: Optional[str] = Query(None),
+    surface: str = Query("dashboard"),
+    limit: int = Query(6, ge=1, le=20),
+    query: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    data = personalized_recommendation_service.get_personalized_recommendations(
+        db,
+        current_user,
+        course_id=course_id,
+        class_id=class_id,
+        surface=surface,
+        limit=limit,
+        context_query=query,
+    )
     return ok(data=data)
 
 

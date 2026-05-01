@@ -21,7 +21,7 @@ from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
-from app.services import course_service, kb_service
+from app.services import course_service, kb_service, personalized_recommendation_service
 
 router = APIRouter(tags=["frontend-compat"])
 
@@ -438,6 +438,14 @@ def student_dashboard(
             "unread": 0,
             "color": COLORS[index % len(COLORS)],
         })
+    recommendations = []
+    if classes:
+        recommendations = _dashboard_recommendations(
+            db,
+            current_user,
+            class_id=classes[0]["id"],
+            limit=4,
+        )
 
     return ok(data={
         "greetingName": current_user.real_name,
@@ -448,11 +456,67 @@ def student_dashboard(
         },
         "pendingItems": [],
         "progressCourses": progress_courses,
-        "recommendations": [],
+        "recommendations": recommendations,
         "activities": [],
         "notifications": _notifications_for_user(db, current_user.id),
         "courses": courses,
     })
+
+
+def _dashboard_recommendations(
+    db: Session,
+    user: User,
+    *,
+    class_id: str,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    try:
+        payload = personalized_recommendation_service.get_personalized_recommendations(
+            db,
+            user,
+            class_id=class_id,
+            surface="dashboard",
+            limit=limit,
+        )
+    except Exception:
+        return []
+    return [
+        _personalized_item_to_dashboard_card(item, index=index)
+        for index, item in enumerate(payload.get("items") or [])
+    ]
+
+
+def _personalized_item_to_dashboard_card(item: dict[str, Any], *, index: int) -> dict[str, Any]:
+    target_type = str(item.get("type") or "material")
+    tone_map = {
+        "material": "blue",
+        "concept": "teal",
+        "faq": "purple",
+        "mistake": "amber",
+        "flashcard": "green",
+        "path": "purple",
+        "task": "orange",
+        "followup": "pink",
+    }
+    icon_map = {
+        "material": "ri-file-text-line",
+        "concept": "ri-mind-map",
+        "faq": "ri-question-answer-line",
+        "mistake": "ri-error-warning-line",
+        "flashcard": "ri-stack-line",
+        "path": "ri-route-line",
+        "task": "ri-task-line",
+        "followup": "ri-chat-follow-up-line",
+    }
+    content = item.get("reason") or item.get("description") or "根据你的学习记录和课程内容推荐。"
+    return {
+        "id": item.get("id") or f"recommendation-{index}",
+        "title": item.get("title") or "个性化学习建议",
+        "content": content,
+        "tone": tone_map.get(target_type, COLORS[index % len(COLORS)]),
+        "icon": icon_map.get(target_type, "ri-lightbulb-line"),
+        "meta": f"{int(item.get('relevance') or 0)}% 匹配",
+    }
 
 
 @router.get("/teacher/dashboard", response_model=None)
@@ -1562,8 +1626,61 @@ def teacher_course_students(
 
 
 @router.get("/ai/recommendations", response_model=None)
-def ai_recommendations(current_user: User = Depends(get_current_user)):
-    return ok(data=[])
+def ai_recommendations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != "student":
+        return ok(data=[])
+    classes = course_service.get_student_classes(db, current_user.id)
+    if not classes:
+        return ok(data=[])
+    try:
+        payload = personalized_recommendation_service.get_personalized_recommendations(
+            db,
+            current_user,
+            class_id=classes[0]["id"],
+            surface="ai_panel",
+            limit=6,
+        )
+    except Exception:
+        return ok(data=[])
+    return ok(data=[
+        _personalized_item_to_legacy_ai_recommendation(item, index=index)
+        for index, item in enumerate(payload.get("items") or [])
+    ])
+
+
+def _personalized_item_to_legacy_ai_recommendation(item: dict[str, Any], *, index: int) -> dict[str, Any]:
+    target_type = str(item.get("type") or "material")
+    legacy_type = {
+        "material": "pdf",
+        "concept": "exercise",
+        "faq": "report",
+        "mistake": "exercise",
+        "flashcard": "template",
+        "path": "ppt",
+        "task": "exercise",
+        "followup": "template",
+    }.get(target_type, "pdf")
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    keywords = []
+    for value in evidence.values():
+        if isinstance(value, str) and value.strip():
+            keywords.append(value.strip())
+        elif isinstance(value, list):
+            keywords.extend(str(v).strip() for v in value if str(v).strip())
+    if not keywords:
+        keywords = [str(item.get("title") or "课程推荐")[:20]]
+    return {
+        "id": index + 1,
+        "title": item.get("title") or "个性化推荐",
+        "type": legacy_type,
+        "chapter": "个性化推荐",
+        "relevance": int(item.get("relevance") or 0),
+        "reason": item.get("reason") or item.get("description") or "根据你的学习记录推荐。",
+        "matchKeywords": keywords[:5],
+    }
 
 
 @router.get("/ai/messages/{message_id}/sources", response_model=None)
