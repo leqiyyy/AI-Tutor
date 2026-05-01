@@ -1,14 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
+import { AiMarkdownContent } from '@/components/AiMarkdownContent';
+import { AiProgressTimeline } from '@/components/AiProgressTimeline';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
 import { aiService } from '@/services/ai';
 import type {
   AiAttachment as AttachedFile,
+  AiAnswerMode,
   AiConversation as Conversation,
   AiFeedbackItem as FeedbackItem,
   AiKnowledgeBase,
   AiMessage as Message,
   AiMessageSource,
+  AiProgressEvent,
   AiResponseStyle,
   AiTeacherQuestion as AIQuestion,
 } from '@/types/ai';
@@ -25,6 +29,13 @@ interface TeacherRecommendation {
 
 type TeacherToolAction = 'lessonPlan' | 'exam' | 'learningAnalysis' | 'flashcards';
 type RightPanelMode = 'closed' | 'standard' | 'wide';
+
+const ANSWER_MODES: Array<{ value: AiAnswerMode; label: string; title: string }> = [
+  { value: 'auto', label: '自动', title: '自动判断走课程检索、直接回答或教师工具' },
+  { value: 'strict_course', label: '检索', title: '检索课程资料，资料不足时明确说明' },
+  { value: 'quick_llm', label: '快速', title: '不检索课程资料，直接快速回答' },
+  { value: 'teacher_tool', label: '教学', title: '教案、出题、学情分析等任务优先走工具链' },
+];
 
 function getSourceIconClass(type: string) {
   if (type === 'pdf') return 'ri-file-pdf-line text-red-500';
@@ -154,12 +165,32 @@ function loadFeedbacks(): FeedbackItem[] {
   }
 }
 
+function stripReviewContext(value: string) {
+  return value.replace(/\n\n\[review_context\][\s\S]*$/u, '').trim();
+}
+
 // ===== Feedback Detail Modal =====
 function FeedbackDetailModal({ item, onClose, onResolve }: {
   item: FeedbackItem;
   onClose: () => void;
-  onResolve: (id: string) => void;
+  onResolve: (id: string, teacherAnswer: string, addToKb: boolean) => Promise<void> | void;
 }) {
+  const [teacherAnswer, setTeacherAnswer] = useState(stripReviewContext(item.teacherAnswer || item.aiAnswer));
+  const [addToKb, setAddToKb] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const cleanAiAnswer = stripReviewContext(item.aiAnswer);
+
+  const submitResolve = async () => {
+    if (!teacherAnswer.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      await onResolve(item.id, teacherAnswer.trim(), addToKb);
+      onClose();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onClose}></div>
@@ -191,7 +222,9 @@ function FeedbackDetailModal({ item, onClose, onResolve }: {
           )}
           <div>
             <div className="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">AI 回答内容</div>
-            <div className="text-sm text-gray-700 px-3 py-2.5 bg-gray-50 rounded-lg border border-gray-100 leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">{item.aiAnswer}</div>
+            <div className="text-sm text-gray-700 px-3 py-2.5 bg-gray-50 rounded-lg border border-gray-100 leading-relaxed max-h-40 overflow-y-auto">
+              <AiMarkdownContent content={cleanAiAnswer} />
+            </div>
           </div>
           {item.reason && (
             <div>
@@ -200,6 +233,27 @@ function FeedbackDetailModal({ item, onClose, onResolve }: {
                 <i className="ri-feedback-line text-orange-500 text-sm mt-0.5 flex-shrink-0"></i>
                 <span className="text-sm text-orange-800">{item.reason}</span>
               </div>
+            </div>
+          )}
+          {item.status === 'pending' && (
+            <div>
+              <div className="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">教师纠正答案</div>
+              <textarea
+                value={teacherAnswer}
+                onChange={event => setTeacherAnswer(event.target.value)}
+                rows={7}
+                className="w-full px-3 py-2.5 text-sm text-gray-800 bg-white border border-teal-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-200 resize-none leading-relaxed"
+                placeholder="请填写教师确认后的标准答案..."
+              />
+              <label className="mt-2 flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={addToKb}
+                  onChange={event => setAddToKb(event.target.checked)}
+                  className="w-3.5 h-3.5 accent-teal-600"
+                />
+                审核通过后回流到课程知识库
+              </label>
             </div>
           )}
         </div>
@@ -211,8 +265,12 @@ function FeedbackDetailModal({ item, onClose, onResolve }: {
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200 transition-colors cursor-pointer whitespace-nowrap">关闭</button>
             {item.status === 'pending' && (
-              <button onClick={() => { onResolve(item.id); onClose(); }} className="px-4 py-2 text-sm font-medium text-white bg-teal-600 rounded-xl hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap">
-                <i className="ri-check-line mr-1"></i>标记已处理
+              <button
+                onClick={() => { void submitResolve(); }}
+                disabled={!teacherAnswer.trim() || submitting}
+                className="px-4 py-2 text-sm font-medium text-white bg-teal-600 rounded-xl hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <i className="ri-check-line mr-1"></i>{submitting ? '提交中...' : '提交纠正'}
               </button>
             )}
           </div>
@@ -409,8 +467,10 @@ export default function TeacherAIAssistant() {
   const [input, setInput] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [progressSteps, setProgressSteps] = useState<AiProgressEvent[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [knowledgeBase, setKnowledgeBase] = useState<AiKnowledgeBase>('course');
+  const [answerMode, setAnswerMode] = useState<AiAnswerMode>('auto');
   const [style, setStyle] = useState<AiResponseStyle>('academic');
   const [currentSources, setCurrentSources] = useState<AiMessageSource[]>([]);
   const [showConvList, setShowConvList] = useState(true);
@@ -439,7 +499,7 @@ export default function TeacherAIAssistant() {
       try {
         const [loadedConversations, loadedFeedbacks, loadedQuestions] = await Promise.all([
           aiService.getTeacherConversations(),
-          aiService.getFeedbackQueue(),
+          aiService.getFeedbackQueue(classId),
           aiService.getTeacherAiQuestions(),
         ]);
 
@@ -465,12 +525,19 @@ export default function TeacherAIAssistant() {
       mounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [classId]);
 
-  const handleResolveFeedback = async (id: string) => {
-    const updated = feedbacks.map(f => f.id === id ? { ...f, status: 'resolved' as const } : f);
+  const handleResolveFeedback = async (id: string, teacherAnswer: string, addToKb: boolean) => {
+    const result = await aiService.resolveFeedback(id, teacherAnswer, addToKb);
+    const syncResult = result && typeof result === 'object' ? result : undefined;
+    const updated = feedbacks.map(f => f.id === id ? {
+      ...f,
+      status: 'resolved' as const,
+      teacherAnswer,
+      syncStatus: syncResult?.sync_status as FeedbackItem['syncStatus'],
+      syncNote: syncResult?.sync_note,
+    } : f);
     setFeedbacks(updated);
-    await aiService.resolveFeedback(id);
   };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -598,6 +665,22 @@ export default function TeacherAIAssistant() {
     }
   }, [activeConvId]);
 
+  const handleProgressEvent = useCallback((event: AiProgressEvent) => {
+    setProgressSteps(prev => {
+      const existingIndex = prev.findIndex(item => item.stage === event.stage);
+      if (existingIndex < 0) return [...prev, event];
+      return prev.map((item, index) => index === existingIndex ? { ...item, ...event } : item);
+    });
+  }, []);
+
+  const handleCitationClick = useCallback((source: AiMessageSource) => {
+    setCurrentSources(prev => [source, ...prev.filter(item => item.chunkId !== source.chunkId || item.name !== source.name)]);
+    setRightTab('sources');
+    if (rightPanelMode === 'closed') {
+      setRightPanelMode('standard');
+    }
+  }, [rightPanelMode]);
+
   const runTeacherTool = async (
     action: TeacherToolAction,
     title: string,
@@ -632,6 +715,7 @@ export default function TeacherAIAssistant() {
     setInput('');
     setAttachedFiles([]);
     setIsTyping(true);
+    setProgressSteps([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     try {
       const { conversation, reply } = await aiService.sendMessage('teacher', {
@@ -639,6 +723,8 @@ export default function TeacherAIAssistant() {
         classId,
         content: text,
         attachments: userMsg.attachments,
+        answerMode,
+        onProgress: handleProgressEvent,
       });
 
       const finalMessages = [...nextMessages, reply];
@@ -666,6 +752,7 @@ export default function TeacherAIAssistant() {
           }
         }
       }
+      setProgressSteps([]);
     } catch (error) {
       console.error('teacher_ai_send_message_failed', error);
       const aiMsg: Message = { id: Date.now() + 1, role: 'ai', content: 'AI助教暂时不可用，请稍后重试。', time: getNow() };
@@ -673,6 +760,7 @@ export default function TeacherAIAssistant() {
       setMessages(finalMessages);
       setCurrentSources([]);
       saveCurrentConversation(finalMessages);
+      setProgressSteps([]);
     } finally {
       setIsTyping(false);
     }
@@ -835,6 +923,19 @@ export default function TeacherAIAssistant() {
                 <option value="course">计算机网络知识库</option>
                 <option value="global">全局知识库</option>
               </select>
+              <div className="flex rounded-lg border border-gray-200 bg-gray-50 p-0.5" title="回答模式">
+                {ANSWER_MODES.map(mode => (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    onClick={() => setAnswerMode(mode.value)}
+                    title={mode.title}
+                    className={`px-2 py-1 text-xs rounded-md transition-colors ${answerMode === mode.value ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
               <button onClick={handleNewConversation} className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-teal-600 cursor-pointer rounded-md hover:bg-teal-50 transition-colors" title="新建对话">
                 <i className="ri-add-circle-line text-sm"></i>
               </button>
@@ -874,9 +975,24 @@ export default function TeacherAIAssistant() {
                     </div>
                   )}
                   {msg.content && (
+                    <>
+                    {msg.role === 'ai' && msg.routeMeta && (
+                      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-teal-100 bg-teal-50 px-2 py-0.5 text-teal-700">
+                          <i className={msg.routeMeta.retrievalUsed ? 'ri-book-open-line' : 'ri-flashlight-line'}></i>
+                          {msg.routeMeta.displayLabel || 'AI回答'}
+                        </span>
+                        {!msg.routeMeta.retrievalUsed && msg.routeMeta.route === 'quick_llm' && (
+                          <span className="text-gray-400">未检索课程资料</span>
+                        )}
+                      </div>
+                    )}
                     <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed space-y-0.5 ${msg.role === 'ai' ? 'bg-gray-50 text-gray-800 border border-gray-100 rounded-tl-sm' : 'bg-teal-600 text-white rounded-tr-sm'}`}>
-                      {renderContent(msg.content)}
+                      {msg.role === 'ai'
+                        ? <AiMarkdownContent content={msg.content} sources={msg.sources} onCitationClick={handleCitationClick} />
+                        : renderContent(msg.content)}
                     </div>
+                    </>
                   )}
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 mt-1">
@@ -903,13 +1019,7 @@ export default function TeacherAIAssistant() {
                 <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-xs flex-shrink-0">
                   <i className="ri-robot-line"></i>
                 </div>
-                <div className="bg-gray-50 border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3">
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                    <span className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                    <span className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                  </div>
-                </div>
+                <AiProgressTimeline steps={progressSteps} />
               </div>
             )}
             <div ref={messagesEndRef} />
@@ -926,7 +1036,7 @@ export default function TeacherAIAssistant() {
 
           {/* Input area */}
           <div className="px-4 pb-4 pt-2 flex-shrink-0">
-            <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.doc,.docx,.md,.markdown,.py,.js,.ts,.jsx,.tsx,.cpp,.c,.java,.go" onChange={handleFileInputChange} className="hidden" />
+            <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.doc,.docx,.txt,.md,.markdown,.py,.js,.ts,.jsx,.tsx,.cpp,.c,.java,.go" onChange={handleFileInputChange} className="hidden" />
             <div
               className={`rounded-xl border transition-all ${isDragOver ? 'border-teal-400 bg-teal-50/60 ring-2 ring-teal-200' : 'border-gray-200 bg-gray-50 focus-within:border-teal-400 focus-within:ring-2 focus-within:ring-teal-100'}`}
               onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
@@ -953,7 +1063,7 @@ export default function TeacherAIAssistant() {
               <div className="px-3 pb-2.5 flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button onClick={() => fileInputRef.current?.click()} title="上传文件" className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-teal-600 hover:bg-teal-50 transition-colors cursor-pointer"><i className="ri-attachment-2 text-base"></i></button>
-                  <button onClick={() => { if (fileInputRef.current) { fileInputRef.current.accept = 'image/*'; fileInputRef.current.click(); } }} title="上传图片" className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors cursor-pointer"><i className="ri-image-add-line text-base"></i></button>
+                  <button onClick={() => { if (fileInputRef.current) { fileInputRef.current.accept = 'image/*'; fileInputRef.current.click(); setTimeout(() => { if (fileInputRef.current) fileInputRef.current.accept = 'image/*,.pdf,.doc,.docx,.txt,.md,.markdown,.py,.js,.ts,.jsx,.tsx,.cpp,.c,.java,.go'; }, 1000); } }} title="上传图片" className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors cursor-pointer"><i className="ri-image-add-line text-base"></i></button>
                   {attachedFiles.length > 0 && <span className="text-xs text-gray-400 ml-1">已附 {attachedFiles.length} 个文件</span>}
                 </div>
                 <div className="flex items-center gap-2">

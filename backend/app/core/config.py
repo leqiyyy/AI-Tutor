@@ -143,10 +143,13 @@ class Settings(BaseSettings):
     RAG_QUERY_REWRITE_MAX_VARIANTS: int = 3
     RAG_QUERY_TRACE_ENABLED: bool = True
     RAG_QUERY_TRACE_PREVIEW_CHARS: int = 1200
+    RAG_QUERY_TRACE_FULL_RAW_ANSWER_ENABLED: bool = False
+    RAG_QUERY_TRACE_FULL_RAW_ANSWER_MAX_CHARS: int = 20000
     RAG_AQUERY_HISTORY_POLICY: str = "compact"  # none | compact | full
     RAG_AQUERY_HISTORY_MAX_MESSAGES: int = 4
     RAG_AQUERY_HISTORY_MESSAGE_MAX_CHARS: int = 500
     RAG_ANSWER_REPAIR_ENABLED: bool = True
+    RAG_ANSWER_REPAIR_POLICY: str = "severe_only"  # severe_only | legacy
     RERANKER_PROVIDER: str = "mock"  # mock | none | api | local
     RERANKER_MODEL: str = "mock-reranker-v1"
     RERANKER_API_BASE: str = ""
@@ -184,6 +187,7 @@ class Settings(BaseSettings):
         "KB_INDEX_ALERT_NOTIFY_ADMIN",
         "RAG_QUERY_REWRITE_ENABLED",
         "RAG_QUERY_TRACE_ENABLED",
+        "RAG_QUERY_TRACE_FULL_RAW_ANSWER_ENABLED",
         "RAG_ANSWER_REPAIR_ENABLED",
         "RAGANYTHING_STRICT_MODE",
         "RAGANYTHING_METADATA_FALLBACK_ENABLED",

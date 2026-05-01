@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_student, get_current_teacher
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.core.response import ok
 from app.db.base import get_db
 from app.integrations.rag.quality import build_evidence_quality, build_review_context
@@ -57,6 +58,7 @@ def pending_reviews(
             "question_content": item.question_content,
             "ai_answer": item.ai_answer,
             "teacher_answer": item.teacher_answer,
+            "feedback_reason": message.feedback_reason if message else None,
             "status": item.status,
             "quality": build_evidence_quality(sources, confidence),
             "review_context": build_review_context(
@@ -77,6 +79,17 @@ async def submit_review(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
+    review = db.query(ReviewItem).filter(ReviewItem.id == review_id).first()
+    if not review:
+        raise NotFoundException("Review item not found")
+    cls = db.query(Class).filter(
+        Class.id == review.class_id,
+        Class.teacher_id == current_user.id,
+        Class.is_active == True,
+    ).first()
+    if not cls:
+        raise ForbiddenException("You do not have access to this review item")
+
     result = await chat_service.resolve_review(
         db,
         review_id,
@@ -95,8 +108,6 @@ def escalate_review(
 ):
     if not body.class_id:
         if not body.course_id:
-            from app.core.exceptions import BadRequestException
-
             raise BadRequestException("course_id or class_id is required")
         classes = db.query(Class).filter(Class.course_id == body.course_id, Class.is_active == True).all()
         class_ids = [cls.id for cls in classes]
@@ -105,12 +116,16 @@ def escalate_review(
             __import__("app.models.course", fromlist=["ClassMember"]).ClassMember.class_id.in_(class_ids),
         ).all()
         if not memberships:
-            from app.core.exceptions import ForbiddenException
-
             raise ForbiddenException("You do not have access to the requested course")
         class_id = memberships[0].class_id
     else:
         class_id = body.class_id
+        membership = db.query(__import__("app.models.course", fromlist=["ClassMember"]).ClassMember).filter(
+            __import__("app.models.course", fromlist=["ClassMember"]).ClassMember.user_id == current_user.id,
+            __import__("app.models.course", fromlist=["ClassMember"]).ClassMember.class_id == class_id,
+        ).first()
+        if not membership:
+            raise ForbiddenException("You do not have access to the requested class")
 
     session = ChatSession(class_id=class_id, user_id=current_user.id, title=body.question_content[:50])
     db.add(session)

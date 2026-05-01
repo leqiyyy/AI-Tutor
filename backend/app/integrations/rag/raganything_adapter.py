@@ -10,7 +10,7 @@ import contextvars
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 from app.ai.base import RAGResult
@@ -39,6 +39,7 @@ _QUERY_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvar
     "raganything_query_trace",
     default=None,
 )
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 PROJECTION_FILE_LABEL_RE = re.compile(
     r"\.(?:txt|pdf|docx?|pptx?|xlsx?|csv|md|png|jpe?g|gif|webp|mp4|mov|avi|zip)$",
@@ -115,6 +116,31 @@ class RAGAnythingAdapter:
     def __init__(self) -> None:
         self._instances: dict[str, object] = {}
         self._instance_route_signatures: dict[str, str] = {}
+
+    async def _emit_progress(
+        self,
+        progress_callback: ProgressCallback | None,
+        *,
+        stage: str,
+        status: str,
+        label: str,
+        started_at: float,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if progress_callback is None:
+            return
+        event: dict[str, Any] = {
+            "stage": stage,
+            "status": status,
+            "label": label,
+            "elapsed_ms": round((perf_counter() - started_at) * 1000, 2),
+        }
+        if details:
+            event["details"] = details
+        try:
+            await progress_callback(event)
+        except Exception as exc:  # pragma: no cover - progress reporting must be best-effort
+            logger.debug("rag_progress_emit_failed", stage=stage, error=str(exc))
 
     def __del__(self):  # pragma: no cover - interpreter shutdown timing is environment-specific
         instances = list(getattr(self, "_instances", {}).items())
@@ -2618,6 +2644,7 @@ class RAGAnythingAdapter:
         history=None,
         attachments=None,
         role: str = "student",
+        progress_callback: ProgressCallback | None = None,
     ) -> RAGResult:
         query_started = perf_counter()
         outer_stage_timings_ms: dict[str, float] = {}
@@ -2629,6 +2656,13 @@ class RAGAnythingAdapter:
         routing_snapshot = self._load_runtime_routing_snapshot()
         routing_meta = model_routing_service.flatten_routing_snapshot(routing_snapshot)
         stage_started = perf_counter()
+        await self._emit_progress(
+            progress_callback,
+            stage="query_rewrite",
+            status="running",
+            label="正在生成检索问题与关键词",
+            started_at=query_started,
+        )
         rewrite_bundle = build_query_rewrite_bundle(
             question=question,
             enabled=bool(settings.RAG_QUERY_REWRITE_ENABLED),
@@ -2636,21 +2670,57 @@ class RAGAnythingAdapter:
             max_variants=settings.RAG_QUERY_REWRITE_MAX_VARIANTS,
         )
         mark("query_rewrite", stage_started)
+        await self._emit_progress(
+            progress_callback,
+            stage="query_rewrite",
+            status="done",
+            label="检索问题与关键词生成完成",
+            started_at=query_started,
+            details={
+                "enabled": bool(rewrite_bundle.get("enabled")),
+                "intent": rewrite_bundle.get("intent"),
+                "variant_count": rewrite_bundle.get("variant_count"),
+            },
+        )
         stage_started = perf_counter()
         effective_question = self._build_effective_query_text(
             question=question,
             rewrite_bundle=rewrite_bundle,
         )
         mark("effective_query_build", stage_started)
+        await self._emit_progress(
+            progress_callback,
+            stage="effective_query",
+            status="done",
+            label="已整理提交给检索引擎的问题",
+            started_at=query_started,
+        )
 
         image_contexts = []
         stage_started = perf_counter()
+        if attachments:
+            await self._emit_progress(
+                progress_callback,
+                stage="attachments",
+                status="running",
+                label="正在处理本轮附件",
+                started_at=query_started,
+            )
         for attachment in attachments or []:
             if attachment.get("file_type") == "image":
                 description = await self._describe_image_attachment(attachment, question)
                 if description:
                     image_contexts.append(description)
         mark("image_attachment_description", stage_started)
+        if attachments:
+            await self._emit_progress(
+                progress_callback,
+                stage="attachments",
+                status="done",
+                label="附件处理完成",
+                started_at=query_started,
+                details={"image_context_count": len(image_contexts)},
+            )
 
         stage_started = perf_counter()
         raganything_result, fallback_reason, query_method, query_error_detail = await self._query_with_raganything(
@@ -2662,6 +2732,8 @@ class RAGAnythingAdapter:
             image_contexts=image_contexts,
             query_mode=query_mode,
             role=role,
+            progress_callback=progress_callback,
+            progress_started=query_started,
         )
         mark("raganything_main_chain", stage_started)
         if raganything_result is not None:
@@ -2804,8 +2876,11 @@ class RAGAnythingAdapter:
         image_contexts: list[str],
         query_mode: str,
         role: str = "student",
+        progress_callback: ProgressCallback | None = None,
+        progress_started: float | None = None,
     ) -> tuple[RAGResult | None, str | None, str | None, str | None]:
         query_started = perf_counter()
+        progress_base = progress_started or query_started
         stage_timings_ms: dict[str, float] = {}
         live_trace: dict[str, Any] = {
             "trace_version": 2,
@@ -2850,8 +2925,23 @@ class RAGAnythingAdapter:
                 query_text=query_text,
             )
             live_trace["aquery_history"] = aquery_history_meta
+            await self._emit_progress(
+                progress_callback,
+                stage="aquery_history",
+                status="done",
+                label="相关对话上下文筛选完成",
+                started_at=progress_base,
+                details=aquery_history_meta,
+            )
 
             stage_started = perf_counter()
+            await self._emit_progress(
+                progress_callback,
+                stage="knowledge_base",
+                status="running",
+                label="正在连接课程知识库",
+                started_at=progress_base,
+            )
             try:
                 rag = self._get_instance(class_id)
             except Exception as exc:
@@ -2862,8 +2952,22 @@ class RAGAnythingAdapter:
                 )
                 return None, "instance_init_failed", None, self._safe_error_detail(exc)
             mark("get_instance", stage_started)
+            await self._emit_progress(
+                progress_callback,
+                stage="knowledge_base",
+                status="done",
+                label="课程知识库连接完成",
+                started_at=progress_base,
+            )
 
             stage_started = perf_counter()
+            await self._emit_progress(
+                progress_callback,
+                stage="query_engine_ready",
+                status="running",
+                label="正在检查检索引擎状态",
+                started_at=progress_base,
+            )
             try:
                 await self._ensure_rag_query_ready(rag)
             except Exception as exc:
@@ -2875,6 +2979,13 @@ class RAGAnythingAdapter:
                 )
                 return None, "query_init_failed", None, self._safe_error_detail(exc)
             mark("ensure_query_ready", stage_started)
+            await self._emit_progress(
+                progress_callback,
+                stage="query_engine_ready",
+                status="done",
+                label="检索引擎已就绪",
+                started_at=progress_base,
+            )
 
             has_image = any((attachment or {}).get("file_type") == "image" for attachment in (attachments or []))
             logger.info(
@@ -2884,6 +2995,14 @@ class RAGAnythingAdapter:
                 has_image=has_image,
             )
             stage_started = perf_counter()
+            await self._emit_progress(
+                progress_callback,
+                stage="official_retrieval",
+                status="running",
+                label="正在进行关键词抽取、图谱检索、向量召回与回答生成",
+                started_at=progress_base,
+                details={"query_mode": query_mode, "has_image": has_image},
+            )
             try:
                 raw, query_method = await self._invoke_rag_query(
                     rag=rag,
@@ -2904,10 +3023,26 @@ class RAGAnythingAdapter:
                 )
                 return None, "query_exception", None, self._safe_error_detail(exc)
             mark("invoke_rag_query", stage_started)
+            await self._emit_progress(
+                progress_callback,
+                stage="official_retrieval",
+                status="done",
+                label="课程资料检索与初版回答完成",
+                started_at=progress_base,
+                details={"query_method": query_method, "latency_ms": stage_timings_ms.get("invoke_rag_query")},
+            )
 
             stage_started = perf_counter()
             answer, sources, confidence = self._normalize_rag_query_output(raw)
             mark("normalize_output", stage_started)
+            await self._emit_progress(
+                progress_callback,
+                stage="evidence_prepare",
+                status="done",
+                label="检索证据整理完成",
+                started_at=progress_base,
+                details={"source_count": len(sources or [])},
+            )
             query_trace = self._build_query_trace(
                 raw=raw,
                 query_method=query_method,
@@ -2939,11 +3074,27 @@ class RAGAnythingAdapter:
             query_trace["sources_after_structured_table_match"] = self._source_trace_summary(sources)
 
             stage_started = perf_counter()
+            await self._emit_progress(
+                progress_callback,
+                stage="rerank",
+                status="running",
+                label="正在重排候选资料",
+                started_at=progress_base,
+                details={"source_count": len(sources or [])},
+            )
             sources, rerank_meta = await self._rerank_main_chain_sources(
                 question=retrieval_question,
                 sources=sources,
             )
             mark("rerank_sources", stage_started)
+            await self._emit_progress(
+                progress_callback,
+                stage="rerank",
+                status="done",
+                label="候选资料重排完成",
+                started_at=progress_base,
+                details={"source_count": len(sources or [])},
+            )
             query_trace["stage_timings_ms"] = dict(stage_timings_ms)
             query_trace["source_count_after_rerank"] = len(sources or [])
             query_trace["rerank"] = rerank_meta.get("rerank_trace")
@@ -2959,6 +3110,22 @@ class RAGAnythingAdapter:
             mark("active_material_filter", stage_started)
             query_trace["stage_timings_ms"] = dict(stage_timings_ms)
             query_trace["source_count_after_active_filter"] = len(sources or [])
+            stage_started = perf_counter()
+            sources, answer_source_alignment = self._prioritize_sources_by_answer_evidence(
+                sources=sources,
+                raw=raw,
+                answer=answer,
+                question=retrieval_question,
+            )
+            sources, answer_reference_mapping = self._annotate_sources_with_answer_references(
+                sources=sources,
+                raw=raw,
+                answer=answer,
+            )
+            mark("answer_source_alignment", stage_started)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["answer_source_alignment"] = answer_source_alignment
+            query_trace["answer_reference_mapping"] = answer_reference_mapping
             query_trace["sources_final"] = self._source_trace_summary(sources)
             if source_count_before_active_filter and not sources:
                 logger.info(
@@ -2976,10 +3143,33 @@ class RAGAnythingAdapter:
                 (structured_match_meta or {}).get("matched_count")
                 and (structured_match_meta or {}).get("enabled")
             )
-            if bool(settings.RAG_ANSWER_REPAIR_ENABLED) and sources and (
-                self._answer_needs_repair(answer) or force_structured_table_answer
-            ):
+            answer_repair_reason = (
+                "structured_table_grounding"
+                if force_structured_table_answer
+                else self._answer_repair_reason(answer)
+            )
+            query_trace["answer_repair_checked"] = True
+            query_trace["answer_repair_policy"] = getattr(settings, "RAG_ANSWER_REPAIR_POLICY", "severe_only")
+            query_trace["answer_repair_would_trigger_reason"] = answer_repair_reason
+            should_repair_answer = bool(settings.RAG_ANSWER_REPAIR_ENABLED) and sources and bool(answer_repair_reason)
+            if not should_repair_answer:
+                query_trace["answer_repair_triggered"] = False
+                if not bool(settings.RAG_ANSWER_REPAIR_ENABLED):
+                    query_trace["answer_repair_skipped_reason"] = "disabled"
+                elif not sources:
+                    query_trace["answer_repair_skipped_reason"] = "no_sources"
+                else:
+                    query_trace["answer_repair_skipped_reason"] = "raw_answer_accepted"
+            if should_repair_answer:
                 stage_started = perf_counter()
+                await self._emit_progress(
+                    progress_callback,
+                    stage="answer_repair",
+                    status="running",
+                    label="正在优化回答可读性",
+                    started_at=progress_base,
+                    details={"reason": answer_repair_reason},
+                )
                 repaired_answer = await self._repair_answer_from_sources(
                     question=retrieval_question,
                     answer=answer,
@@ -2993,14 +3183,32 @@ class RAGAnythingAdapter:
                     rerank_meta = {
                         **rerank_meta,
                         "answer_repaired": True,
-                        "answer_repair_reason": (
-                            "structured_table_grounding"
-                            if force_structured_table_answer
-                            else "low_readability_generation"
-                        ),
+                        "answer_repair_reason": answer_repair_reason,
                     }
                     query_trace["answer_repaired"] = True
+                    query_trace["answer_repair_triggered"] = True
                     query_trace["answer_repair_reason"] = rerank_meta["answer_repair_reason"]
+                    await self._emit_progress(
+                        progress_callback,
+                        stage="answer_repair",
+                        status="done",
+                        label="回答可读性优化完成",
+                        started_at=progress_base,
+                        details={"latency_ms": stage_timings_ms.get("answer_repair")},
+                    )
+                else:
+                    query_trace["answer_repair_triggered"] = True
+                    query_trace["answer_repaired"] = False
+                    query_trace["answer_repair_reason"] = answer_repair_reason
+                    query_trace["answer_repair_skipped_reason"] = "repair_generation_failed_or_still_unreadable"
+                    await self._emit_progress(
+                        progress_callback,
+                        stage="answer_repair",
+                        status="done",
+                        label="回答可读性检查完成",
+                        started_at=progress_base,
+                        details={"repaired": False, "latency_ms": stage_timings_ms.get("answer_repair")},
+                    )
             if confidence <= 0:
                 top_score = next((source.get("score") for source in sources if source.get("score") is not None), None)
                 confidence = min(0.95, max(0.55, float(top_score))) if top_score is not None else 0.6
@@ -3079,8 +3287,11 @@ class RAGAnythingAdapter:
             key = self._term_key(normalized)
             if not normalized or not key or key in seen:
                 continue
+            if self._is_broad_course_term(normalized) and key not in original_key:
+                rejected.append(f"{normalized}:broad_course_term_not_in_question")
+                continue
             if self._is_noisy_retrieval_term(normalized):
-                rejected.append(normalized)
+                rejected.append(f"{normalized}:noisy")
                 continue
             seen.add(key)
             terms.append(normalized)
@@ -3093,6 +3304,16 @@ class RAGAnythingAdapter:
                 trace["compact_retrieval_terms"] = terms
                 trace["compact_retrieval_terms_rejected"] = rejected[:12]
         return terms
+
+    def _is_broad_course_term(self, term: str) -> bool:
+        broad_terms = {
+            "udp",
+            "ip",
+            "http",
+            "https",
+            "dns",
+        }
+        return self._term_key(term) in {self._term_key(item) for item in broad_terms}
 
     def _split_retrieval_query_terms(self, value: str) -> list[str]:
         text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -3161,6 +3382,20 @@ class RAGAnythingAdapter:
             return text
         return text[:max_chars].rstrip() + "..."
 
+    def _full_raw_answer_trace(self, value: Any) -> dict[str, Any]:
+        if not bool(getattr(settings, "RAG_QUERY_TRACE_FULL_RAW_ANSWER_ENABLED", False)):
+            return {}
+        max_chars = int(getattr(settings, "RAG_QUERY_TRACE_FULL_RAW_ANSWER_MAX_CHARS", 20000) or 0)
+        if max_chars <= 0:
+            return {}
+        text = str(value or "")
+        truncated = len(text) > max_chars
+        return {
+            "answer_full": text[:max_chars],
+            "answer_full_chars": len(text),
+            "answer_full_truncated": truncated,
+        }
+
     def _build_query_rewrite_trace(
         self,
         *,
@@ -3209,6 +3444,10 @@ class RAGAnythingAdapter:
             "score": source.get("score"),
             "retrieval_score": source.get("retrieval_score"),
             "rerank_score": source.get("rerank_score"),
+            "citation_index": source.get("citation_index"),
+            "citation_label": source.get("citation_label"),
+            "answer_reference_match": source.get("answer_reference_match"),
+            "answer_alignment_score": source.get("answer_alignment_score"),
             "text_chars": len(evidence_text),
             "text_preview": self._trace_preview(evidence_text, limit=500),
         }
@@ -3229,6 +3468,7 @@ class RAGAnythingAdapter:
             return {
                 "raw_text_chars": len(text),
                 "raw_text_preview": self._trace_preview(text, limit=500),
+                **self._full_raw_answer_trace(text),
             }
 
         def text_from_item(item: Any) -> str:
@@ -3270,6 +3510,7 @@ class RAGAnythingAdapter:
         return {
             "answer_chars": len(str(answer or "")),
             "answer_preview": self._trace_preview(answer, limit=500),
+            **self._full_raw_answer_trace(answer),
             "sources": list_stats(raw.get("sources")),
             "citations": list_stats(raw.get("citations")),
             "references": list_stats(raw.get("references")),
@@ -3318,6 +3559,7 @@ class RAGAnythingAdapter:
         trace.update({
             "effective_mode": metadata.get("adapter_effective_mode"),
             "attempted_modes": metadata.get("adapter_attempted_modes"),
+            "mode_attempts": metadata.get("adapter_mode_attempts"),
             "include_references_requested": metadata.get("adapter_include_references_requested"),
             "lightrag_rerank_requested": metadata.get("adapter_lightrag_rerank_requested"),
             "metadata_keys": sorted(str(key) for key in metadata.keys())[:24],
@@ -3682,35 +3924,278 @@ class RAGAnythingAdapter:
                 filtered.append(source)
         return filtered
 
+    def _prioritize_sources_by_answer_evidence(
+        self,
+        *,
+        sources: list[dict],
+        raw: Any,
+        answer: str,
+        question: str,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        if not sources:
+            return sources, {"applied": False, "reason": "no_sources"}
+
+        reference_tokens = self._answer_reference_tokens(raw=raw, answer=answer)
+        support_terms = self._answer_support_terms(question=question, answer=answer)
+        scored: list[tuple[float, int, dict[str, Any]]] = []
+        for index, source in enumerate(sources):
+            source_tokens = self._source_identity_tokens(source)
+            evidence_text = self._source_evidence_text(source)
+            evidence_key = self._term_key(evidence_text)
+            reference_match = bool(reference_tokens and (reference_tokens & source_tokens))
+            term_hits = [
+                term for term in support_terms
+                if self._term_key(term) and self._term_key(term) in evidence_key
+            ]
+            try:
+                base_score = float(source.get("score") or source.get("rerank_score") or source.get("retrieval_score") or 0.0)
+            except (TypeError, ValueError):
+                base_score = 0.0
+            alignment_score = base_score
+            if reference_match:
+                alignment_score += 2.0
+            alignment_score += min(len(term_hits), 8) * 0.08
+            aligned = dict(source)
+            aligned["answer_alignment_score"] = round(alignment_score, 4)
+            aligned["answer_reference_match"] = reference_match
+            aligned["answer_support_term_hits"] = term_hits[:8]
+            scored.append((alignment_score, -index, aligned))
+
+        ordered = [item for _, _, item in sorted(scored, key=lambda value: (value[0], value[1]), reverse=True)]
+        return ordered, {
+            "applied": True,
+            "reference_token_count": len(reference_tokens),
+            "support_terms": support_terms,
+            "top": [
+                {
+                    "source_name": item.get("source_name") or item.get("name") or item.get("file_name"),
+                    "answer_alignment_score": item.get("answer_alignment_score"),
+                    "answer_reference_match": item.get("answer_reference_match"),
+                    "answer_support_term_hits": item.get("answer_support_term_hits"),
+                }
+                for item in ordered[:5]
+            ],
+        }
+
+    def _answer_reference_tokens(self, *, raw: Any, answer: str) -> set[str]:
+        candidates: list[Any] = []
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            for value in (raw.get("references"), data.get("references")):
+                if isinstance(value, list):
+                    candidates.extend(value)
+        candidates.extend(re.findall(r"/app/(?:uploads|rag_storage|rag_output|runtime_tmp)/[^\s\]\)\r\n]+", str(answer or "")))
+
+        tokens: set[str] = set()
+        for candidate in candidates:
+            values: list[Any] = []
+            if isinstance(candidate, dict):
+                values.extend(candidate.values())
+            else:
+                values.append(candidate)
+            for value in values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                path = Path(text)
+                for part in (text, path.name, path.stem):
+                    key = self._term_key(part)
+                    if key:
+                        tokens.add(key)
+        return tokens
+
+    def _source_identity_tokens(self, source: dict[str, Any]) -> set[str]:
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        values = [
+            source.get("name"),
+            source.get("source_name"),
+            source.get("file_name"),
+            source.get("material_id"),
+            metadata.get("storage_name"),
+            metadata.get("material_title"),
+            metadata.get("material_id"),
+        ]
+        tokens: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            for part in (text, path.name, path.stem):
+                key = self._term_key(part)
+                if key:
+                    tokens.add(key)
+        return tokens
+
+    def _answer_support_terms(self, *, question: str, answer: str) -> list[str]:
+        text = f"{question}\n{answer}"
+        candidates = [
+            "慢启动",
+            "拥塞避免",
+            "丢包",
+            "窗口变化",
+            "拥塞窗口",
+            "CongWin",
+            "1MSS",
+            "1 MSS",
+            "CongWin/2",
+            "RTT",
+            "ACK",
+            "重复 ACK",
+            "超时",
+            "可靠传输",
+            "流量控制",
+            "确认应答",
+            "序列号",
+        ]
+        terms: list[str] = []
+        seen: set[str] = set()
+        text_key = self._term_key(text)
+        for term in candidates:
+            key = self._term_key(term)
+            if key and key in text_key and key not in seen:
+                seen.add(key)
+                terms.append(term)
+        return terms
+
+    def _annotate_sources_with_answer_references(
+        self,
+        *,
+        sources: list[dict],
+        raw: Any,
+        answer: str,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        reference_map = self._answer_reference_map(raw=raw, answer=answer)
+        if not reference_map or not sources:
+            return sources, {
+                "applied": False,
+                "reference_count": len(reference_map),
+                "reason": "no_references_or_sources",
+            }
+
+        annotated: list[dict] = []
+        matched_indexes: set[int] = set()
+        for source in sources:
+            source_tokens = self._source_identity_tokens(source)
+            matched_reference = next(
+                (
+                    ref
+                    for ref in reference_map
+                    if ref["tokens"] & source_tokens
+                ),
+                None,
+            )
+            updated = dict(source)
+            if matched_reference:
+                matched_indexes.add(int(matched_reference["index"]))
+                updated["citation_index"] = int(matched_reference["index"])
+                updated["citation_label"] = f"[{matched_reference['index']}]"
+                updated["citation_path"] = matched_reference["path"]
+                updated["answer_reference_match"] = True
+                current_score = self._safe_float(updated.get("answer_alignment_score")) or 0.0
+                updated["answer_alignment_score"] = round(current_score + 2.0, 4)
+            annotated.append(updated)
+
+        annotated.sort(
+            key=lambda item: (
+                int(item.get("citation_index") or 9999),
+                -(self._safe_float(item.get("answer_alignment_score")) or 0.0),
+            )
+        )
+        return annotated, {
+            "applied": True,
+            "reference_count": len(reference_map),
+            "matched_reference_indexes": sorted(matched_indexes),
+            "unmatched_reference_indexes": [
+                int(ref["index"])
+                for ref in reference_map
+                if int(ref["index"]) not in matched_indexes
+            ],
+            "references": [
+                {"index": int(ref["index"]), "path": ref["path"]}
+                for ref in reference_map
+            ],
+        }
+
+    def _answer_reference_map(self, *, raw: Any, answer: str) -> list[dict[str, Any]]:
+        refs: dict[int, str] = {}
+        for match in re.finditer(r"(?m)^\s*[-*]?\s*\[(\d+)\]\s+(.+?)\s*$", str(answer or "")):
+            try:
+                index = int(match.group(1))
+            except ValueError:
+                continue
+            refs[index] = match.group(2).strip()
+
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            raw_refs = data.get("references") or raw.get("references") or []
+            if isinstance(raw_refs, list):
+                for offset, item in enumerate(raw_refs, start=1):
+                    if offset in refs:
+                        continue
+                    text = ""
+                    if isinstance(item, dict):
+                        text = str(
+                            item.get("file_path")
+                            or item.get("path")
+                            or item.get("source")
+                            or item.get("file")
+                            or item.get("name")
+                            or item.get("id")
+                            or ""
+                        )
+                    else:
+                        text = str(item or "")
+                    if text.strip():
+                        refs[offset] = text.strip()
+
+        mapped: list[dict[str, Any]] = []
+        for index, path_text in sorted(refs.items()):
+            path = Path(path_text)
+            tokens = {
+                self._term_key(value)
+                for value in (path_text, path.name, path.stem)
+                if self._term_key(value)
+            }
+            mapped.append({"index": index, "path": path_text, "tokens": tokens})
+        return mapped
+
     def _answer_needs_repair(self, answer: str) -> bool:
+        return self._answer_repair_reason(answer) is not None
+
+    def _answer_repair_reason(self, answer: str) -> str | None:
         text = str(answer or "")
         if not text.strip():
-            return False
-        if self._looks_like_garbled_answer(text):
-            return True
+            return None
+        garbled_reason = self._garbled_answer_reason(text)
+        if garbled_reason:
+            return garbled_reason
         if "�" in text:
-            return True
+            return "replacement_character"
 
         normalized = re.sub(r"\s+", " ", text)
         if len(re.findall(r"\\{2,}", text)) >= 3:
-            return True
-        if len(re.findall(r"\|", text)) >= 12:
-            return True
+            return "excessive_backslashes"
         if re.search(r"\b(?:Analysis|Structure|Image Path|Caption|Footnotes)\s*:", text, flags=re.I):
-            return True
-        if re.search(r"[A-Za-z]+[\u4e00-\u9fff]+[A-Za-z]+|[\u4e00-\u9fff]+[A-Za-z]{3,}[\u4e00-\u9fff]+", normalized):
-            return True
+            return "multimodal_metadata_leak"
         if re.search(r"([\u4e00-\u9fff]{1,4})\1{2,}", text):
-            return True
+            return "repeated_chinese_sequence"
+
+        policy = str(getattr(settings, "RAG_ANSWER_REPAIR_POLICY", "severe_only") or "severe_only").strip().lower()
+        if policy != "legacy":
+            return None
+
+        if re.search(r"[A-Za-z]+[\u4e00-\u9fff]+[A-Za-z]+|[\u4e00-\u9fff]+[A-Za-z]{3,}[\u4e00-\u9fff]+", normalized):
+            return "awkward_mixed_language"
 
         chinese_chars = re.findall(r"[\u4e00-\u9fff]", text)
         if chinese_chars:
             quote_count = len(re.findall(r'["“”]', text))
             if quote_count / max(len(chinese_chars), 1) > 0.08:
-                return True
+                return "excessive_quotes"
             repeated_chinese = re.findall(r"([\u4e00-\u9fff]{1,2})\1{2,}", text)
             if len(repeated_chinese) >= 2:
-                return True
+                return "repeated_chinese_noise"
             awkward_patterns = (
                 r"的的",
                 r"地地",
@@ -3720,17 +4205,20 @@ class RAGAnythingAdapter:
                 r"RTTT",
             )
             if any(re.search(pattern, text) for pattern in awkward_patterns):
-                return True
-        return False
+                return "awkward_repeated_pattern"
+        return None
 
     def _looks_like_garbled_answer(self, answer: Any) -> bool:
+        return self._garbled_answer_reason(answer) is not None
+
+    def _garbled_answer_reason(self, answer: Any) -> str | None:
         text = str(answer or "")
         if not text.strip():
-            return False
+            return None
 
         normalized = re.sub(r"\s+", " ", text).strip()
         if not normalized:
-            return False
+            return None
 
         lightrag_intermediate_markers = (
             "关键词 词汇表",
@@ -3743,20 +4231,20 @@ class RAGAnythingAdapter:
             "stdClass",
         )
         if any(marker in normalized for marker in lightrag_intermediate_markers):
-            return True
+            return "lightrag_intermediate_marker"
 
         if len(re.findall(r"\\", text)) >= 8:
-            return True
+            return "excessive_backslash_noise"
         if len(re.findall(r"(?<![A-Za-z])(?:IP|TCP|UDP|ACK|SYN|FIN)(?![A-Za-z])", text)) >= 30:
-            return True
+            return "repeated_protocol_tokens"
 
         repeated_backslash_words = re.findall(r"\\\s*[\u4e00-\u9fffA-Za-z]{1,6}", text)
         if len(repeated_backslash_words) >= 8:
-            return True
+            return "repeated_backslash_words"
 
         repeated_noise_tokens = re.findall(r"(?<![\u4e00-\u9fffA-Za-z])(?:信|修|模型)\s*[.。]?", text)
         if len(repeated_noise_tokens) >= 30:
-            return True
+            return "repeated_noise_tokens"
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if len(lines) >= 12:
@@ -3765,13 +4253,25 @@ class RAGAnythingAdapter:
                 if len(line) <= 4 and re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9 .。,:：\"'\\]+", line)
             ]
             if len(very_short_lines) / len(lines) >= 0.55:
-                return True
+                return "fragmented_short_lines"
 
-        punctuation_noise = len(re.findall(r"[\\`|]", text))
-        if punctuation_noise >= 20 and punctuation_noise / max(len(text), 1) > 0.025:
-            return True
+        punctuation_text = self._strip_markdown_table_lines(text)
+        punctuation_noise = len(re.findall(r"[\\`|]", punctuation_text))
+        if punctuation_noise >= 20 and punctuation_noise / max(len(punctuation_text), 1) > 0.025:
+            return "punctuation_noise"
 
-        return False
+        return None
+
+    def _strip_markdown_table_lines(self, text: str) -> str:
+        kept_lines: list[str] = []
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            if stripped.count("|") >= 2:
+                cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+                if len(cells) >= 2 and any(cell for cell in cells):
+                    continue
+            kept_lines.append(line)
+        return "\n".join(kept_lines)
 
     async def _repair_answer_from_sources(
         self,
@@ -4271,6 +4771,7 @@ class RAGAnythingAdapter:
         attempted_modes = self._lightrag_reference_query_modes(query_mode)
 
         last_raw: dict[str, Any] = {}
+        mode_attempts: list[dict[str, Any]] = []
         for effective_mode in attempted_modes:
             query_param = self._build_lightrag_query_param(
                 QueryParam=QueryParam,
@@ -4281,6 +4782,11 @@ class RAGAnythingAdapter:
             try:
                 raw = await lightrag.aquery_llm(query_text, param=query_param)
             except Exception as exc:
+                mode_attempts.append({
+                    "mode": effective_mode,
+                    "success": False,
+                    "error": self._safe_error_detail(exc),
+                })
                 logger.warning(
                     "lightrag_query_mode_failed",
                     class_id=class_id,
@@ -4290,17 +4796,29 @@ class RAGAnythingAdapter:
                 )
                 continue
             if isinstance(raw, dict):
+                has_content = self._query_payload_has_content(raw)
+                mode_attempts.append({
+                    "mode": effective_mode,
+                    "success": True,
+                    "has_content": has_content,
+                    **self._query_payload_stats(raw),
+                })
                 metadata = dict(raw.get("metadata") or {})
                 metadata["adapter_requested_mode"] = query_mode
                 metadata["adapter_effective_mode"] = effective_mode
                 metadata["adapter_attempted_modes"] = attempted_modes
+                metadata["adapter_mode_attempts"] = list(mode_attempts)
                 metadata["adapter_include_references_requested"] = True
                 metadata["adapter_lightrag_rerank_requested"] = self._lightrag_internal_rerank_enabled()
                 raw["metadata"] = metadata
                 last_raw = raw
-                if self._query_payload_has_content(raw):
+                if has_content:
                     return raw, f"lightrag_aquery_llm:{effective_mode}"
 
+        if last_raw:
+            metadata = dict(last_raw.get("metadata") or {})
+            metadata["adapter_mode_attempts"] = list(mode_attempts)
+            last_raw["metadata"] = metadata
         return last_raw, f"lightrag_aquery_llm:{attempted_modes[-1]}"
 
     def _lightrag_reference_query_modes(self, query_mode: str) -> list[str]:
@@ -4358,6 +4876,42 @@ class RAGAnythingAdapter:
             if str(raw.get(key) or "").strip():
                 return True
         return False
+
+    def _query_payload_stats(self, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            text = str(raw or "")
+            return {
+                "raw_type": type(raw).__name__,
+                "answer_chars": len(text),
+                "chunk_count": 0,
+                "reference_count": 0,
+                "entity_count": 0,
+                "relationship_count": 0,
+            }
+
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        llm_response = raw.get("llm_response") if isinstance(raw.get("llm_response"), dict) else {}
+        answer = (
+            llm_response.get("content")
+            or raw.get("answer")
+            or raw.get("response")
+            or raw.get("output")
+            or raw.get("text")
+            or ""
+        )
+
+        def count(value: Any) -> int:
+            return len(value) if isinstance(value, list) else 0
+
+        return {
+            "raw_type": type(raw).__name__,
+            "top_level_keys": sorted(str(key) for key in raw.keys())[:12],
+            "answer_chars": len(str(answer or "")),
+            "chunk_count": count(raw.get("chunks")) + count(data.get("chunks")),
+            "reference_count": count(raw.get("references")) + count(data.get("references")),
+            "entity_count": count(data.get("entities")),
+            "relationship_count": count(data.get("relationships")),
+        }
 
     def _build_rag_query_kwargs(
         self,

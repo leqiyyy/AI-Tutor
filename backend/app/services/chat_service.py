@@ -1,30 +1,62 @@
 """AI chat orchestration service for the AI tutor system."""
 import base64
+import asyncio
 import mimetypes
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import List, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
+import httpx
 from sqlalchemy.orm import Session
 
+import app.storage as storage
+from app.ai.base import LLMMessage
+from app.ai.providers.mock_llm import MockLLMProvider
 from app.core.config import settings
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.logging import get_logger
 from app.integrations.rag import get_rag_engine
 from app.integrations.parser.simple import SimpleParserProvider
 from app.integrations.preprocessors import preprocess_for_raganything
 from app.integrations.rag.quality import build_evidence_quality, build_review_context
-from app.models.course import Class, Material
+from app.models.course import Class, ClassMember, Material, Submission, Task
 from app.models.chat import ChatCitation, ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
 from app.models.knowledge import FileParseTask, KBSpace
 from app.models.user import User
 from app.services import admin_service, analytics_service, conversation_context_service, model_routing_service, rag_metrics_service
+from app.services.question_router import QuestionRoute, classify_direct_intent, route_question
 
 log = get_logger(__name__)
 _fallback_attachment_parser = SimpleParserProvider()
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+async def _emit_progress(
+    progress_callback: Optional[ProgressCallback],
+    *,
+    stage: str,
+    status: str,
+    label: str,
+    started_at: float,
+    details: Optional[dict[str, Any]] = None,
+) -> None:
+    if progress_callback is None:
+        return
+    event: dict[str, Any] = {
+        "stage": stage,
+        "status": status,
+        "label": label,
+        "elapsed_ms": round((perf_counter() - started_at) * 1000, 2),
+    }
+    if details:
+        event["details"] = details
+    try:
+        await progress_callback(event)
+    except Exception as exc:  # pragma: no cover - progress must never break chat
+        log.debug("chat_progress_emit_failed", stage=stage, error=str(exc))
 
 def chat_attachment_scope_id(user_id: str) -> str:
     return f"{settings.CHAT_ATTACHMENT_SCOPE_PREFIX}/{user_id}"
@@ -137,9 +169,26 @@ async def send_message(
     session_id: Optional[str] = None,
     attachments: Optional[List[dict]] = None,
     role: str = "student",
+    answer_mode: str | None = "auto",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> dict:
+    progress_started = perf_counter()
+    await _emit_progress(
+        progress_callback,
+        stage="request_received",
+        status="done",
+        label="问题已提交",
+        started_at=progress_started,
+    )
+    await _emit_progress(
+        progress_callback,
+        stage="conversation_context",
+        status="running",
+        label="正在理解上下文与追问关系",
+        started_at=progress_started,
+    )
     session = get_or_create_session(db, class_id, user_id, session_id)
-    prepared_attachments = prepare_chat_attachments(attachments)
+    prepared_attachments = prepare_chat_attachments(attachments, user_id=user_id)
     conversation_context = conversation_context_service.build_conversation_context(
         db,
         session,
@@ -147,6 +196,14 @@ async def send_message(
         max_recent_turns=10,
     )
     retrieval_question = conversation_context.standalone_question or content
+    await _emit_progress(
+        progress_callback,
+        stage="conversation_context",
+        status="done",
+        label="上下文理解完成",
+        started_at=progress_started,
+        details=conversation_context.to_rag_meta(),
+    )
 
     if not session.title:
         session.title = content[:50]
@@ -169,10 +226,46 @@ async def send_message(
         extra_data={"role": role},
     )
     analytics_service.record_question_topics(db, class_id, content)
+    await _emit_progress(
+        progress_callback,
+        stage="message_saved",
+        status="done",
+        label="消息已记录，正在判断是否需要检索",
+        started_at=progress_started,
+    )
 
-    routed_answer = _build_routed_answer(db, class_id, content, role=role)
+    question_route = route_question(
+        question=content,
+        role=role,
+        answer_mode=answer_mode,
+        has_attachments=bool(prepared_attachments),
+    )
+    await _emit_progress(
+        progress_callback,
+        stage="question_route",
+        status="done",
+        label=_route_progress_label(question_route),
+        started_at=progress_started,
+        details=question_route.to_meta(),
+    )
+
+    routed_answer = _build_routed_answer(
+        db,
+        class_id,
+        content,
+        role=role,
+        user_id=user_id,
+        route=question_route,
+    )
     if routed_answer:
-        return _persist_direct_ai_answer(
+        await _emit_progress(
+            progress_callback,
+            stage="direct_answer",
+            status="done",
+            label="无需检索，已生成直接回复",
+            started_at=progress_started,
+        )
+        direct_result = _persist_direct_ai_answer(
             db=db,
             session=session,
             user_msg=user_msg,
@@ -180,6 +273,58 @@ async def send_message(
             suggestions=routed_answer.get("suggestions") or [],
             confidence=routed_answer.get("confidence", 1.0),
         )
+        direct_result["route_meta"] = _build_response_route_meta(question_route, retrieval_used=False)
+        await _emit_progress(
+            progress_callback,
+            stage="completed",
+            status="done",
+            label="回答生成完成",
+            started_at=progress_started,
+        )
+        return direct_result
+
+    if question_route.route in {"quick_llm", "teacher_tool"}:
+        await _emit_progress(
+            progress_callback,
+            stage="direct_generation",
+            status="running",
+            label="正在生成无需检索的快速回复",
+            started_at=progress_started,
+            details=question_route.to_meta(),
+        )
+        generated_answer = await _generate_direct_llm_answer(
+            db=db,
+            class_id=class_id,
+            question=content,
+            role=role,
+            route=question_route,
+            attachments=prepared_attachments,
+        )
+        await _emit_progress(
+            progress_callback,
+            stage="direct_generation",
+            status="done",
+            label="快速回复生成完成",
+            started_at=progress_started,
+            details=question_route.to_meta(),
+        )
+        direct_result = _persist_direct_ai_answer(
+            db=db,
+            session=session,
+            user_msg=user_msg,
+            answer=generated_answer,
+            suggestions=_default_direct_suggestions(role),
+            confidence=0.82,
+        )
+        direct_result["route_meta"] = _build_response_route_meta(question_route, retrieval_used=False)
+        await _emit_progress(
+            progress_callback,
+            stage="completed",
+            status="done",
+            label="回答生成完成",
+            started_at=progress_started,
+        )
+        return direct_result
 
     history = conversation_context.recent_turns[-10:]
 
@@ -187,17 +332,45 @@ async def send_message(
     rag = get_rag_engine(requested_engine=persisted_model_config.get("rag_engine"))
     routing_snapshot = model_routing_service.build_model_routing_snapshot(persisted_model_config)
     routing_meta = model_routing_service.flatten_routing_snapshot(routing_snapshot)
+    await _emit_progress(
+        progress_callback,
+        stage="rag_prepare",
+        status="done",
+        label="课程知识库与模型路由已准备",
+        started_at=progress_started,
+        details={
+            "rag_engine": persisted_model_config.get("rag_engine") or settings.RAG_ENGINE,
+            "llm_backend": routing_meta.get("llm_backend"),
+            "embedding_backend": routing_meta.get("embedding_backend"),
+        },
+    )
     rag_started = perf_counter()
     rag_latency_ms = None
     try:
+        await _emit_progress(
+            progress_callback,
+            stage="rag_query",
+            status="running",
+            label="正在检索课程资料并生成回答",
+            started_at=progress_started,
+        )
         result = await rag.query(
             question=retrieval_question,
             class_id=class_id,
             history=history,
             attachments=prepared_attachments,
             role=role,
+            progress_callback=progress_callback,
         )
         rag_latency_ms = round((perf_counter() - rag_started) * 1000, 2)
+        await _emit_progress(
+            progress_callback,
+            stage="rag_query",
+            status="done",
+            label="课程资料检索与回答生成完成",
+            started_at=progress_started,
+            details={"latency_ms": rag_latency_ms},
+        )
         result_meta = getattr(result, "meta", {}) or {}
         evidence_quality = build_evidence_quality(result.sources or [], result.confidence)
         review_context = build_review_context(
@@ -247,6 +420,7 @@ async def send_message(
                 "question_intent_signals": result_meta.get("question_intent_signals"),
                 "retrieval_focus_terms": result_meta.get("retrieval_focus_terms"),
                 "conversation_context": conversation_context.to_rag_meta(),
+                "question_route": question_route.to_meta(),
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -256,6 +430,14 @@ async def send_message(
     except Exception as exc:
         rag_latency_ms = round((perf_counter() - rag_started) * 1000, 2)
         log.error("rag_query_failed", error=str(exc))
+        await _emit_progress(
+            progress_callback,
+            stage="rag_query",
+            status="error",
+            label="检索生成失败，正在返回兜底回复",
+            started_at=progress_started,
+            details={"error": str(exc), "latency_ms": rag_latency_ms},
+        )
         evidence_quality = build_evidence_quality([], 0.0)
         review_context = build_review_context([], 0.0, trigger="low_confidence")
         rag_metrics_service.record_query_event(
@@ -293,6 +475,7 @@ async def send_message(
                 "query_rewrite_mode": settings.RAG_QUERY_REWRITE_MODE,
                 "query_variant_count": 1,
                 "conversation_context": conversation_context.to_rag_meta(),
+                "question_route": question_route.to_meta(),
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -363,13 +546,28 @@ async def send_message(
         )
 
     session.updated_at = datetime.now(timezone.utc)
+    await _emit_progress(
+        progress_callback,
+        stage="persist_answer",
+        status="running",
+        label="正在保存回答与引用来源",
+        started_at=progress_started,
+    )
     db.commit()
     db.refresh(ai_msg)
+    await _emit_progress(
+        progress_callback,
+        stage="completed",
+        status="done",
+        label="回答生成完成",
+        started_at=progress_started,
+    )
 
     return {
         "session_id": session.id,
         "user_message": _msg_to_dict(user_msg),
         "ai_message": _msg_to_dict(ai_msg),
+        "route_meta": _build_response_route_meta(question_route, retrieval_used=True),
     }
 
 
@@ -402,8 +600,20 @@ def _persist_direct_ai_answer(
     }
 
 
-def _build_routed_answer(db: Session, class_id: str, content: str, role: str = "student") -> dict | None:
-    intent = _classify_direct_intent(content)
+def _build_routed_answer(
+    db: Session,
+    class_id: str,
+    content: str,
+    role: str = "student",
+    user_id: str | None = None,
+    route: QuestionRoute | None = None,
+) -> dict | None:
+    intent = route.intent if route and route.route in {
+        "direct_answer",
+        "system_status",
+        "user_profile",
+        "off_topic",
+    } else _classify_direct_intent(content)
     if intent == "greeting":
         return {
             "answer": _build_greeting_answer(role),
@@ -432,6 +642,11 @@ def _build_routed_answer(db: Session, class_id: str, content: str, role: str = "
                 "我可以问哪些课程问题",
             ],
         }
+    if intent == "user_profile":
+        return {
+            "answer": _build_user_profile_answer(db, user_id),
+            "suggestions": _default_direct_suggestions(role),
+        }
     if intent == "off_topic":
         return {
             "answer": "这个问题看起来和当前课程学习关系不大。我主要负责课程答疑、资料解释、学习建议和知识点梳理。你可以换成课程相关问题继续问我。",
@@ -442,91 +657,7 @@ def _build_routed_answer(db: Session, class_id: str, content: str, role: str = "
 
 
 def _classify_direct_intent(content: str) -> str | None:
-    normalized = _normalize_intent_text(content)
-    if not normalized:
-        return None
-
-    if normalized in {
-        "你好",
-        "您好",
-        "嗨",
-        "哈喽",
-        "hello",
-        "hi",
-        "hey",
-        "在吗",
-        "在不在",
-        "老师你好",
-        "助教你好",
-        "ai你好",
-        "ai助教你好",
-    }:
-        return "greeting"
-
-    if _contains_any(normalized, ("你叫什么", "你是谁", "你是啥", "你是什么", "你的名字", "怎么称呼你")):
-        return "identity"
-
-    if _contains_any(
-        normalized,
-        (
-            "你能做什么",
-            "你可以做什么",
-            "你可以实现什么功能",
-            "你有什么功能",
-            "你会做什么",
-            "功能介绍",
-            "怎么使用你",
-            "你能帮我什么",
-            "你可以帮我什么",
-        ),
-    ):
-        return "capability"
-
-    if _contains_any(
-        normalized,
-        (
-            "知识库有资料吗",
-            "知识库里有资料吗",
-            "知识库有没有资料",
-            "目前知识库",
-            "当前知识库",
-            "课程资料上传了吗",
-            "老师上传资料了吗",
-            "有哪些资料",
-            "有什么资料",
-            "资料状态",
-            "知识库状态",
-            "知识库里几个文档",
-            "知识库有几个文档",
-            "库里有几个文档",
-            "库里几个文档",
-            "有几个文档",
-            "几个文档",
-            "有多少文档",
-            "文档数量",
-            "几份资料",
-            "有几份资料",
-            "有多少资料",
-            "资料数量",
-        ),
-    ):
-        return "kb_status"
-
-    if _contains_any(
-        normalized,
-        (
-            "写情书",
-            "讲个笑话",
-            "今天天气",
-            "股票",
-            "彩票",
-            "代写论文",
-            "帮我作弊",
-        ),
-    ):
-        return "off_topic"
-
-    return None
+    return classify_direct_intent(content)
 
 
 def _normalize_intent_text(content: str) -> str:
@@ -618,6 +749,336 @@ def _build_kb_status_answer(db: Session, class_id: str) -> str:
     return "\n".join(lines)
 
 
+def _build_user_profile_answer(db: Session, user_id: str | None) -> str:
+    if not user_id:
+        return "我暂时没有拿到你的登录身份信息，所以不能可靠判断你叫什么。"
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return "我暂时没有在系统中找到你的用户资料，所以不能可靠判断你叫什么。"
+    role_label = {
+        "student": "学生",
+        "teacher": "教师",
+        "admin": "管理员",
+    }.get(str(user.role or ""), str(user.role or "用户"))
+    id_text = user.student_id or user.teacher_id
+    extra = f"，编号是 {id_text}" if id_text else ""
+    return f"系统资料显示，你的姓名是 {user.real_name}，身份是{role_label}{extra}。"
+
+
+def _route_progress_label(route: QuestionRoute) -> str:
+    if route.route == "course_rag":
+        return "已判断需要检索课程资料"
+    if route.route == "quick_llm":
+        return "已选择快速回答，不进入课程检索"
+    if route.route == "teacher_tool":
+        return "已识别为教学工具任务"
+    if route.route == "system_status":
+        return "已识别为系统状态查询"
+    if route.route == "user_profile":
+        return "已识别为个人资料查询"
+    if route.route == "off_topic":
+        return "已识别为非课程相关问题"
+    return "已判断无需检索课程资料"
+
+
+async def _generate_direct_llm_answer(
+    *,
+    db: Session,
+    class_id: str,
+    question: str,
+    role: str,
+    route: QuestionRoute,
+    attachments: list[dict] | None = None,
+) -> str:
+    system_prompt = _build_direct_llm_system_prompt(role=role, route=route)
+    context = _build_direct_generation_context(db=db, class_id=class_id, route=route)
+    direct_attachments = attachments or []
+    attachment_context = _build_direct_attachment_context(direct_attachments)
+    if attachment_context:
+        context = f"{context}\n\n本轮附件摘要：\n{attachment_context}".strip()
+    user_content = question if not context else f"{question}\n\n可用系统上下文：\n{context}"
+    messages = [
+        LLMMessage(role="system", content=system_prompt),
+        LLMMessage(role="user", content=user_content),
+    ]
+    try:
+        return await _call_generation_llm(db=db, messages=messages, attachments=direct_attachments)
+    except Exception as exc:
+        log.warning("direct_llm_generation_failed", route=route.route, error=str(exc))
+        if route.route == "teacher_tool":
+            return _teacher_tool_fallback_answer(question=question, route=route, context=context)
+        return (
+            "快速回答暂时不可用。你可以切换到“严格课程资料”模式，让我根据课程知识库检索后回答。"
+        )
+
+
+def _build_direct_llm_system_prompt(*, role: str, route: QuestionRoute) -> str:
+    if route.route == "teacher_tool":
+        return (
+            "你是珞樱学堂的教师助教。请用简体中文回答，面向教师，输出结构化、可直接使用的教学内容。"
+            "如果系统上下文不足，要明确说明哪些部分需要教师补充，不要伪造学生数据。"
+        )
+    return (
+        "你是珞樱学堂 AI 助教。请用简体中文快速回答用户问题。"
+        "当前模式不要求检索课程知识库，因此不要声称答案来自课程资料；如涉及课程事实，应提醒用户可切换到检索模式核验。"
+        "如果用户上传了图片，图片会作为多模态输入直接提供给你，请直接阅读图片内容并回答。"
+    )
+
+
+async def _call_generation_llm(
+    *,
+    db: Session,
+    messages: list[LLMMessage],
+    attachments: list[dict] | None = None,
+) -> str:
+    persisted_model_config = admin_service.get_model_config(db)
+    routing_snapshot = model_routing_service.build_model_routing_snapshot(persisted_model_config)
+    generation = routing_snapshot.get("generation") or {}
+    if generation.get("effective_backend") == "mock":
+        return await MockLLMProvider().chat(messages)
+
+    api_base = str(generation.get("api_base") or settings.EFFECTIVE_LLM_API_BASE or "").strip()
+    api_key = settings.EFFECTIVE_LLM_API_KEY or "local"
+    model = str(generation.get("model") or settings.LLM_MODEL or "").strip()
+    if not api_base or not model:
+        return await MockLLMProvider().chat(messages)
+
+    wire_api = str(settings.LLM_WIRE_API or "chat_completions").strip().lower()
+    if wire_api == "responses":
+        answer = await _call_responses_generation_api(
+            messages=messages,
+            attachments=attachments or [],
+            model=model,
+            api_base=api_base,
+            api_key=api_key,
+        )
+        if answer:
+            return answer
+        raise RuntimeError("quick LLM responses API returned empty output")
+
+    try:
+        import openai  # type: ignore
+
+        AsyncOpenAI = getattr(openai, "AsyncOpenAI")
+    except Exception as exc:  # pragma: no cover - optional runtime dependency
+        raise RuntimeError("openai package is unavailable for quick LLM generation") from exc
+
+    client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=60)
+    chat_messages = _build_chat_completion_messages(messages=messages, attachments=attachments or [])
+    response = await client.chat.completions.create(
+        model=model,
+        messages=chat_messages,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+async def _call_responses_generation_api(
+    *,
+    messages: list[LLMMessage],
+    attachments: list[dict],
+    model: str,
+    api_base: str,
+    api_key: str,
+) -> str:
+    input_items = _build_responses_input_items(messages=messages, attachments=attachments)
+    endpoint = api_base.rstrip("/") + "/responses"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "x-api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": model,
+        "input": input_items,
+    }
+    last_error: Exception | None = None
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for attempt in range(3):
+            try:
+                response = await client.post(endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+            except Exception as exc:
+                last_error = exc
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        else:  # pragma: no cover
+            raise last_error or RuntimeError("quick LLM responses API failed")
+
+    if data.get("output_text"):
+        return str(data["output_text"]).strip()
+
+    texts: list[str] = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text")
+            if text:
+                texts.append(str(text))
+    return "\n".join(texts).strip()
+
+
+def _build_responses_input_items(*, messages: list[LLMMessage], attachments: list[dict]) -> list[dict]:
+    image_items = _direct_image_input_items(attachments, wire_api="responses")
+    last_user_index = _last_user_message_index(messages)
+    input_items: list[dict] = []
+    for index, item in enumerate(messages):
+        if not item.content:
+            continue
+        content: list[dict] = [{"type": "input_text", "text": item.content}]
+        if index == last_user_index and image_items:
+            content.extend(image_items)
+        input_items.append({"role": item.role, "content": content})
+    return input_items
+
+
+def _build_chat_completion_messages(*, messages: list[LLMMessage], attachments: list[dict]) -> list[dict]:
+    image_items = _direct_image_input_items(attachments, wire_api="chat_completions")
+    last_user_index = _last_user_message_index(messages)
+    chat_messages: list[dict] = []
+    for index, item in enumerate(messages):
+        if not item.content:
+            continue
+        if index == last_user_index and image_items:
+            chat_messages.append({
+                "role": item.role,
+                "content": [{"type": "text", "text": item.content}, *image_items],
+            })
+        else:
+            chat_messages.append({"role": item.role, "content": item.content})
+    return chat_messages
+
+
+def _direct_image_input_items(attachments: list[dict], *, wire_api: str) -> list[dict]:
+    items: list[dict] = []
+    for attachment in attachments[:3]:
+        if str((attachment or {}).get("file_type") or "").lower() != "image":
+            continue
+        image_url = _direct_image_url(attachment)
+        if not image_url:
+            continue
+        if wire_api == "responses":
+            items.append({"type": "input_image", "image_url": image_url})
+        else:
+            items.append({"type": "image_url", "image_url": {"url": image_url}})
+    return items
+
+
+def _direct_image_url(attachment: dict) -> str:
+    data_url = str((attachment or {}).get("data_url") or "").strip()
+    if data_url.startswith("data:image"):
+        return data_url
+    image_data = (
+        (attachment or {}).get("image_base64")
+        or (attachment or {}).get("base64")
+        or (attachment or {}).get("image_data")
+    )
+    if not image_data:
+        return ""
+    mime_type = str((attachment or {}).get("mime_type") or "image/png")
+    return f"data:{mime_type};base64,{image_data}"
+
+
+def _last_user_message_index(messages: list[LLMMessage]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "user":
+            return index
+    return None
+
+
+def _build_direct_generation_context(*, db: Session, class_id: str, route: QuestionRoute) -> str:
+    if route.intent != "class_learning_analysis":
+        return ""
+    student_count = db.query(ClassMember).filter(
+        ClassMember.class_id == class_id,
+        ClassMember.role == "student",
+    ).count()
+    task_count = db.query(Task).filter(Task.class_id == class_id, Task.is_published == True).count()
+    total_questions = db.query(ChatMessage).join(
+        ChatSession, ChatMessage.session_id == ChatSession.id,
+    ).filter(
+        ChatSession.class_id == class_id,
+        ChatMessage.role == "user",
+    ).count()
+    submission_count = db.query(Submission).join(
+        Task, Submission.task_id == Task.id,
+    ).filter(Task.class_id == class_id).count()
+    review_count = db.query(ReviewItem).filter(
+        ReviewItem.class_id == class_id,
+        ReviewItem.status == "pending",
+    ).count()
+    return (
+        f"班级学生数：{student_count}\n"
+        f"已发布任务数：{task_count}\n"
+        f"学生提问数：{total_questions}\n"
+        f"任务提交记录数：{submission_count}\n"
+        f"待教师审核回答数：{review_count}"
+    )
+
+
+def _build_direct_attachment_context(attachments: list[dict]) -> str:
+    lines: list[str] = []
+    for attachment in attachments[:3]:
+        is_image = str((attachment or {}).get("file_type") or "").lower() == "image"
+        context = str((attachment or {}).get("attachment_context") or "").strip()
+        name = str((attachment or {}).get("name") or ("图片" if is_image else "附件"))
+        if is_image and _direct_image_url(attachment):
+            lines.append(f"- {name}: 原图已作为多模态输入直接发送给快速回答模型。")
+            continue
+        if not context:
+            continue
+        lines.append(f"- {name}: {context[:1200]}")
+    return "\n".join(lines)
+
+
+def _teacher_tool_fallback_answer(*, question: str, route: QuestionRoute, context: str) -> str:
+    if route.intent == "class_learning_analysis":
+        context_text = f"\n\n当前可用数据：\n{context}" if context else ""
+        return (
+            "我可以协助做班级学情分析，但当前快速生成模型不可用。"
+            f"{context_text}\n\n建议从学生提问热点、任务完成情况、待审核问题和薄弱知识点四个方面生成分析报告。"
+        )
+    return (
+        "我可以协助生成教案、练习题或课堂活动，但当前快速生成模型不可用。"
+        "你可以稍后重试，或切换到严格课程资料模式，先让我检索课程资料后再辅助整理。"
+    )
+
+
+def _build_response_route_meta(route: QuestionRoute, *, retrieval_used: bool) -> dict:
+    meta = route.to_meta()
+    meta["retrieval_used"] = bool(retrieval_used)
+    meta["source_policy"] = "strict_course" if retrieval_used else "none"
+    meta["display_label"] = _route_display_label(meta)
+    return meta
+
+
+def _route_display_label(meta: dict) -> str:
+    route = meta.get("route")
+    mode = meta.get("answer_mode")
+    if route == "course_rag":
+        return "检索" if mode == "strict_course" else "课程检索"
+    if route == "quick_llm":
+        return "快速回答"
+    if route == "teacher_tool":
+        return "教学"
+    if route in {"system_status", "user_profile"}:
+        return "系统查询"
+    if route == "off_topic":
+        return "课程范围外"
+    return "直接回答"
+
+
 def _default_direct_suggestions(role: str = "student") -> list[str]:
     if str(role or "").lower() in {"teacher", "admin", "instructor"}:
         return [
@@ -642,13 +1103,17 @@ def submit_feedback(
     message = db.query(ChatMessage).filter(ChatMessage.id == message_id).first()
     if not message:
         raise NotFoundException("Message not found")
+    session = db.query(ChatSession).filter(ChatSession.id == message.session_id).first()
+    if not session or session.user_id != user_id:
+        raise ForbiddenException("You do not have access to this message")
+    if message.role != "ai":
+        raise ForbiddenException("Only AI answers can receive this feedback")
     message.feedback = feedback
     message.feedback_reason = reason
 
     if feedback == "dislike":
         existing = db.query(ReviewItem).filter(ReviewItem.message_id == message_id).first()
         if not existing:
-            session = db.query(ChatSession).filter(ChatSession.id == message.session_id).first()
             user_msgs = db.query(ChatMessage).filter(
                 ChatMessage.session_id == message.session_id,
                 ChatMessage.role == "user",
@@ -674,7 +1139,6 @@ def submit_feedback(
             )
             db.add(review)
         message.needs_review = True
-        session = db.query(ChatSession).filter(ChatSession.id == message.session_id).first()
         if session:
             analytics_service.record_learning(
                 db,
@@ -698,13 +1162,15 @@ def submit_feedback(
     }
 
 
-def prepare_chat_attachments(attachments: Optional[List[dict]]) -> List[dict]:
+def prepare_chat_attachments(attachments: Optional[List[dict]], user_id: str | None = None) -> List[dict]:
     prepared: list[dict] = []
     for attachment in attachments or []:
         if not isinstance(attachment, dict):
             continue
         item = dict(attachment)
-        file_path = item.get("file_path")
+        file_path = _resolve_chat_attachment_file_path(item, user_id=user_id)
+        if file_path:
+            item["file_path"] = file_path
         file_type = item.get("file_type")
         file_name = item.get("name") or item.get("file_name") or "attachment"
         mime_type = item.get("mime_type") or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
@@ -713,6 +1179,8 @@ def prepare_chat_attachments(attachments: Optional[List[dict]]) -> List[dict]:
             prepared.append(item)
             continue
         if not file_path:
+            if item.get("storage_key"):
+                item["attachment_context"] = f"Attachment file is no longer available: {file_name}"
             prepared.append(item)
             continue
 
@@ -733,6 +1201,34 @@ def prepare_chat_attachments(attachments: Optional[List[dict]]) -> List[dict]:
         )
         prepared.append(item)
     return prepared
+
+
+def _resolve_chat_attachment_file_path(attachment: dict, user_id: str | None = None) -> str | None:
+    file_path = attachment.get("file_path")
+    if file_path:
+        return str(file_path)
+    if not user_id:
+        return None
+
+    storage_key = str(attachment.get("storage_key") or "").strip()
+    if not storage_key:
+        return None
+    if not _is_safe_chat_storage_key(storage_key):
+        return None
+
+    try:
+        return storage.get_file_path(chat_attachment_scope_id(user_id), storage_key)
+    except Exception as exc:  # pragma: no cover - storage backend defensive path
+        log.warning("chat_attachment_path_resolution_failed", storage_key=storage_key, error=str(exc))
+        return None
+
+
+def _is_safe_chat_storage_key(storage_key: str) -> bool:
+    if not storage_key or storage_key in {".", ".."}:
+        return False
+    if "/" in storage_key or "\\" in storage_key:
+        return False
+    return Path(storage_key).name == storage_key
 
 
 def cleanup_expired_chat_attachments(user_id: str) -> dict:
@@ -848,6 +1344,7 @@ def list_review_items(db: Session, class_id: str, status: Optional[str] = None) 
             "question_content": item.question_content,
             "ai_answer": item.ai_answer,
             "teacher_answer": item.teacher_answer,
+            "feedback_reason": item.message.feedback_reason if item.message else None,
             "status": item.status,
             "quality": build_evidence_quality((item.message.sources if item.message else []) or [], item.message.confidence if item.message else 0.0),
             "review_context": build_review_context(

@@ -66,6 +66,7 @@ class SendMessageRequest(BaseModel):
     content: str
     session_id: Optional[str] = None
     attachments: Optional[List[dict]] = None
+    answer_mode: Optional[Literal["auto", "strict_course", "quick_llm", "teacher_tool"]] = "auto"
 
 
 class ChatQueryRequest(BaseModel):
@@ -76,6 +77,10 @@ class ChatQueryRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, validation_alias=AliasChoices("session_id", "conversation_id"))
     message: str = Field(validation_alias=AliasChoices("message", "content"))
     attachments: Optional[List[dict]] = None
+    answer_mode: Optional[Literal["auto", "strict_course", "quick_llm", "teacher_tool"]] = Field(
+        default="auto",
+        validation_alias=AliasChoices("answer_mode", "answerMode", "retrieval_policy", "retrievalPolicy"),
+    )
 
 
 class FeedbackRequest(BaseModel):

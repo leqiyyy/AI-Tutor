@@ -340,6 +340,42 @@ def test_answer_repair_detects_code_like_gibberish():
     )
 
 
+def test_answer_repair_does_not_repair_normal_markdown_tables():
+    adapter = RAGAnythingAdapter()
+
+    answer = """
+### TCP 拥塞控制机制详解
+
+| 丢包检测方式 | 拥塞窗口变化 | 进入阶段 |
+|------------|------------|---------|
+| 超时 | CongWin 降为 1 MSS | 慢启动 |
+| 3 个重复 ACK | CongWin 降为 CongWin/2 | 拥塞避免 |
+
+TCP 拥塞控制会结合确认应答、超时重传等机制，共同服务于可靠传输。
+"""
+
+    assert not adapter._answer_needs_repair(answer)
+
+
+def test_compact_retrieval_terms_rejects_broad_terms_not_in_question():
+    adapter = RAGAnythingAdapter()
+
+    terms = adapter._compact_retrieval_terms(
+        question="解释 TCP 拥塞控制中慢启动和拥塞避免的关系",
+        rewrite_bundle={
+            "queries": [
+                "解释 TCP 拥塞控制中慢启动和拥塞避免的关系",
+                "传输层；TCP；UDP；可靠传输；流量控制；拥塞控制；慢启动；拥塞避免",
+            ],
+            "retrieval_focus_terms": [],
+        },
+    )
+
+    assert "UDP" not in terms
+    assert "慢启动" in terms
+    assert "拥塞避免" in terms
+
+
 def test_answer_generation_prompt_recognizes_lightrag_rag_prompt():
     adapter = RAGAnythingAdapter()
 

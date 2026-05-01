@@ -1,19 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
+import { AiMarkdownContent } from '@/components/AiMarkdownContent';
+import { AiProgressTimeline } from '@/components/AiProgressTimeline';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
 import { aiService } from '@/services/ai';
 import type {
   AiAttachment as AttachedFile,
+  AiAnswerMode,
   AiConversation as Conversation,
-  AiFeedbackItem,
   AiKnowledgeBase,
   AiMessage as Message,
   AiMessageSource,
+  AiProgressEvent,
   AiResourceRecommendation as ResourceRecommendation,
   AiResponseStyle,
 } from '@/types/ai';
 
-export type FeedbackItem = AiFeedbackItem;
+const ANSWER_MODES: Array<{ value: AiAnswerMode; label: string; title: string }> = [
+  { value: 'auto', label: '自动', title: '自动判断是否需要检索课程资料' },
+  { value: 'strict_course', label: '检索', title: '检索课程资料，资料不足时明确说明' },
+  { value: 'quick_llm', label: '快速', title: '不检索课程资料，直接快速回答' },
+];
 
 function getFileType(file: File): AttachedFile['fileType'] {
   const name = file.name.toLowerCase();
@@ -109,8 +116,10 @@ export default function AIAssistant() {
   const [input, setInput] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [progressSteps, setProgressSteps] = useState<AiProgressEvent[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [knowledgeBase, setKnowledgeBase] = useState<AiKnowledgeBase>('course');
+  const [answerMode, setAnswerMode] = useState<AiAnswerMode>('auto');
   const [style, setStyle] = useState<AiResponseStyle>('academic');
   const [currentSources, setCurrentSources] = useState<AiMessageSource[]>([]);
   const [recommendations, setRecommendations] = useState<ResourceRecommendation[]>([]);
@@ -174,7 +183,7 @@ export default function AIAssistant() {
       'text/markdown', 'text/plain', 'text/html', 'text/css',
       'application/json', 'text/x-python', 'text/javascript', 'application/javascript',
     ];
-    const ALLOWED_EXTS = ['.md', '.py', '.js', '.ts', '.jsx', '.tsx', '.cpp', '.c', '.java', '.go', '.rs', '.yaml', '.yml', '.sh', '.php', '.rb', '.swift', '.kt', '.json', '.html', '.css', '.docx', '.doc'];
+    const ALLOWED_EXTS = ['.txt', '.md', '.markdown', '.py', '.js', '.ts', '.jsx', '.tsx', '.cpp', '.c', '.java', '.go', '.rs', '.yaml', '.yml', '.sh', '.php', '.rb', '.swift', '.kt', '.json', '.html', '.css', '.docx', '.doc'];
     const MAX_SIZE = 20 * 1024 * 1024;
     const newFiles: AttachedFile[] = [];
     for (const file of fileArray) {
@@ -273,6 +282,22 @@ export default function AIAssistant() {
     }
   }, [activeConvId]);
 
+  const handleProgressEvent = useCallback((event: AiProgressEvent) => {
+    setProgressSteps(prev => {
+      const existingIndex = prev.findIndex(item => item.stage === event.stage);
+      if (existingIndex < 0) return [...prev, event];
+      return prev.map((item, index) => index === existingIndex ? { ...item, ...event } : item);
+    });
+  }, []);
+
+  const handleCitationClick = useCallback((source: AiMessageSource) => {
+    setCurrentSources(prev => [source, ...prev.filter(item => item.chunkId !== source.chunkId || item.name !== source.name)]);
+    setRightTab('source');
+    if (rightPanelMode === 'closed') {
+      setRightPanelMode('standard');
+    }
+  }, [rightPanelMode]);
+
   const sendMessage = async () => {
     const text = input.trim();
     if ((!text && attachedFiles.length === 0) || isTyping) return;
@@ -286,6 +311,7 @@ export default function AIAssistant() {
     setInput('');
     setAttachedFiles([]);
     setIsTyping(true);
+    setProgressSteps([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     try {
       const { conversation, reply } = await aiService.sendMessage('student', {
@@ -293,6 +319,8 @@ export default function AIAssistant() {
         classId,
         content: text,
         attachments: userMsg.attachments,
+        answerMode,
+        onProgress: handleProgressEvent,
       });
 
       const finalMessages = [...nextMessages, reply];
@@ -319,6 +347,7 @@ export default function AIAssistant() {
         }
       }
       setRecommendations(await aiService.getRecommendations());
+      setProgressSteps([]);
     } catch (error) {
       console.error('ai_send_message_failed', error);
       const aiMsg: Message = {
@@ -330,6 +359,7 @@ export default function AIAssistant() {
       setCurrentSources([]);
       setRecommendations(getRecommendations(finalMessages));
       saveCurrentConversation(finalMessages);
+      setProgressSteps([]);
     } finally {
       setIsTyping(false);
     }
@@ -363,36 +393,8 @@ export default function AIAssistant() {
     if (!feedbackModal) return;
     const updated = messages.map(m => m.id === feedbackModal.msgId ? { ...m, feedback: 'dislike' as const } : m);
     setMessages(updated);
-    const aiMsg = messages.find(m => m.id === feedbackModal.msgId);
-    const msgIdx = messages.findIndex(m => m.id === feedbackModal.msgId);
-    const prevMsg = msgIdx > 0 ? messages.slice(0, msgIdx).reverse().find(m => m.role === 'user') : null;
-    const convTitle = activeConvId === 0 ? '当前对话' : (conversations.find(c => c.id === activeConvId)?.title || '对话');
-    const feedbackItem: FeedbackItem = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      studentName: '李同学',
-      conversationTitle: convTitle,
-      questionContent: prevMsg?.content || '（无上文问题）',
-      aiAnswer: aiMsg?.content || '',
-      reason: feedbackReasonTag ? `${feedbackReasonTag}${feedbackReason ? '：' + feedbackReason : ''}` : feedbackReason,
-      timestamp: new Date().toLocaleString('zh-CN'),
-      status: 'pending',
-      courseId: 'cs-network-2024',
-    };
-    await aiService.dislikeMessage(feedbackModal.msgId);
-    await aiService.submitFeedback({
-      conversationId: activeConvId,
-      messageId: feedbackModal.msgId,
-      reason: feedbackItem.reason,
-      questionContent: feedbackItem.questionContent,
-      aiAnswer: feedbackItem.aiAnswer,
-    });
-    await aiService.escalateToTeacher({
-      conversationId: activeConvId,
-      messageId: feedbackModal.msgId,
-      reason: feedbackItem.reason,
-      questionContent: feedbackItem.questionContent,
-      aiAnswer: feedbackItem.aiAnswer,
-    });
+    const reason = feedbackReasonTag ? `${feedbackReasonTag}${feedbackReason ? '：' + feedbackReason : ''}` : feedbackReason;
+    await aiService.dislikeMessage(feedbackModal.msgId, reason);
     saveCurrentConversation(updated);
     setFeedbackModal(null);
     setShowFeedbackToast(true);
@@ -617,6 +619,19 @@ export default function AIAssistant() {
                 <option value="course">课程知识库</option>
                 <option value="personal">个人知识库</option>
               </select>
+              <div className="flex rounded-lg border border-gray-200 bg-gray-50 p-0.5" title="回答模式">
+                {ANSWER_MODES.map(mode => (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    onClick={() => setAnswerMode(mode.value)}
+                    title={mode.title}
+                    className={`px-2 py-1 text-xs rounded-md transition-colors ${answerMode === mode.value ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
               <button
                 onClick={handleNewConversation}
                 className="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-teal-600 cursor-pointer rounded-md hover:bg-teal-50 transition-colors"
@@ -664,13 +679,28 @@ export default function AIAssistant() {
 
                   {/* 消息气泡 */}
                   {msg.content && (
+                    <>
+                    {msg.role === 'ai' && msg.routeMeta && (
+                      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-teal-100 bg-teal-50 px-2 py-0.5 text-teal-700">
+                          <i className={msg.routeMeta.retrievalUsed ? 'ri-book-open-line' : 'ri-flashlight-line'}></i>
+                          {msg.routeMeta.displayLabel || 'AI回答'}
+                        </span>
+                        {!msg.routeMeta.retrievalUsed && msg.routeMeta.route === 'quick_llm' && (
+                          <span className="text-gray-400">未检索课程资料</span>
+                        )}
+                      </div>
+                    )}
                     <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed space-y-0.5 ${
                       msg.role === 'ai'
                         ? 'bg-gray-50 text-gray-800 border border-gray-100 rounded-tl-sm'
                         : 'bg-teal-600 text-white rounded-tr-sm'
                     }`}>
-                      {renderContent(msg.content)}
+                      {msg.role === 'ai'
+                        ? <AiMarkdownContent content={msg.content} sources={msg.sources} onCitationClick={handleCitationClick} />
+                        : renderContent(msg.content)}
                     </div>
+                    </>
                   )}
 
                   {/* 引用来源标签 */}
@@ -736,13 +766,7 @@ export default function AIAssistant() {
                 <div className="w-7 h-7 rounded-full bg-teal-500 flex items-center justify-center text-white text-xs flex-shrink-0 mt-0.5">
                   <i className="ri-robot-line text-sm"></i>
                 </div>
-                <div className="bg-gray-50 border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3">
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                    <span className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                    <span className="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                  </div>
-                </div>
+                <AiProgressTimeline steps={progressSteps} />
               </div>
             )}
             <div ref={messagesEndRef} />
@@ -767,7 +791,7 @@ export default function AIAssistant() {
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/*,.pdf,.doc,.docx,.md,.markdown,.py,.js,.ts,.jsx,.tsx,.cpp,.c,.java,.go,.rs,.html,.css,.json,.yaml,.yml,.sh,.php,.rb,.swift,.kt"
+              accept="image/*,.pdf,.doc,.docx,.txt,.md,.markdown,.py,.js,.ts,.jsx,.tsx,.cpp,.c,.java,.go,.rs,.html,.css,.json,.yaml,.yml,.sh,.php,.rb,.swift,.kt"
               onChange={handleFileInputChange}
               className="hidden"
             />
@@ -827,7 +851,7 @@ export default function AIAssistant() {
                       if (fileInputRef.current) {
                         fileInputRef.current.accept = 'image/*';
                         fileInputRef.current.click();
-                        setTimeout(() => { if (fileInputRef.current) fileInputRef.current.accept = 'image/*,.pdf,.doc,.docx,.md'; }, 1000);
+                        setTimeout(() => { if (fileInputRef.current) fileInputRef.current.accept = 'image/*,.pdf,.doc,.docx,.txt,.md,.markdown'; }, 1000);
                       }
                     }}
                     title="上传图片"
@@ -840,7 +864,7 @@ export default function AIAssistant() {
                       if (fileInputRef.current) {
                         fileInputRef.current.accept = '.py,.js,.ts,.jsx,.tsx,.cpp,.c,.java,.go,.rs,.html,.css,.json,.yaml,.yml,.sh,.php,.rb,.swift,.kt,.md';
                         fileInputRef.current.click();
-                        setTimeout(() => { if (fileInputRef.current) fileInputRef.current.accept = 'image/*,.pdf,.doc,.docx,.md'; }, 1000);
+                        setTimeout(() => { if (fileInputRef.current) fileInputRef.current.accept = 'image/*,.pdf,.doc,.docx,.txt,.md,.markdown'; }, 1000);
                       }
                     }}
                     title="上传代码文件"

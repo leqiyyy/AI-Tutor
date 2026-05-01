@@ -1,6 +1,6 @@
 """Abstract interfaces for all AI providers."""
 from abc import ABC, abstractmethod
-from typing import Optional, List, AsyncIterator
+from typing import Any, Awaitable, Callable, Optional, List, AsyncIterator
 from dataclasses import dataclass, field
 
 
@@ -44,6 +44,7 @@ class RAGEngine(ABC):
         history: Optional[List[dict]] = None,
         attachments: Optional[List[dict]] = None,
         role: str = "student",
+        progress_callback: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
     ) -> RAGResult:
         ...
 

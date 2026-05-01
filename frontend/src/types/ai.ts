@@ -3,6 +3,20 @@ export type AiMessageRole = "user" | "ai";
 export type AiFeedback = "like" | "dislike";
 export type AiKnowledgeBase = "course" | "personal" | "global";
 export type AiResponseStyle = "academic" | "inspire" | "debug";
+export type AiAnswerMode = "auto" | "strict_course" | "quick_llm" | "teacher_tool";
+
+export interface AiRouteMeta {
+  route?: string;
+  intent?: string;
+  needsRetrieval?: boolean;
+  retrievalUsed?: boolean;
+  confidence?: number;
+  reason?: string;
+  answerMode?: AiAnswerMode;
+  sourcePolicy?: string;
+  forcedByMode?: boolean;
+  displayLabel?: string;
+}
 
 export interface AiMessageSource {
   name: string;
@@ -15,8 +29,20 @@ export interface AiMessageSource {
   confidence?: number;
   chunkId?: string;
   materialId?: string;
+  citationIndex?: number;
+  citationLabel?: string;
+  citationPath?: string;
   snippet?: string;
   rawText?: string;
+}
+
+export interface AiProgressEvent {
+  stage: string;
+  status: "pending" | "running" | "done" | "error";
+  label: string;
+  elapsedMs?: number;
+  elapsed_ms?: number;
+  details?: Record<string, unknown>;
 }
 
 export interface AiAttachment {
@@ -40,6 +66,7 @@ export interface AiMessage {
   confidence?: number;
   quality?: Record<string, unknown>;
   reviewContext?: Record<string, unknown>;
+  routeMeta?: AiRouteMeta;
   needsReview?: boolean;
   feedback?: AiFeedback;
   isWelcome?: boolean;
@@ -80,13 +107,22 @@ export interface AiTeacherQuestion {
 
 export interface AiFeedbackItem {
   id: string;
+  messageId?: string;
+  classId?: string;
+  studentId?: string;
   studentName: string;
   conversationTitle: string;
   questionContent: string;
   aiAnswer: string;
+  teacherAnswer?: string;
   reason: string;
   timestamp: string;
   status: "pending" | "resolved";
+  trigger?: "low_confidence" | "dislike" | "manual";
+  syncStatus?: "pending" | "synced" | "failed";
+  syncNote?: string;
+  quality?: Record<string, unknown>;
+  reviewContext?: Record<string, unknown>;
   courseId?: string;
 }
 
@@ -100,6 +136,8 @@ export interface SendMessagePayload {
   courseId?: string;
   content: string;
   attachments?: AiAttachment[];
+  answerMode?: AiAnswerMode;
+  onProgress?: (event: AiProgressEvent) => void;
 }
 
 export interface ConversationContextPayload {

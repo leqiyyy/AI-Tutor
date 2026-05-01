@@ -1,5 +1,6 @@
 import { shouldUseMockApi } from "@/lib/env";
-import { http } from "@/lib/http";
+import { getAuthSession } from "@/lib/auth-storage";
+import { buildUrl, http, HttpError } from "@/lib/http";
 import {
   getMockConversationMessages,
   getMockConversations,
@@ -31,6 +32,8 @@ import type {
   AiConversation,
   AiFeedbackItem,
   AiMessage,
+  AiProgressEvent,
+  AiRouteMeta,
   AiMessageSource,
   AiResourceRecommendation,
   AiTeacherQuestion,
@@ -79,6 +82,12 @@ type BackendMessage = {
     relevance_score?: number;
     relevanceScore?: number;
     confidence?: number;
+    citation_index?: number;
+    citationIndex?: number;
+    citation_label?: string;
+    citationLabel?: string;
+    citation_path?: string;
+    citationPath?: string;
     chunk_id?: string;
     chunkId?: string;
     material_id?: string;
@@ -102,7 +111,31 @@ type BackendQueryResult = {
   confidence?: number;
   quality?: Record<string, unknown>;
   review_context?: Record<string, unknown>;
+  route_meta?: BackendRouteMeta;
+  answer_mode?: SendMessagePayload["answerMode"];
+  resolved_route?: string;
+  retrieval_used?: boolean;
+  source_policy?: string;
   needs_review?: boolean;
+};
+
+type BackendRouteMeta = {
+  route?: string;
+  intent?: string;
+  needs_retrieval?: boolean;
+  needsRetrieval?: boolean;
+  retrieval_used?: boolean;
+  retrievalUsed?: boolean;
+  confidence?: number;
+  reason?: string;
+  answer_mode?: SendMessagePayload["answerMode"];
+  answerMode?: SendMessagePayload["answerMode"];
+  source_policy?: string;
+  sourcePolicy?: string;
+  forced_by_mode?: boolean;
+  forcedByMode?: boolean;
+  display_label?: string;
+  displayLabel?: string;
 };
 
 type BackendAttachment = {
@@ -112,6 +145,39 @@ type BackendAttachment = {
   size?: number;
   mime_type?: string;
   file_type?: AiAttachment["fileType"];
+};
+
+type BackendQueryRequest = {
+  class_id?: string;
+  course_id?: string;
+  session_id?: string;
+  message: string;
+  answer_mode?: SendMessagePayload["answerMode"];
+  attachments: Array<{
+    id: string;
+    name: string;
+    size: number;
+    mime_type: string;
+    file_type: AiAttachment["fileType"];
+    storage_key: string;
+  }>;
+};
+
+type BackendReviewItem = {
+  id: string;
+  message_id?: string;
+  class_id?: string;
+  student_id?: string;
+  student_name?: string;
+  trigger?: "low_confidence" | "dislike" | "manual";
+  question_content?: string;
+  ai_answer?: string;
+  teacher_answer?: string;
+  feedback_reason?: string;
+  status?: "pending" | "resolved" | "dismissed";
+  quality?: Record<string, unknown>;
+  review_context?: Record<string, unknown>;
+  created_at?: string;
 };
 
 const sessionIdMap = new Map<number, string>();
@@ -141,8 +207,27 @@ function normalizeSource(source: NonNullable<BackendMessage["sources"]>[number])
     confidence: source.confidence,
     chunkId: source.chunk_id ?? source.chunkId,
     materialId: source.material_id ?? source.materialId,
+    citationIndex: source.citation_index ?? source.citationIndex,
+    citationLabel: source.citation_label ?? source.citationLabel,
+    citationPath: source.citation_path ?? source.citationPath,
     snippet: source.snippet,
     rawText: source.raw_text ?? source.rawText,
+  };
+}
+
+function normalizeRouteMeta(meta?: BackendRouteMeta): AiRouteMeta | undefined {
+  if (!meta) return undefined;
+  return {
+    route: meta.route,
+    intent: meta.intent,
+    needsRetrieval: meta.needs_retrieval ?? meta.needsRetrieval,
+    retrievalUsed: meta.retrieval_used ?? meta.retrievalUsed,
+    confidence: meta.confidence,
+    reason: meta.reason,
+    answerMode: meta.answer_mode ?? meta.answerMode,
+    sourcePolicy: meta.source_policy ?? meta.sourcePolicy,
+    forcedByMode: meta.forced_by_mode ?? meta.forcedByMode,
+    displayLabel: meta.display_label ?? meta.displayLabel,
   };
 }
 
@@ -161,6 +246,36 @@ function normalizeMessage(message: BackendMessage): AiMessage {
     reviewContext: message.review_context,
     needsReview: message.needs_review,
     feedback: message.feedback,
+  };
+}
+
+function normalizeFeedbackItem(item: BackendReviewItem): AiFeedbackItem {
+  const reviewContext = item.review_context || {};
+  const rawReasons = reviewContext["review_reasons"];
+  const reasons = Array.isArray(rawReasons)
+    ? rawReasons.join("、")
+    : "";
+  return {
+    id: item.id,
+    messageId: item.message_id,
+    classId: item.class_id,
+    studentId: item.student_id,
+    studentName: item.student_name || "学生",
+    conversationTitle:
+      item.trigger === "low_confidence"
+        ? "低置信回答待审核"
+        : item.trigger === "manual"
+          ? "学生转交教师"
+          : "学生点踩反馈",
+    questionContent: item.question_content || "",
+    aiAnswer: item.ai_answer || "",
+    teacherAnswer: item.teacher_answer || "",
+    reason: item.feedback_reason || reasons || "学生认为该回答需要教师审核",
+    timestamp: item.created_at || new Date().toISOString(),
+    status: item.status === "resolved" ? "resolved" : "pending",
+    trigger: item.trigger,
+    quality: item.quality,
+    reviewContext,
   };
 }
 
@@ -219,6 +334,121 @@ async function uploadLiveAttachments(
   }
 
   return uploaded;
+}
+
+function authHeaders() {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const session = getAuthSession();
+  if (session?.accessToken) {
+    headers.set("Authorization", `Bearer ${session.accessToken}`);
+  }
+  return headers;
+}
+
+async function parseErrorResponse(response: Response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = await response.json();
+      if (payload && typeof payload === "object" && "message" in payload) {
+        const message = (payload as { message?: unknown }).message;
+        if (typeof message === "string" && message.trim()) {
+          return { message, payload };
+        }
+      }
+      return { message: response.statusText || "请求失败", payload };
+    } catch {
+      return { message: response.statusText || "请求失败" };
+    }
+  }
+  return { message: (await response.text()) || response.statusText || "请求失败" };
+}
+
+async function streamChatQuery(
+  body: BackendQueryRequest,
+  onProgress: (event: AiProgressEvent) => void,
+): Promise<BackendQueryResult> {
+  let response: Response;
+  try {
+    response = await fetch(buildUrl("/chat/query/stream"), {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+      credentials: "include",
+    });
+  } catch (error) {
+    throw new HttpError("网络请求失败，请检查后端服务是否已启动", {
+      status: 0,
+      details: error,
+    });
+  }
+
+  if (!response.ok) {
+    const parsed = await parseErrorResponse(response);
+    throw new HttpError(parsed.message, {
+      status: response.status,
+      details: parsed.payload,
+    });
+  }
+  if (!response.body) {
+    throw new HttpError("浏览器未能建立流式连接", { status: response.status });
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: BackendQueryResult | undefined;
+  let streamError: string | undefined;
+
+  const consumeBlock = (block: string) => {
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const rawLine of block.split(/\r?\n/)) {
+      const line = rawLine.trimEnd();
+      if (!line || line.startsWith(":")) continue;
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    if (!dataLines.length) return;
+    const dataText = dataLines.join("\n");
+    const data = JSON.parse(dataText) as Record<string, unknown>;
+    if (eventName === "progress") {
+      onProgress(data as unknown as AiProgressEvent);
+    } else if (eventName === "final") {
+      finalResult = data as BackendQueryResult;
+    } else if (eventName === "error") {
+      streamError = String(data.message || "AI助教暂时不可用，请稍后重试。");
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const blocks = buffer.split(/\n\n/);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) {
+        consumeBlock(block);
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) {
+      consumeBlock(buffer);
+    }
+  } catch (error) {
+    throw new HttpError("流式响应解析失败", { status: response.status, details: error });
+  }
+
+  if (streamError) {
+    throw new HttpError(streamError, { status: response.status });
+  }
+  if (!finalResult) {
+    throw new HttpError("流式响应未返回最终答案", { status: response.status });
+  }
+  return finalResult;
 }
 
 export const aiService = {
@@ -296,23 +526,27 @@ export const aiService = {
       ? sessionIdMap.get(payload.conversationId)
       : undefined;
     const attachments = await uploadLiveAttachments(payload.attachments, payload.classId);
-    const result = await http<BackendQueryResult>("/chat/query", {
-      method: "POST",
-      body: {
-        class_id: payload.classId,
-        course_id: payload.courseId,
-        session_id: backendSessionId,
-        message: payload.content,
-        attachments: attachments.map((attachment) => ({
-          id: attachment.id,
-          name: attachment.name,
-          size: attachment.size,
-          mime_type: attachment.mimeType,
-          file_type: attachment.fileType,
-          storage_key: attachment.storageKey || attachment.id,
-        })),
-      },
-    });
+    const requestBody: BackendQueryRequest = {
+      class_id: payload.classId,
+      course_id: payload.courseId,
+      session_id: backendSessionId,
+      message: payload.content,
+      answer_mode: payload.answerMode ?? "auto",
+      attachments: attachments.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        size: attachment.size,
+        mime_type: attachment.mimeType,
+        file_type: attachment.fileType,
+        storage_key: attachment.storageKey || attachment.id,
+      })),
+    };
+    const result = payload.onProgress
+      ? await streamChatQuery(requestBody, payload.onProgress)
+      : await http<BackendQueryResult>("/chat/query", {
+          method: "POST",
+          body: requestBody,
+        });
 
     if (result.session_id) {
       sessionIdMap.set(localConversationId, result.session_id);
@@ -328,6 +562,12 @@ export const aiService = {
       confidence: result.confidence,
       quality: result.quality,
       reviewContext: result.review_context,
+      routeMeta: normalizeRouteMeta(result.route_meta ?? {
+        answer_mode: result.answer_mode,
+        route: result.resolved_route,
+        retrieval_used: result.retrieval_used,
+        source_policy: result.source_policy,
+      }),
       needsReview: result.needs_review,
     };
     if (result.message_id) {
@@ -363,7 +603,7 @@ export const aiService = {
     });
   },
 
-  async dislikeMessage(messageId: number): Promise<void> {
+  async dislikeMessage(messageId: number, reason?: string): Promise<void> {
     if (shouldUseMockApi) {
       await mockDislikeMessage();
       return;
@@ -371,7 +611,7 @@ export const aiService = {
 
     await http<void>(`/chat/messages/${messageIdMap.get(messageId) || messageId}/feedback`, {
       method: "POST",
-      body: { feedback: "dislike" },
+      body: { feedback: "dislike", reason },
     });
   },
 
@@ -477,20 +717,30 @@ export const aiService = {
     });
   },
 
-  async getFeedbackQueue(): Promise<AiFeedbackItem[]> {
+  async getFeedbackQueue(classId?: string): Promise<AiFeedbackItem[]> {
     return shouldUseMockApi
       ? getMockFeedbackQueue()
-      : http<AiFeedbackItem[]>("/teacher/ai/feedback");
+      : (await http<BackendReviewItem[]>("/reviews/pending", {
+          query: { class_id: classId },
+        })).map(normalizeFeedbackItem);
   },
 
-  async resolveFeedback(feedbackId: string): Promise<void> {
+  async resolveFeedback(
+    feedbackId: string,
+    teacherAnswer?: string,
+    addToKb: boolean = true,
+  ): Promise<{ sync_status?: string; sync_note?: string } | void> {
     if (shouldUseMockApi) {
       await mockResolveFeedback(feedbackId);
       return;
     }
 
-    await http<void>(`/teacher/ai/feedback/${feedbackId}/resolve`, {
+    return http<{ sync_status?: string; sync_note?: string }>(`/reviews/${feedbackId}/submit`, {
       method: "POST",
+      body: {
+        teacher_answer: teacherAnswer,
+        add_to_kb: addToKb,
+      },
     });
   },
 

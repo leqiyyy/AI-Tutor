@@ -61,7 +61,7 @@ function isApiEnvelope<T>(value: unknown): value is ApiEnvelope<T> {
   return Boolean(value) && typeof value === "object" && "data" in (value as object);
 }
 
-function buildUrl(path: string, query?: QueryParams) {
+export function buildUrl(path: string, query?: QueryParams) {
   const normalizedPath = isAbsoluteUrl(path)
     ? path
     : `${appEnv.apiBaseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;

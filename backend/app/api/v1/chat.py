@@ -1,3 +1,5 @@
+import asyncio
+import json
 from datetime import datetime, timezone
 import os
 import tempfile
@@ -5,17 +7,19 @@ from typing import Optional
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 import app.storage as storage
 from app.core.config import settings
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.core.deps import get_current_teacher, get_current_user
 from app.core.error_codes import ErrorCode
 from app.core.openapi_examples import responses_with_success
 from app.core.response import ok
 from app.db.base import get_db
 from app.integrations.preprocessors import detect_material_file_type
+from app.models.chat import ReviewItem
 from app.models.course import Class, Material
 from app.models.knowledge import FileParseTask
 from app.models.user import User
@@ -23,6 +27,31 @@ from app.schemas.chat import ChatQueryRequest, FeedbackRequest, PromoteChatAttac
 from app.services import chat_service, kb_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _query_response_payload(result: dict) -> dict:
+    ai_message = result["ai_message"]
+    route_meta = result.get("route_meta") or {}
+    return {
+        "session_id": result["session_id"],
+        "message_id": ai_message["id"],
+        "content": ai_message["content"],
+        "sources": ai_message["sources"],
+        "suggestions": ai_message["suggestions"],
+        "confidence": ai_message["confidence"],
+        "quality": ai_message.get("quality"),
+        "review_context": ai_message.get("review_context"),
+        "needs_review": ai_message["needs_review"],
+        "route_meta": route_meta,
+        "answer_mode": route_meta.get("answer_mode"),
+        "resolved_route": route_meta.get("route"),
+        "retrieval_used": route_meta.get("retrieval_used"),
+        "source_policy": route_meta.get("source_policy"),
+    }
 
 
 @router.post("/attachments/upload", response_model=None)
@@ -202,6 +231,7 @@ async def send_message(
         session_id=body.session_id,
         attachments=body.attachments,
         role=current_user.role,
+        answer_mode=body.answer_mode,
     )
     return ok(data=result)
 
@@ -270,19 +300,72 @@ async def query_chat(
         session_id=body.session_id,
         attachments=body.attachments,
         role=current_user.role,
+        answer_mode=body.answer_mode,
     )
-    ai_message = result["ai_message"]
-    return ok(data={
-        "session_id": result["session_id"],
-        "message_id": ai_message["id"],
-        "content": ai_message["content"],
-        "sources": ai_message["sources"],
-        "suggestions": ai_message["suggestions"],
-        "confidence": ai_message["confidence"],
-        "quality": ai_message.get("quality"),
-        "review_context": ai_message.get("review_context"),
-        "needs_review": ai_message["needs_review"],
-    })
+    return ok(data=_query_response_payload(result))
+
+
+@router.post("/query/stream", response_model=None)
+async def query_chat_stream(
+    body: ChatQueryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if body.class_id:
+        class_id = body.class_id
+    elif body.course_id:
+        class_id = kb_service.resolve_class_for_course(db, body.course_id, current_user).id
+    else:
+        raise BadRequestException("course_id or class_id is required")
+
+    queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+
+    async def progress_callback(event: dict) -> None:
+        await queue.put(("progress", event))
+
+    async def run_query() -> None:
+        try:
+            result = await chat_service.send_message(
+                db=db,
+                class_id=class_id,
+                user_id=current_user.id,
+                content=body.message,
+                session_id=body.session_id,
+                attachments=body.attachments,
+                role=current_user.role,
+                answer_mode=body.answer_mode,
+                progress_callback=progress_callback,
+            )
+            await queue.put(("final", _query_response_payload(result)))
+        except Exception as exc:
+            await queue.put(("error", {"message": str(exc) or "AI助教暂时不可用，请稍后重试。"}))
+        finally:
+            await queue.put(("done", {}))
+
+    async def event_stream():
+        task = asyncio.create_task(run_query())
+        try:
+            while True:
+                event, data = await queue.get()
+                if event == "done":
+                    break
+                yield _sse(event, data)
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/query-with-image", response_model=None)
@@ -333,6 +416,13 @@ def list_reviews(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
+    cls = db.query(Class).filter(
+        Class.id == class_id,
+        Class.teacher_id == current_user.id,
+        Class.is_active == True,
+    ).first()
+    if not cls:
+        raise ForbiddenException("You do not have access to this class")
     data = chat_service.list_review_items(db, class_id, status)
     return ok(data=data)
 
@@ -344,6 +434,16 @@ async def resolve_review(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
+    review = db.query(ReviewItem).filter(ReviewItem.id == review_id).first()
+    if not review:
+        raise NotFoundException("Review item not found")
+    cls = db.query(Class).filter(
+        Class.id == review.class_id,
+        Class.teacher_id == current_user.id,
+        Class.is_active == True,
+    ).first()
+    if not cls:
+        raise ForbiddenException("You do not have access to this review item")
     result = await chat_service.resolve_review(
         db, review_id, current_user.id, body.teacher_answer, body.add_to_kb
     )
