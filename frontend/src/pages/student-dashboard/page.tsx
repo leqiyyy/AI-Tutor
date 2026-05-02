@@ -7,6 +7,7 @@ import { authService } from '@/services/auth';
 import { courseService } from '@/services/course';
 import { dashboardService } from '@/services/dashboard';
 import { notificationService } from '@/services/notifications';
+import { formatLocalDateTime, getCourseCoverGradient, getNameInitial } from '@/lib/display';
 import type {
   DashboardNotification,
   DashboardTone,
@@ -184,7 +185,7 @@ export default function StudentDashboard() {
   const activities = dashboardData?.activities ?? [];
   const displayName = dashboardData?.greetingName || user?.displayName || user?.name || '学生';
   const accountLabel = user?.email || user?.account || '';
-  const avatarInitial = displayName.trim().charAt(0) || '学';
+  const avatarInitial = getNameInitial(displayName, '学');
 
   return (
     <div className="soft-dash soft-dash-student min-h-screen bg-gray-50" translate="no">
@@ -405,8 +406,21 @@ export default function StudentDashboard() {
             <div className="grid grid-cols-3 gap-5" translate="no">
               {studentCourses.map((course, index) => (
                 <div key={index} className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow cursor-pointer">
-                  <div className="relative h-36 w-full">
-                    <img src={course.image} alt={course.name} className="w-full h-full object-cover object-top" />
+                  <div className={`relative h-36 w-full overflow-hidden ${getCourseCoverGradient(course.color, course.id)}`}>
+                    {course.image && (
+                      <img
+                        src={course.image}
+                        alt={course.name}
+                        className="absolute inset-0 h-full w-full object-cover object-top"
+                        onError={(event) => {
+                          event.currentTarget.style.display = 'none';
+                        }}
+                      />
+                    )}
+                    <div className="absolute inset-0 bg-black/10"></div>
+                    <div className="absolute left-4 bottom-4 flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 text-lg font-semibold text-white backdrop-blur-sm">
+                      {getNameInitial(course.name, '课')}
+                    </div>
                     {course.unread > 0 && (
                       <div className="absolute top-3 right-3 px-2 py-1 bg-red-500 text-white text-xs font-medium rounded-full">
                         {course.unread} 条新消息
@@ -505,7 +519,7 @@ export default function StudentDashboard() {
                           {notif.unread && <span className="w-2 h-2 bg-teal-500 rounded-full"></span>}
                         </div>
                         <p className="text-sm text-gray-600">{notif.content}</p>
-                        <div className="text-xs text-gray-400 mt-2">{notif.time}</div>
+                        <div className="text-xs text-gray-400 mt-2">{formatLocalDateTime(notif.time, notif.time)}</div>
                       </div>
                     </div>
                   </div>

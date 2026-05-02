@@ -384,14 +384,30 @@ def get_material_preview(db: Session, course_id: str, file_id: str, user: User) 
     material = get_material_for_user(db, course_id, file_id, user)
     parse_task = db.query(FileParseTask).filter(FileParseTask.material_id == material.id).first()
     extracted_text = (parse_task.extracted_text if parse_task else "") or ""
+    original_text = ""
+    if (material.file_type or "").lower() in {"txt", "md", "markdown", "csv", "json", "py", "java", "js", "ts", "html", "css"}:
+        try:
+            with open(material.file_path, "r", encoding="utf-8", errors="replace") as handle:
+                original_text = handle.read()
+        except OSError:
+            original_text = ""
+    chunk_text = "\n\n".join(
+        str(chunk.get("text") or "").strip()
+        for chunk in ((parse_task.chunks or []) if parse_task else [])
+        if isinstance(chunk, dict) and str(chunk.get("text") or "").strip()
+    )
+    preview_text = original_text or extracted_text or chunk_text
     return {
         "id": material.id,
         "file_name": material.file_name,
         "mime_type": material.mime_type,
         "file_type": material.file_type,
         "kb_status": material.kb_status,
-        "preview_text": extracted_text[:1500],
+        "preview_text": preview_text[:30000],
+        "preview_text_truncated": len(preview_text) > 30000,
+        "preview_source": "original_file" if original_text else ("extracted_text" if extracted_text else ("chunks" if chunk_text else "none")),
         "summary": parse_task.summary if parse_task else None,
+        "chunk_count": len(parse_task.chunks or []) if parse_task else 0,
     }
 
 

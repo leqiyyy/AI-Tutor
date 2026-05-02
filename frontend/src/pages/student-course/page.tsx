@@ -7,7 +7,9 @@ import {
   getKnowledgeGraphRootIds,
   normalizeKnowledgeGraph,
 } from '@/lib/knowledge-graph';
+import { getNameInitial } from '@/lib/display';
 import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
+import { useAuth } from '@/hooks/use-auth';
 import { courseService } from '@/services/course';
 import { learningService } from '@/services/learning';
 import type {
@@ -110,6 +112,7 @@ function createEmptyDeckForm() {
 export default function StudentCourse() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
+  const { user } = useAuth();
   const [activeSection, setActiveSection] = useState('home');
   const { bootstrap, course, courseError } = useCourseBootstrap(id, 'student');
   const courseId = course?.id ?? id ?? '1';
@@ -902,6 +905,8 @@ export default function StudentCourse() {
     setNewDeckForm({ ...newDeckForm, cards: updatedCards });
   };
 
+  const displayName = studentHome.welcome.studentName || user?.displayName || user?.name || '学生';
+  const avatarInitial = getNameInitial(displayName, '学');
 
 
   return (
@@ -928,7 +933,7 @@ export default function StudentCourse() {
               <button className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 cursor-pointer">
                 <i className="ri-notification-3-line text-lg"></i>
               </button>
-              <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-medium cursor-pointer">李</div>
+              <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-medium cursor-pointer">{avatarInitial}</div>
             </div>
           </div>
         </div>

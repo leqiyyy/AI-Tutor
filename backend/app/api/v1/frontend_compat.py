@@ -4,6 +4,7 @@ import os
 import re
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -16,9 +17,10 @@ from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.response import ok
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Task
-from app.models.chat import ChatMessage, ReviewItem
+from app.models.chat import ChatMessage, ChatSession, ReviewItem
 from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
+from app.models.personalization import LearningConcept, StudentConceptMastery
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
 from app.services import course_service, kb_service, personalized_recommendation_service
@@ -29,6 +31,7 @@ COLORS = ["blue", "green", "purple", "orange", "teal", "pink", "amber"]
 GRAPH_ENTITY_LIMIT = 80
 GRAPH_ENTITY_FETCH_LIMIT = 300
 GRAPH_ROOT_EDGE_LIMIT = 24
+GRAPH_ROOT_EDGE_PER_MATERIAL_LIMIT = 10
 GRAPH_HIDDEN_ENTITY_KINDS = {
     "material",
     "content_item",
@@ -120,7 +123,9 @@ class TeacherTaskStatusRequest(BaseModel):
 
 def _iso(value: Any) -> str:
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return ""
 
 
@@ -225,10 +230,10 @@ def _notifications_for_user(db: Session, user_id: str, limit: int = 20) -> list[
         db.query(Notification)
         .filter(Notification.user_id == user_id)
         .order_by(Notification.created_at.desc())
-        .limit(limit)
+        .limit(max(limit * 5, 50))
         .all()
     )
-    return [
+    visible = [
         {
             "id": item.id,
             "type": item.type,
@@ -238,7 +243,233 @@ def _notifications_for_user(db: Session, user_id: str, limit: int = 20) -> list[
             "unread": not bool(item.is_read),
         }
         for item in rows
+        if not (item.extra_data or {}).get("deleted_at")
     ]
+    return visible[:limit]
+
+
+def _student_settings_payload(user: User) -> dict[str, Any]:
+    return {
+        "profile": {
+            "name": user.real_name or "",
+            "nameEn": "",
+            "gender": "male",
+            "birthday": "",
+            "bio": user.bio or "",
+            "email": user.email or "",
+            "phone": user.phone or "",
+            "wechat": "",
+            "qq": "",
+            "hometown": "",
+        },
+        "academic": {
+            "studentId": user.student_id or "",
+            "school": user.school or "",
+            "college": user.college or "",
+            "major": user.major or "",
+            "grade": user.grade or "",
+            "classNumber": user.class_no or "",
+            "enrollYear": "",
+            "expectedGradYear": "",
+            "degree": "",
+            "studentType": "undergraduate",
+            "dormitory": "",
+            "advisor": "",
+            "gpa": "",
+            "credits": "",
+        },
+        "notifications": {
+            "siteNotify": True,
+            "emailNotify": True,
+            "wechatNotify": False,
+            "deadlineRemind": True,
+            "teacherReply": True,
+            "aiSuggestion": True,
+            "examRemind": True,
+            "scoreRelease": True,
+        },
+        "learning": {
+            "preferStyle": "visual",
+            "dailyGoal": "2",
+            "showLeaderboard": True,
+            "weeklyReport": True,
+            "aiAutoSuggest": True,
+        },
+        "privacy": {
+            "showGrade": False,
+            "showLeaderboard": True,
+            "showBio": True,
+            "showContact": False,
+            "allowAIAnalyze": True,
+        },
+        "interests": [],
+        "avatarUrl": user.avatar_url or "",
+    }
+
+
+def _teacher_settings_payload(user: User) -> dict[str, Any]:
+    return {
+        "profile": {
+            "name": user.real_name or "",
+            "nameEn": "",
+            "gender": "male",
+            "birthday": "",
+            "bio": user.bio or "",
+            "email": user.email or "",
+            "phone": user.phone or "",
+            "wechat": "",
+            "website": "",
+            "school": user.school or "",
+            "college": user.college or "",
+            "department": user.department or "",
+            "title": user.title or "",
+            "employeeId": user.teacher_id or "",
+            "teacherType": "full",
+            "researchArea": "",
+            "officeLocation": "",
+            "officeHours": "",
+            "education": "",
+            "graduateSchool": "",
+            "degree": "",
+            "graduateYear": "",
+            "joinYear": "",
+            "teachingYears": "",
+        },
+        "notifications": {
+            "siteNotify": True,
+            "emailNotify": True,
+            "wechatNotify": False,
+            "studentQuestion": True,
+            "aiDislike": True,
+            "deadlineRemind": True,
+            "systemUpdate": False,
+        },
+        "ai": {
+            "defaultStyle": "academic",
+            "autoReply": True,
+            "knowledgeBase": True,
+            "responseLanguage": "zh",
+            "maxTokens": "2000",
+        },
+        "achievements": [],
+        "avatarUrl": user.avatar_url or "",
+    }
+
+
+def _apply_student_settings(user: User, payload: dict[str, Any]) -> None:
+    profile = payload.get("profile") or {}
+    academic = payload.get("academic") or {}
+    user.real_name = str(profile.get("name") or user.real_name or "").strip() or user.real_name
+    user.phone = profile.get("phone") or None
+    user.bio = profile.get("bio") or None
+    user.school = academic.get("school") or None
+    user.student_id = academic.get("studentId") or None
+    user.college = academic.get("college") or None
+    user.major = academic.get("major") or None
+    user.grade = academic.get("grade") or None
+    user.class_no = academic.get("classNumber") or None
+    user.avatar_url = payload.get("avatarUrl") or user.avatar_url
+    user.updated_at = datetime.now(timezone.utc)
+
+
+def _apply_teacher_settings(user: User, payload: dict[str, Any]) -> None:
+    profile = payload.get("profile") or {}
+    user.real_name = str(profile.get("name") or user.real_name or "").strip() or user.real_name
+    user.phone = profile.get("phone") or None
+    user.bio = profile.get("bio") or None
+    user.school = profile.get("school") or None
+    user.college = profile.get("college") or None
+    user.department = profile.get("department") or None
+    user.title = profile.get("title") or None
+    user.teacher_id = profile.get("employeeId") or None
+    user.avatar_url = payload.get("avatarUrl") or user.avatar_url
+    user.updated_at = datetime.now(timezone.utc)
+
+
+def _avatar_data_url(label: str) -> str:
+    initial = next(iter((label or "用").strip()), "用")
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">'
+        '<rect width="200" height="200" rx="100" fill="#14b8a6"/>'
+        f'<text x="50%" y="54%" text-anchor="middle" dominant-baseline="middle" '
+        f'font-family="Arial, sans-serif" font-size="86" font-weight="700" fill="#fff">{initial}</text>'
+        '</svg>'
+    )
+    return f"data:image/svg+xml;charset=utf-8,{quote(svg)}"
+
+
+@router.get("/student/settings", response_model=None)
+def student_settings(
+    current_user: User = Depends(get_current_student),
+):
+    return ok(data=_student_settings_payload(current_user))
+
+
+@router.put("/student/settings", response_model=None)
+def update_student_settings(
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    _apply_student_settings(current_user, payload)
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    return ok(data=_student_settings_payload(current_user), message="Settings updated")
+
+
+@router.get("/teacher/settings", response_model=None)
+def teacher_settings(
+    current_user: User = Depends(get_current_teacher),
+):
+    return ok(data=_teacher_settings_payload(current_user))
+
+
+@router.put("/teacher/settings", response_model=None)
+def update_teacher_settings(
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _apply_teacher_settings(current_user, payload)
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    return ok(data=_teacher_settings_payload(current_user), message="Settings updated")
+
+
+@router.post("/settings/password", response_model=None)
+def update_password_placeholder(
+    payload: dict[str, Any],
+    current_user: User = Depends(get_current_user),
+):
+    new_password = str(payload.get("newPassword") or "")
+    confirm_password = str(payload.get("confirmPassword") or "")
+    if not new_password or new_password != confirm_password:
+        return ok(data={"status": "ignored", "message": "两次输入的新密码不一致"})
+    return ok(data={"status": "updated", "message": "密码校验已通过"})
+
+
+@router.post("/settings/avatar", response_model=None)
+def upload_avatar_placeholder(
+    payload: dict[str, Any],
+    current_user: User = Depends(get_current_user),
+):
+    label = current_user.real_name or str(payload.get("fileName") or "头像")
+    return ok(data={"url": _avatar_data_url(label)})
+
+
+@router.get("/settings/devices", response_model=None)
+def settings_devices(
+    current_user: User = Depends(get_current_user),
+):
+    return ok(data=[{
+        "id": f"device-{current_user.id}",
+        "deviceName": "当前浏览器",
+        "location": "当前登录位置",
+        "lastActiveAt": "刚刚",
+        "current": True,
+    }])
 
 
 def _student_home_task_item(task: Task) -> dict:
@@ -384,7 +615,7 @@ def _notice_rows_for_class(db: Session, class_id: str) -> list[Notification]:
     notices: dict[str, Notification] = {}
     for row in rows:
         extra = row.extra_data or {}
-        if extra.get("class_id") != class_id or extra.get("source") != "teacher_notice":
+        if extra.get("class_id") != class_id or extra.get("source") != "teacher_notice" or extra.get("deleted_at"):
             continue
         notice_id = extra.get("notice_id") or row.id
         notices.setdefault(str(notice_id), row)
@@ -405,6 +636,37 @@ def _notice_task_item(row: Notification, total: int) -> dict:
         "attachments": extra.get("attachments") or [],
         "_sortAt": _iso(row.created_at),
     }
+
+
+def _mark_related_notifications_deleted(
+    db: Session,
+    *,
+    class_id: str,
+    deleted_at: str,
+    task_id: str | None = None,
+    notice_id: str | None = None,
+) -> int:
+    rows = (
+        db.query(Notification)
+        .filter(Notification.type.in_(["system", "deadline", "exam"]))
+        .order_by(Notification.created_at.desc())
+        .limit(2000)
+        .all()
+    )
+    updated = 0
+    for row in rows:
+        extra = dict(row.extra_data or {})
+        if extra.get("class_id") != class_id:
+            continue
+        if task_id and str(extra.get("task_id") or "") != str(task_id):
+            continue
+        if notice_id and str(extra.get("notice_id") or "") != str(notice_id):
+            continue
+        extra["deleted_at"] = deleted_at
+        row.extra_data = extra
+        db.add(row)
+        updated += 1
+    return updated
 
 
 @router.get("/student/dashboard", response_model=None)
@@ -428,6 +690,7 @@ def student_dashboard(
             "teacher": item.get("teacher_name") or "",
             "progress": 0,
             "unread": 0,
+            "color": COLORS[index % len(COLORS)],
             "image": _course_image(class_id),
         })
         progress_courses.append({
@@ -460,6 +723,7 @@ def student_dashboard(
         "activities": [],
         "notifications": _notifications_for_user(db, current_user.id),
         "courses": courses,
+        "sidePanel": _student_side_panel(db, current_user, classes),
     })
 
 
@@ -519,6 +783,286 @@ def _personalized_item_to_dashboard_card(item: dict[str, Any], *, index: int) ->
     }
 
 
+def _truncate_text(value: str | None, limit: int = 90) -> str:
+    text = re.sub(r"\s+", " ", (value or "").strip())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."
+
+
+def _class_name_map(db: Session, class_ids: list[str]) -> dict[str, str]:
+    if not class_ids:
+        return {}
+    rows = (
+        db.query(Class, Course)
+        .join(Course, Course.id == Class.course_id)
+        .filter(Class.id.in_(class_ids))
+        .all()
+    )
+    return {cls.id: course.name or cls.name or "课程" for cls, course in rows}
+
+
+def _side_panel_payload(
+    *,
+    role: str,
+    tag: str,
+    title: str,
+    body: str,
+    source_type: str,
+    course_id: str | None = None,
+    course_name: str | None = None,
+) -> dict[str, Any]:
+    role_defaults = {
+        "student": {
+            "badge": "Study Mood",
+            "panelTitle": "把学习留给安静而清晰的节奏",
+            "quote": "先完成最小的一步，学习就会开始流动。",
+            "quoteCaption": "今天适合先把最接近截止的一件事做完。",
+        },
+        "teacher": {
+            "badge": "Teaching Mood",
+            "panelTitle": "好的答疑，往往来自克制而稳定的判断",
+            "quote": "好教学不是一次说完，而是一次次让学生真正听懂。",
+            "quoteCaption": "今天适合先看重复率最高的问题，再统一回应。",
+        },
+        "admin": {
+            "badge": "Ops Mood",
+            "panelTitle": "稳定感来自很多细小问题被及时处理",
+            "quote": "真正高级的系统体验，是大多数问题在用户察觉前就被处理掉。",
+            "quoteCaption": "今天适合先看影响链路稳定的问题。",
+        },
+    }
+    defaults = role_defaults.get(role, role_defaults["student"])
+    return {
+        **defaults,
+        "insight": {
+            "tag": tag,
+            "title": title,
+            "body": body,
+            "sourceType": source_type,
+            "courseId": course_id,
+            "courseName": course_name,
+        },
+    }
+
+
+def _student_side_panel(db: Session, user: User, classes: list[dict[str, Any]]) -> dict[str, Any]:
+    if not classes:
+        return _side_panel_payload(
+            role="student",
+            tag="微知识",
+            title="加入课程后生成个人微知识",
+            body="当前还没有课程数据。加入课程、浏览资料或向 AI 助教提问后，这里会显示与你学习进度相关的知识提示。",
+            source_type="empty",
+        )
+
+    class_ids = [str(item["id"]) for item in classes if item.get("id")]
+    class_names = _class_name_map(db, class_ids)
+
+    weak = (
+        db.query(StudentConceptMastery)
+        .filter(
+            StudentConceptMastery.user_id == user.id,
+            StudentConceptMastery.class_id.in_(class_ids),
+            StudentConceptMastery.evidence_count > 0,
+        )
+        .order_by(StudentConceptMastery.mastery_score.asc(), StudentConceptMastery.confidence.desc())
+        .first()
+    )
+    if weak:
+        score = max(0, min(100, round((weak.mastery_score or 0) * 100)))
+        return _side_panel_payload(
+            role="student",
+            tag="微知识",
+            title=f"{weak.concept_name} 是待巩固知识点",
+            body=f"系统结合你的学习证据估计该知识点掌握度约 {score}%。建议先回看相关资料，再用 AI 助教追问一个具体例题。",
+            source_type="mastery",
+            course_id=weak.class_id,
+            course_name=class_names.get(weak.class_id),
+        )
+
+    recent_question = (
+        db.query(ChatMessage, ChatSession)
+        .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+        .filter(
+            ChatSession.user_id == user.id,
+            ChatSession.class_id.in_(class_ids),
+            ChatMessage.role == "user",
+            ChatSession.is_active == True,
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .first()
+    )
+    if recent_question:
+        message, session = recent_question
+        return _side_panel_payload(
+            role="student",
+            tag="最近提问",
+            title="从最近的问题继续追一层",
+            body=f"你最近问到「{_truncate_text(message.content, 38)}」。可以继续让 AI 助教补充定义、过程图、易错点或练习题。",
+            source_type="question",
+            course_id=session.class_id,
+            course_name=class_names.get(session.class_id),
+        )
+
+    concept = (
+        db.query(KnowledgeEntity)
+        .filter(
+            KnowledgeEntity.class_id.in_(class_ids),
+            KnowledgeEntity.status != "rejected",
+        )
+        .order_by(KnowledgeEntity.confidence.desc(), KnowledgeEntity.created_at.desc())
+        .first()
+    )
+    if concept:
+        return _side_panel_payload(
+            role="student",
+            tag="微知识",
+            title=concept.name,
+            body=_truncate_text(concept.description, 96) or "这是课程知识图谱中的核心节点，可以从定义、关联概念和典型题三个角度复习。",
+            source_type="knowledge_graph",
+            course_id=concept.class_id,
+            course_name=class_names.get(concept.class_id),
+        )
+
+    material = (
+        db.query(Material)
+        .filter(Material.class_id.in_(class_ids), Material.is_active == True)
+        .order_by(Material.created_at.desc())
+        .first()
+    )
+    if material:
+        return _side_panel_payload(
+            role="student",
+            tag="课程资料",
+            title=f"从《{material.title}》开始学习",
+            body="这门课已有资料入库。建议先浏览资料摘要，再向 AI 助教提问一个具体概念，系统会逐步形成个性化微知识。",
+            source_type="material",
+            course_id=material.class_id,
+            course_name=class_names.get(material.class_id),
+        )
+
+    first = classes[0]
+    class_id = str(first["id"])
+    return _side_panel_payload(
+        role="student",
+        tag="微知识",
+        title="等待课程资料生成微知识",
+        body="你已加入课程，但当前课程资料和学习记录还较少。开始提问或等待教师上传资料后，这里会显示课程相关提示。",
+        source_type="empty",
+        course_id=class_id,
+        course_name=class_names.get(class_id) or first.get("course_name") or first.get("name"),
+    )
+
+
+def _teacher_side_panel(db: Session, user: User, classes: list[dict[str, Any]]) -> dict[str, Any]:
+    if not classes:
+        return _side_panel_payload(
+            role="teacher",
+            tag="教学摘记",
+            title="创建课程后生成教学摘记",
+            body="当前还没有课程数据。创建课程并上传资料后，这里会根据资料、学生提问和反馈生成教学侧重点。",
+            source_type="empty",
+        )
+
+    class_ids = [str(item["id"]) for item in classes if item.get("id")]
+    class_names = _class_name_map(db, class_ids)
+
+    disliked = (
+        db.query(ReviewItem)
+        .filter(
+            ReviewItem.class_id.in_(class_ids),
+            ReviewItem.trigger == "dislike",
+            ReviewItem.status == "pending",
+        )
+        .order_by(ReviewItem.created_at.desc())
+        .all()
+    )
+    if disliked:
+        class_id = disliked[0].class_id
+        return _side_panel_payload(
+            role="teacher",
+            tag="教学摘记",
+            title=f"{len(disliked)} 条学生反馈待审核",
+            body="学生主动点踩的回答更能反映真实困惑。建议先查看反馈原因，修正答案后回流知识库。",
+            source_type="feedback",
+            course_id=class_id,
+            course_name=class_names.get(class_id),
+        )
+
+    recent_question = (
+        db.query(ChatMessage, ChatSession)
+        .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+        .filter(
+            ChatSession.class_id.in_(class_ids),
+            ChatMessage.role == "user",
+            ChatSession.is_active == True,
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .first()
+    )
+    if recent_question:
+        message, session = recent_question
+        return _side_panel_payload(
+            role="teacher",
+            tag="学生问题",
+            title="最近学生提问可转化为讲解重点",
+            body=f"最近学生问到「{_truncate_text(message.content, 44)}」。可以考虑补充一个课堂例子或在资料中增加说明。",
+            source_type="question",
+            course_id=session.class_id,
+            course_name=class_names.get(session.class_id),
+        )
+
+    concept = (
+        db.query(KnowledgeEntity)
+        .filter(
+            KnowledgeEntity.class_id.in_(class_ids),
+            KnowledgeEntity.status != "rejected",
+        )
+        .order_by(KnowledgeEntity.confidence.desc(), KnowledgeEntity.created_at.desc())
+        .first()
+    )
+    if concept:
+        return _side_panel_payload(
+            role="teacher",
+            tag="教学摘记",
+            title=f"可围绕「{concept.name}」组织讲解",
+            body=_truncate_text(concept.description, 96) or "该节点来自课程知识图谱。建议检查其关联关系，并补充容易混淆的例题或课堂说明。",
+            source_type="knowledge_graph",
+            course_id=concept.class_id,
+            course_name=class_names.get(concept.class_id),
+        )
+
+    material = (
+        db.query(Material)
+        .filter(Material.class_id.in_(class_ids), Material.is_active == True)
+        .order_by(Material.created_at.desc())
+        .first()
+    )
+    if material:
+        return _side_panel_payload(
+            role="teacher",
+            tag="教学摘记",
+            title=f"《{material.title}》可作为备课入口",
+            body="这份资料已进入课程资料区。完成索引后，系统会结合知识图谱和学生提问生成更具体的教学摘记。",
+            source_type="material",
+            course_id=material.class_id,
+            course_name=class_names.get(material.class_id),
+        )
+
+    first = classes[0]
+    class_id = str(first["id"])
+    return _side_panel_payload(
+        role="teacher",
+        tag="教学摘记",
+        title="新课程需要先上传资料",
+        body="当前课程还没有可用资料。建议先上传教学大纲、课件或作业说明，系统会据此生成课程知识点和教学摘记。",
+        source_type="empty",
+        course_id=class_id,
+        course_name=class_names.get(class_id) or first.get("course_name") or first.get("name"),
+    )
+
+
 @router.get("/teacher/dashboard", response_model=None)
 def teacher_dashboard(
     db: Session = Depends(get_db),
@@ -566,6 +1110,7 @@ def teacher_dashboard(
         "warningItems": [],
         "notifications": _notifications_for_user(db, current_user.id),
         "courses": courses,
+        "sidePanel": _teacher_side_panel(db, current_user, classes),
     })
 
 
@@ -896,7 +1441,7 @@ def teacher_course_material_analysis(
             for keyword in keywords[:5]
         ],
         "recommendedStudyDuration": "30 分钟",
-        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "generatedAt": _iso(datetime.now(timezone.utc)),
         "raw": raw,
     })
 
@@ -915,7 +1460,11 @@ def teacher_course_material_preview(
         "fileId": file_id,
         "previewType": preview_type,
         "previewUrl": "",
-        "note": raw.get("preview_text") or raw.get("summary") or "暂无可预览内容",
+        "note": raw.get("summary") or "暂无自动摘要",
+        "textContent": raw.get("preview_text") or "",
+        "textTruncated": bool(raw.get("preview_text_truncated")),
+        "previewSource": raw.get("preview_source"),
+        "chunkCount": raw.get("chunk_count", 0),
         "raw": raw,
     })
 
@@ -968,7 +1517,7 @@ def teacher_course_tasks(
 ):
     _class_or_404_with_access(db, class_id, current_user)
     total = _student_count(db, class_id)
-    task_rows = db.query(Task).filter(Task.class_id == class_id).all()
+    task_rows = db.query(Task).filter(Task.class_id == class_id, Task.is_published == True).all()
     items = [_teacher_task_item(task, total) for task in task_rows]
     items.extend(_notice_task_item(row, total) for row in _notice_rows_for_class(db, class_id))
     items.sort(key=lambda item: item.pop("_sortAt", ""), reverse=True)
@@ -986,7 +1535,7 @@ def teacher_course_task_detail(
 ):
     _teacher_class_or_404(db, class_id, current_user)
     total = _student_count(db, class_id)
-    task = db.query(Task).filter(Task.id == task_id, Task.class_id == class_id).first()
+    task = db.query(Task).filter(Task.id == task_id, Task.class_id == class_id, Task.is_published == True).first()
     if task:
         item = _teacher_task_item(task, total)
         item.pop("_sortAt", None)
@@ -1052,6 +1601,42 @@ def teacher_course_task_status(
     task.updated_at = datetime.now(timezone.utc)
     db.commit()
     return ok(data={"id": task.id, "is_published": task.is_published, "status": _task_status(task)})
+
+
+@router.delete("/teacher/courses/{class_id}/tasks/{task_id}", response_model=None)
+def teacher_delete_course_task(
+    class_id: str,
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _teacher_class_or_404(db, class_id, current_user)
+    deleted_at = _iso(datetime.now(timezone.utc))
+    task = db.query(Task).filter(Task.id == task_id, Task.class_id == class_id).first()
+    if task:
+        task.is_published = False
+        task.updated_at = datetime.now(timezone.utc)
+        db.add(task)
+        _mark_related_notifications_deleted(db, class_id=class_id, task_id=task.id, deleted_at=deleted_at)
+        db.commit()
+        return ok(data={"id": task.id, "type": task.task_type, "deleted": True}, message="Task deleted")
+
+    notice_rows = [
+        row for row in _notice_rows_for_class(db, class_id)
+        if str((row.extra_data or {}).get("notice_id") or row.id) == str(task_id)
+    ]
+    if not notice_rows:
+        raise NotFoundException("Task not found")
+    notice = notice_rows[0]
+    notice_extra = notice.extra_data or {}
+    notice_id = str(notice_extra.get("notice_id") or notice.id)
+    _mark_related_notifications_deleted(db, class_id=class_id, notice_id=notice_id, deleted_at=deleted_at)
+    if cls.announcement and notice.title in cls.announcement:
+        cls.announcement = None
+        cls.updated_at = datetime.now(timezone.utc)
+        db.add(cls)
+    db.commit()
+    return ok(data={"id": notice_id, "type": "notice", "deleted": True}, message="Notice deleted")
 
 
 @router.post("/teacher/courses/{class_id}/notices", response_model=None)
@@ -1214,6 +1799,7 @@ def student_course_home(
     class_notifications = [
         item for item in notifications
         if (item.extra_data or {}).get("class_id") == class_id
+        and not (item.extra_data or {}).get("deleted_at")
     ][:5]
     return ok(data={
         "welcome": {
@@ -1275,7 +1861,7 @@ def student_course_knowledge_graph(
     current_user: User = Depends(get_current_student),
 ):
     cls = _class_or_404_with_access(db, class_id, current_user)
-    return _knowledge_graph_payload(db, cls)
+    return _knowledge_graph_payload(db, cls, student=current_user)
 
 
 @router.get("/teacher/courses/{class_id}/knowledge-graph", response_model=None)
@@ -1360,6 +1946,15 @@ def _graph_node_color(entity_type: str | None) -> str:
     return type_colors.get((entity_type or "").lower(), "#475569")
 
 
+def _normalize_graph_entity_type(entity_type: str | None) -> str:
+    normalized = str(entity_type or "").strip().lower()
+    if normalized in {"", "unknown", "unknown_entity", "none", "null", "undefined"}:
+        return "concept"
+    if normalized == "conception":
+        return "concept"
+    return normalized
+
+
 def _build_graph_positions(entities: list[KnowledgeEntity]) -> dict[str, tuple[float, float]]:
     positions: dict[str, tuple[float, float]] = {}
     for index, entity in enumerate(entities, start=1):
@@ -1396,7 +1991,45 @@ def _graph_record_has_active_material(record: Any, active_material_ids: set[str]
     return bool(material_ids & active_material_ids)
 
 
-def _knowledge_graph_payload(db: Session, cls: Class):
+def _material_source_summaries(db: Session, material_ids: set[str]) -> dict[str, dict[str, Any]]:
+    if not material_ids:
+        return {}
+    rows = (
+        db.query(Material)
+        .filter(Material.id.in_(list(material_ids)))
+        .all()
+    )
+    return {
+        material.id: {
+            "id": material.id,
+            "title": material.title,
+            "fileName": material.file_name,
+            "fileType": material.file_type,
+            "mimeType": material.mime_type,
+        }
+        for material in rows
+    }
+
+
+def _attach_graph_source_summary(record: Any, material_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    material_ids = sorted(_graph_record_material_ids(record))
+    materials = [
+        material_by_id[material_id]
+        for material_id in material_ids
+        if material_id in material_by_id
+    ]
+    if not materials:
+        return {}
+    primary = materials[0]
+    return {
+        "sourceMaterials": materials,
+        "materialTitle": primary.get("title"),
+        "fileName": primary.get("fileName"),
+        "sourceName": primary.get("title") or primary.get("fileName"),
+    }
+
+
+def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = None):
     course = _get_course(db, cls.course_id)
     root_id = cls.course_id
     active_material_ids = {
@@ -1424,6 +2057,7 @@ def _knowledge_graph_payload(db: Session, cls: Class):
         if _is_default_graph_entity(entity)
     ][:GRAPH_ENTITY_LIMIT]
     entity_ids = {entity.id for entity in entities}
+    mastery_by_entity_id = _student_mastery_by_entity_id(db, student=student, class_id=cls.id) if student else {}
     relations = (
         db.query(KnowledgeRelation)
         .filter(KnowledgeRelation.class_id == cls.id)
@@ -1447,13 +2081,32 @@ def _knowledge_graph_payload(db: Session, cls: Class):
         relation.target_id
         for relation in relations
     }
-    root_entity_ids = connected_entity_ids or {
+    root_entity_ids = set(connected_entity_ids)
+    root_entity_ids.update({
         entity.id for entity in sorted(
             entities,
             key=lambda item: (float(item.confidence or 0.0), str(item.created_at or "")),
             reverse=True,
         )[:GRAPH_ROOT_EDGE_LIMIT]
-    }
+    })
+    for material_id in active_material_ids:
+        material_entities = [
+            entity for entity in entities
+            if material_id in _graph_record_material_ids(entity)
+        ]
+        root_entity_ids.update({
+            entity.id for entity in sorted(
+                material_entities,
+                key=lambda item: (float(item.confidence or 0.0), str(item.created_at or "")),
+                reverse=True,
+            )[:GRAPH_ROOT_EDGE_PER_MATERIAL_LIMIT]
+        })
+    graph_material_ids: set[str] = set()
+    for entity in entities:
+        graph_material_ids.update(_graph_record_material_ids(entity))
+    for relation in relations:
+        graph_material_ids.update(_graph_record_material_ids(relation))
+    material_by_id = _material_source_summaries(db, graph_material_ids)
     positions = _build_graph_positions(entities)
 
     nodes = [
@@ -1470,17 +2123,26 @@ def _knowledge_graph_payload(db: Session, cls: Class):
     ]
     for entity in entities:
         x, y = positions.get(entity.id, (0, 0))
+        mastery = mastery_by_entity_id.get(entity.id)
+        mastery_score = float(mastery.mastery_score) if mastery else None
+        entity_type = _normalize_graph_entity_type(entity.entity_type)
         nodes.append({
             "id": entity.id,
             "label": entity.name,
             "x": x,
             "y": y,
-            "color": _graph_node_color(entity.entity_type),
-            "type": entity.entity_type or "concept",
+            "color": _graph_node_color(entity_type),
+            "type": entity_type,
             "description": entity.description or "",
             "confidence": entity.confidence,
             "sourceSpan": entity.source_span or {},
             "provenance": entity.provenance or {},
+            "sourceSummary": _attach_graph_source_summary(entity, material_by_id),
+            "masteryScore": mastery_score,
+            "masteryConfidence": float(mastery.confidence) if mastery else None,
+            "masteryEvidenceCount": int(mastery.evidence_count) if mastery else 0,
+            "learningStatus": _learning_status_from_mastery(mastery_score),
+            "lastLearningEventAt": _iso(mastery.last_event_at) if mastery and mastery.last_event_at else None,
             "expandable": False,
         })
 
@@ -1505,6 +2167,7 @@ def _knowledge_graph_payload(db: Session, cls: Class):
             "confidence": relation.confidence,
             "sourceSpan": relation.source_span or {},
             "provenance": relation.provenance or {},
+            "sourceSummary": _attach_graph_source_summary(relation, material_by_id),
         }
         for relation in relations
     ])
@@ -1524,6 +2187,53 @@ def _knowledge_graph_payload(db: Session, cls: Class):
             "defaultView": "concept_graph",
         },
     })
+
+
+def _student_mastery_by_entity_id(db: Session, *, student: User | None, class_id: str) -> dict[str, StudentConceptMastery]:
+    if not student:
+        return {}
+    concepts = (
+        db.query(LearningConcept)
+        .filter(
+            LearningConcept.class_id == class_id,
+            LearningConcept.source_entity_id.isnot(None),
+        )
+        .all()
+    )
+    concept_to_entity = {
+        concept.id: concept.source_entity_id
+        for concept in concepts
+        if concept.id and concept.source_entity_id
+    }
+    if not concept_to_entity:
+        return {}
+    rows = (
+        db.query(StudentConceptMastery)
+        .filter(
+            StudentConceptMastery.user_id == student.id,
+            StudentConceptMastery.class_id == class_id,
+            StudentConceptMastery.concept_id.in_(list(concept_to_entity.keys())),
+        )
+        .all()
+    )
+    result: dict[str, StudentConceptMastery] = {}
+    for row in rows:
+        entity_id = concept_to_entity.get(row.concept_id)
+        if entity_id:
+            result[entity_id] = row
+    return result
+
+
+def _learning_status_from_mastery(score: float | None) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 0.82:
+        return "mastered"
+    if score >= 0.62:
+        return "learning"
+    if score >= 0.38:
+        return "needs_review"
+    return "weak"
 
 
 @router.get("/student/courses/{class_id}/questions", response_model=None)

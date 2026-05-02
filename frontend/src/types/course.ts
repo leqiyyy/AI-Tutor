@@ -36,6 +36,12 @@ export interface KnowledgeGraphNode {
   confidence?: number | null;
   sourceSpan?: Record<string, unknown>;
   provenance?: Record<string, unknown>;
+  sourceSummary?: Record<string, unknown>;
+  masteryScore?: number | null;
+  masteryConfidence?: number | null;
+  masteryEvidenceCount?: number;
+  learningStatus?: "unknown" | "weak" | "needs_review" | "learning" | "mastered" | string;
+  lastLearningEventAt?: string | null;
   hidden?: boolean;
   expandable?: boolean;
 }
@@ -51,6 +57,7 @@ export interface KnowledgeGraphEdge {
   confidence?: number | null;
   sourceSpan?: Record<string, unknown>;
   provenance?: Record<string, unknown>;
+  sourceSummary?: Record<string, unknown>;
   weight?: number;
 }
 
@@ -121,6 +128,10 @@ export interface TeacherCourseMaterialPreviewData {
   previewType: "document" | "slide" | "video" | "unavailable";
   previewUrl: string;
   note: string;
+  textContent?: string;
+  textTruncated?: boolean;
+  previewSource?: string;
+  chunkCount?: number;
   pageCount?: number;
   durationText?: string;
 }

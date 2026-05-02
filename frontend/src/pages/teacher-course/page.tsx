@@ -6,7 +6,9 @@ import {
   getKnowledgeGraphRootIds,
   normalizeKnowledgeGraph,
 } from '@/lib/knowledge-graph';
+import { getNameInitial } from '@/lib/display';
 import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
+import { useAuth } from '@/hooks/use-auth';
 import { aiService } from '@/services/ai';
 import { courseService } from '@/services/course';
 import type {
@@ -273,7 +275,8 @@ function buildMaterialPreviewFallback(
           ? 'slide'
           : 'document',
     previewUrl: '',
-    note: `${file.name} 的预览地址将在联调接口接入后返回，这里先保留预览结构。`,
+    note: `${file.name} 的原文预览正在等待后端返回。`,
+    textContent: '',
   };
 }
 
@@ -295,9 +298,12 @@ function buildAiAnswerFallback(question: TeacherCourseQuestion): AiTeacherQuesti
 export default function TeacherCourse() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
+  const { user } = useAuth();
   const [activeSection, setActiveSection] = useState('home');
   const { bootstrap, course, courseError } = useCourseBootstrap(id, 'teacher');
   const courseId = course?.id ?? id ?? '1';
+  const displayName = user?.displayName || user?.name || course?.teacher || '教师';
+  const avatarInitial = getNameInitial(displayName, '师');
 
   useEffect(() => {
     const section = searchParams.get('section');
@@ -831,6 +837,23 @@ export default function TeacherCourse() {
     setCurrentTask(prev => prev ? { ...prev, status: newStatus } : prev);
     
     alert(`任务状态已更新为：${newStatus}`);
+  };
+
+  const handleDeleteTask = async (task: TeacherCourseTask) => {
+    const label = task.type === 'notice' ? '通知' : task.type === 'exam' ? '考试' : '作业';
+    const confirmed = confirm(`确定要删除${label}「${task.title}」吗？删除后学生端和教师端列表将不再显示。`);
+    if (!confirmed) return;
+
+    try {
+      await courseService.deleteTeacherCourseTask(courseId, task.id);
+      setPublishedTasks(prev => prev.filter(item => item.id !== task.id));
+      setCurrentTask(prev => (prev?.id === task.id ? null : prev));
+      setShowTaskDetailModal(false);
+      alert(`${label}已删除`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '删除失败，请稍后重试';
+      alert(`删除失败：${message}`);
+    }
   };
 
   // 新增：切换问题展开/收起
@@ -1387,7 +1410,7 @@ export default function TeacherCourse() {
               <button className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 cursor-pointer">
                 <i className="ri-notification-3-line text-lg"></i>
               </button>
-              <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium cursor-pointer">王</div>
+              <div className="w-8 h-8 rounded-full bg-teal-500 flex items-center justify-center text-white text-sm font-medium cursor-pointer">{avatarInitial}</div>
             </div>
           </div>
         </div>
@@ -1981,14 +2004,15 @@ export default function TeacherCourse() {
                           </div>
                         </div>
                         <span className={`px-2 py-1 text-xs font-medium rounded-full ${task.status === '进行中' ? 'bg-blue-50 text-blue-600' : task.status === '未开始' ? 'bg-gray-100 text-gray-600' : task.status === '已结束' ? 'bg-gray-100 text-gray-500' : 'bg-green-50 text-green-600'}`}>{task.status}</span>
-                        <button 
+                        <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            // 显示更多操作菜单
+                            void handleDeleteTask(task);
                           }}
-                          className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
+                          className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-red-600 cursor-pointer"
+                          title="删除"
                         >
-                          <i className="ri-more-2-fill text-lg"></i>
+                          <i className="ri-delete-bin-line text-lg"></i>
                         </button>
                       </div>
                     </div>
@@ -3238,6 +3262,12 @@ export default function TeacherCourse() {
 
                 <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between flex-shrink-0">
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => { void handleDeleteTask(currentTask); }}
+                      className="px-4 py-2 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 cursor-pointer whitespace-nowrap"
+                    >
+                      <i className="ri-delete-bin-line mr-1"></i>删除
+                    </button>
                     {currentTask.status === '进行中' && (
                       <button
                         onClick={async () => {
@@ -3559,12 +3589,25 @@ export default function TeacherCourse() {
                         src={currentFilePreview.previewUrl}
                         className="h-[520px] w-full rounded-lg border border-gray-200 bg-white"
                       />
+                    ) : currentFilePreview.textContent?.trim() ? (
+                      <div className="rounded-lg border border-gray-200 bg-white">
+                        <div className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
+                          <div className="text-sm font-medium text-gray-900">原文内容</div>
+                          <div className="text-xs text-gray-400">
+                            {currentFilePreview.previewSource === 'original_file' ? '原始文件' : '解析文本'}
+                            {currentFilePreview.textTruncated ? ' · 已截断显示' : ''}
+                          </div>
+                        </div>
+                        <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words p-4 text-sm leading-6 text-gray-700">
+                          {currentFilePreview.textContent}
+                        </pre>
+                      </div>
                     ) : (
                       <div className="border border-gray-200 rounded-lg p-8 bg-gray-50 min-h-[420px] flex items-center justify-center">
                         <div className="text-center text-gray-400">
                           <i className={`${currentFile.type === 'PDF' ? 'ri-file-pdf-line' : currentFile.type === 'PPT' ? 'ri-file-ppt-line' : 'ri-video-line'} text-6xl mb-3`}></i>
                           <div className="text-sm">
-                            {currentFilePreview.previewType === 'video' ? '视频预览待后端返回播放地址' : `${currentFile.type} 文档预览待返回`}
+                            {currentFilePreview.previewType === 'video' ? '视频预览待后端返回播放地址' : '暂无可预览的原文内容'}
                           </div>
                         </div>
                       </div>

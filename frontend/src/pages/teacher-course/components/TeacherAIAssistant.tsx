@@ -3,6 +3,8 @@ import { useParams } from 'react-router-dom';
 import { AiMarkdownContent } from '@/components/AiMarkdownContent';
 import { AiProgressTimeline } from '@/components/AiProgressTimeline';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
+import { getNameInitial } from '@/lib/display';
+import { useAuth } from '@/hooks/use-auth';
 import { aiService } from '@/services/ai';
 import type {
   AiAttachment as AttachedFile,
@@ -458,6 +460,8 @@ function AIQuestionsPanel({ questions, onUpdate, onAdopt, onReply, isWide = fals
 // ===== Main Component =====
 export default function TeacherAIAssistant() {
   const { id: classId } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const avatarInitial = getNameInitial(user?.displayName || user?.name, '师');
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
   const [activeConvId, setActiveConvId] = useState<number>(0);
@@ -950,7 +954,7 @@ export default function TeacherAIAssistant() {
             {messages.map(msg => (
               <div key={msg.id} className={`flex items-start gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs flex-shrink-0 ${msg.role === 'ai' ? 'bg-teal-500' : 'bg-gray-700'}`}>
-                  {msg.role === 'ai' ? <i className="ri-robot-line"></i> : <span>王</span>}
+                  {msg.role === 'ai' ? <i className="ri-robot-line"></i> : <span>{avatarInitial}</span>}
                 </div>
                 <div className={`max-w-[75%] flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                   {msg.attachments && msg.attachments.length > 0 && (

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ChangeEvent } from 'react';
+import { getNameInitial } from '@/lib/display';
 import { settingsService } from '@/services/settings';
 import type {
   DeviceSession,
@@ -135,6 +136,7 @@ export default function StudentSettings() {
   const [learningPrefs, setLearningPrefs] = useState<LearningPrefs>(EMPTY_LEARNING_PREFS);
   const [interests, setInterests] = useState<string[]>([]);
   const [privacySettings, setPrivacySettings] = useState<PrivacySettings>(EMPTY_PRIVACY_SETTINGS);
+  const profileInitial = getNameInitial(profileForm.name, '学');
 
   useEffect(() => {
     let mounted = true;
@@ -310,7 +312,7 @@ export default function StudentSettings() {
                 <img src={avatarPreview} alt="头像" className="w-20 h-20 rounded-full object-cover mx-auto" />
               ) : (
                 <div className="w-20 h-20 rounded-full bg-gradient-to-br from-teal-400 to-teal-600 flex items-center justify-center text-white text-2xl font-bold mx-auto">
-                  李
+                  {profileInitial}
                 </div>
               )}
               <label

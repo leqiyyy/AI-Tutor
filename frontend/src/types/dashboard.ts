@@ -35,6 +35,7 @@ export interface StudentDashboardCourse {
   teacher: string;
   progress: number;
   unread: number;
+  color?: DashboardTone;
   image: string;
 }
 
@@ -66,6 +67,21 @@ export interface DashboardTextCard {
   meta?: string;
 }
 
+export interface DashboardSidePanelData {
+  badge: string;
+  panelTitle: string;
+  quote: string;
+  quoteCaption: string;
+  insight: {
+    tag: string;
+    title: string;
+    body: string;
+    sourceType: "course" | "material" | "question" | "feedback" | "empty" | "mastery" | "knowledge_graph" | string;
+    courseId?: string | null;
+    courseName?: string | null;
+  };
+}
+
 export interface StudentDashboardData {
   greetingName: string;
   stats: {
@@ -79,6 +95,7 @@ export interface StudentDashboardData {
   activities: DashboardTextCard[];
   notifications: DashboardNotification[];
   courses: StudentDashboardCourse[];
+  sidePanel?: DashboardSidePanelData;
 }
 
 export interface TeacherDashboardCourse {
@@ -129,6 +146,7 @@ export interface TeacherDashboardData {
   warningItems: DashboardTextCard[];
   notifications: DashboardNotification[];
   courses: TeacherDashboardCourse[];
+  sidePanel?: DashboardSidePanelData;
 }
 
 export interface AdminDashboardStat {

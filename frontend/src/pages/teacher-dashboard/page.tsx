@@ -7,6 +7,7 @@ import { authService } from '@/services/auth';
 import { courseService } from '@/services/course';
 import { dashboardService } from '@/services/dashboard';
 import { notificationService } from '@/services/notifications';
+import { formatLocalDateTime, formatTodayCn, getCourseCoverGradient, getNameInitial } from '@/lib/display';
 import type { DashboardNotification, TeacherDashboardData } from '@/types/dashboard';
 
 export default function TeacherDashboard() {
@@ -262,7 +263,8 @@ export default function TeacherDashboard() {
   }));
   const displayName = dashboardData?.greetingName || user?.displayName || user?.name || '教师';
   const accountLabel = user?.email || user?.account || '';
-  const avatarInitial = displayName.trim().charAt(0) || '师';
+  const avatarInitial = getNameInitial(displayName, '师');
+  const todayLabel = formatTodayCn();
 
   return (
     <div className="soft-dash soft-dash-teacher min-h-screen bg-gray-50">
@@ -351,7 +353,7 @@ export default function TeacherDashboard() {
                   <div className="text-white/80 text-sm mb-1">早上好，{displayName}</div>
                   <h1 className="text-2xl font-bold text-white mb-2">今日工作台</h1>
                   <div className="flex items-center gap-4 text-white/80 text-sm">
-                    <span className="flex items-center gap-1"><i className="ri-calendar-line"></i>2026年4月10日 周五</span>
+                    <span className="flex items-center gap-1"><i className="ri-calendar-line"></i>{todayLabel}</span>
                     <span className="flex items-center gap-1"><i className="ri-time-line"></i>本学期第12周</span>
                   </div>
                 </div>
@@ -679,8 +681,21 @@ export default function TeacherDashboard() {
             <div className="grid grid-cols-3 gap-5">
               {teacherCourses.map((course, index) => (
                 <div key={index} className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow cursor-pointer">
-                  <div className="relative h-36 w-full">
-                    <img src={course.image} alt={course.name} className="w-full h-full object-cover object-top" />
+                  <div className={`relative h-36 w-full overflow-hidden ${getCourseCoverGradient(course.color, course.id)}`}>
+                    {course.image && (
+                      <img
+                        src={course.image}
+                        alt={course.name}
+                        className="absolute inset-0 h-full w-full object-cover object-top"
+                        onError={(event) => {
+                          event.currentTarget.style.display = 'none';
+                        }}
+                      />
+                    )}
+                    <div className="absolute inset-0 bg-black/10"></div>
+                    <div className="absolute left-4 bottom-4 flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 text-lg font-semibold text-white backdrop-blur-sm">
+                      {getNameInitial(course.name, '课')}
+                    </div>
                     {course.unread > 0 && (
                       <div className="absolute top-3 right-3 px-2 py-1 bg-red-500 text-white text-xs font-medium rounded-full">
                         {course.unread} 条新消息
@@ -793,7 +808,7 @@ export default function TeacherDashboard() {
                           {notif.unread && <span className="w-2 h-2 bg-teal-500 rounded-full"></span>}
                         </div>
                         <p className="text-sm text-gray-600">{notif.content}</p>
-                        <div className="text-xs text-gray-400 mt-2">{notif.time}</div>
+                        <div className="text-xs text-gray-400 mt-2">{formatLocalDateTime(notif.time, notif.time)}</div>
                       </div>
                     </div>
                   </div>

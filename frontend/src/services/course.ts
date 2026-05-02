@@ -360,6 +360,17 @@ export const courseService = {
     });
   },
 
+  async deleteTeacherCourseTask(
+    courseId: string,
+    taskId: string | number,
+  ): Promise<void> {
+    if (shouldUseMockApi) return;
+
+    await http<void>(`/teacher/courses/${courseId}/tasks/${taskId}`, {
+      method: "DELETE",
+    });
+  },
+
   async replyTeacherQuestion(
     courseId: string,
     questionId: string | number,

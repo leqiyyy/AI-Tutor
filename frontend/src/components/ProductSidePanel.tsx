@@ -20,8 +20,8 @@ const PANEL_CONFIG: Record<DashboardRole, PanelConfig> = {
     quote: '先完成最小的一步，学习就会开始流动。',
     quoteCaption: '今天适合先把最接近截止的一件事做完。',
     knowledgeTag: '微知识',
-    knowledgeTitle: 'TCP 里的 ACK 并不只在握手里出现',
-    knowledgeBody: '在连接建立后，大多数 TCP 报文段都可能携带 ACK，用来确认已经收到对方的数据。',
+    knowledgeTitle: '好问题通常比长时间浏览更有效',
+    knowledgeBody: '复习时可以先把不确定的概念写成一个具体问题，再带着问题阅读资料或询问 AI 助教。',
   },
   teacher: {
     badge: 'Teaching Mood',
@@ -29,8 +29,8 @@ const PANEL_CONFIG: Record<DashboardRole, PanelConfig> = {
     quote: '好教学不是一次说完，而是一次次让学生真正听懂。',
     quoteCaption: '今天适合先看重复率最高的问题，再统一回应。',
     knowledgeTag: '教学摘记',
-    knowledgeTitle: '低置信回答比高频问题更值得优先看一眼',
-    knowledgeBody: '高频问题常常能被统一处理，而低置信回答更容易影响学生信任感，适合先人工复核。',
+    knowledgeTitle: '把分散问题整理成课堂线索',
+    knowledgeBody: '学生的提问、作业反馈和课堂表现可以合并观察，用来判断哪些知识点需要补讲、举例或重新组织。',
   },
   admin: {
     badge: 'Ops Mood',
@@ -49,6 +49,18 @@ interface ProductSidePanelProps {
 
 export default function ProductSidePanel({ role }: ProductSidePanelProps) {
   const config = PANEL_CONFIG[role];
+  const panel = {
+    badge: config.badge,
+    panelTitle: config.title,
+    quote: config.quote,
+    quoteCaption: config.quoteCaption,
+    insight: {
+      tag: config.knowledgeTag,
+      title: config.knowledgeTitle,
+      body: config.knowledgeBody,
+      sourceType: 'static',
+    },
+  };
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PanelSearchResult[]>([]);
   const [activeResultId, setActiveResultId] = useState<string>('');
@@ -77,8 +89,8 @@ export default function ProductSidePanel({ role }: ProductSidePanelProps) {
     <aside className={`soft-product-panel soft-product-panel--${role}`}>
       <div className="soft-product-panel__scroll">
         <section className="soft-product-panel__hero">
-          <div className="soft-product-panel__badge">{config.badge}</div>
-          <h2 className="soft-product-panel__title">{config.title}</h2>
+          <div className="soft-product-panel__badge">{panel.badge}</div>
+          <h2 className="soft-product-panel__title">{panel.panelTitle}</h2>
 
           <div className="soft-product-panel__scene" aria-hidden="true">
             <div className="soft-product-panel__cloud soft-product-panel__cloud--one"></div>
@@ -97,8 +109,8 @@ export default function ProductSidePanel({ role }: ProductSidePanelProps) {
 
         <section className="soft-product-panel__panel-card">
           <div className="soft-product-panel__section-label">今日一句</div>
-          <p className="soft-product-panel__quote">“{config.quote}”</p>
-          <p className="soft-product-panel__caption">{config.quoteCaption}</p>
+          <p className="soft-product-panel__quote">“{panel.quote}”</p>
+          <p className="soft-product-panel__caption">{panel.quoteCaption}</p>
         </section>
 
         <section className="soft-product-panel__panel-card soft-product-panel__panel-card--search">
@@ -151,9 +163,9 @@ export default function ProductSidePanel({ role }: ProductSidePanelProps) {
         </section>
 
         <section className="soft-product-panel__panel-card soft-product-panel__panel-card--knowledge">
-          <div className="soft-product-panel__knowledge-tag">{config.knowledgeTag}</div>
-          <div className="soft-product-panel__knowledge-title">{config.knowledgeTitle}</div>
-          <p className="soft-product-panel__knowledge-body">{config.knowledgeBody}</p>
+          <div className="soft-product-panel__knowledge-tag">{panel.insight.tag}</div>
+          <div className="soft-product-panel__knowledge-title">{panel.insight.title}</div>
+          <p className="soft-product-panel__knowledge-body">{panel.insight.body}</p>
         </section>
       </div>
     </aside>

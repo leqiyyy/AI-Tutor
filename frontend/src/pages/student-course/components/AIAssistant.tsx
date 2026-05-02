@@ -3,6 +3,8 @@ import { useParams } from 'react-router-dom';
 import { AiMarkdownContent } from '@/components/AiMarkdownContent';
 import { AiProgressTimeline } from '@/components/AiProgressTimeline';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
+import { getNameInitial } from '@/lib/display';
+import { useAuth } from '@/hooks/use-auth';
 import { aiService } from '@/services/ai';
 import { recommendationService } from '@/services/recommendations';
 import type {
@@ -128,6 +130,8 @@ function getSourceIconClass(type: string) {
 
 export default function AIAssistant() {
   const { id: classId } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const avatarInitial = getNameInitial(user?.displayName || user?.name, '学');
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
   const [activeConvId, setActiveConvId] = useState<number>(0);
@@ -722,7 +726,7 @@ export default function AIAssistant() {
             {messages.map(msg => (
               <div key={msg.id} className={`flex items-start gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div className={`w-7 h-7 rounded-full flex items-center justify-center text-white text-xs flex-shrink-0 mt-0.5 ${msg.role === 'ai' ? 'bg-teal-500' : 'bg-teal-700'}`}>
-                  {msg.role === 'ai' ? <i className="ri-robot-line text-sm"></i> : <span>李</span>}
+                  {msg.role === 'ai' ? <i className="ri-robot-line text-sm"></i> : <span>{avatarInitial}</span>}
                 </div>
 
                 <div className={`max-w-[76%] flex flex-col gap-1.5 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
