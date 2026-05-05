@@ -912,6 +912,35 @@ class RAGAnythingAdapter:
             "entrypoint": "insert_content_list",
         }
 
+    async def _get_document_processing_status(
+        self,
+        rag: object,
+        material_id: str,
+        preprocess_result: PreprocessResult,
+    ) -> dict[str, Any]:
+        method = getattr(rag, "get_document_processing_status", None)
+        if not callable(method):
+            return {}
+        try:
+            status = method(material_id)
+            if inspect.isawaitable(status):
+                status = await status
+        except Exception as exc:
+            logger.warning(
+                "raganything_document_status_lookup_failed",
+                material_id=material_id,
+                error=str(exc),
+            )
+            return {}
+        if not isinstance(status, dict):
+            return {}
+        normalized = self._normalize_processing_status(status, preprocess_result)
+        raw_status = str(normalized.get("status") or "").strip().lower()
+        has_error = bool(self._extract_processing_error(normalized).get("message"))
+        if raw_status in {"failed", "error"} or has_error:
+            normalized["fully_processed"] = False
+        return normalized
+
     def _normalize_processing_status(
         self,
         status: Any,
@@ -982,23 +1011,26 @@ class RAGAnythingAdapter:
                 summary = summary or official_output["summary"]
                 metadata_source = official_output["metadata_source"]
 
-        if preprocess_result.mode == "direct_document":
-            lightrag_output = self._load_lightrag_document_metadata(
-                class_id=class_id,
-                material_id=material_id,
-                file_name=file_name,
+        lightrag_output = self._load_lightrag_document_metadata(
+            class_id=class_id,
+            material_id=material_id,
+            file_name=file_name,
+        )
+        if lightrag_output:
+            content_items = (
+                self._merge_content_items(content_items, lightrag_output["content_items"])
+                if content_items
+                else lightrag_output["content_items"]
             )
-            if lightrag_output:
-                content_items = content_items or lightrag_output["content_items"]
-                chunks = self._merge_metadata_chunks(chunks, lightrag_output["chunks"])
-                keywords = keywords or lightrag_output["keywords"]
-                if not summary or self._is_media_only_markdown(summary):
-                    summary = lightrag_output["summary"]
-                metadata_source = (
-                    f"{metadata_source}+{lightrag_output['metadata_source']}"
-                    if metadata_source and metadata_source != lightrag_output["metadata_source"]
-                    else lightrag_output["metadata_source"]
-                )
+            chunks = self._merge_metadata_chunks(lightrag_output["chunks"], chunks)
+            keywords = keywords or lightrag_output["keywords"]
+            if not summary or self._is_media_only_markdown(summary):
+                summary = lightrag_output["summary"]
+            metadata_source = (
+                f"{metadata_source}+{lightrag_output['metadata_source']}"
+                if metadata_source and metadata_source != lightrag_output["metadata_source"]
+                else lightrag_output["metadata_source"]
+            )
 
         if preprocess_result.content_list:
             if content_items:
@@ -2516,7 +2548,30 @@ class RAGAnythingAdapter:
                     preprocess_result=preprocess_result,
                     material_id=material_id,
                 )
-                status = self._build_content_list_processing_status(preprocess_result)
+                content_list_status = self._build_content_list_processing_status(preprocess_result)
+                document_status = await self._get_document_processing_status(
+                    rag,
+                    material_id,
+                    preprocess_result,
+                )
+                status = {
+                    **content_list_status,
+                    **document_status,
+                    "content_list_status": content_list_status,
+                }
+                if document_status:
+                    raw_doc_status = str(document_status.get("status") or "").strip().lower()
+                    if raw_doc_status in {"failed", "error"} or self._extract_processing_error(document_status).get("message"):
+                        status["fully_processed"] = False
+                        status["text_processed"] = bool(
+                            content_list_status.get("text_processed")
+                            or document_status.get("text_processed")
+                            or document_status.get("chunks_count")
+                        )
+                        status["multimodal_processed"] = bool(
+                            content_list_status.get("multimodal_processed")
+                            or document_status.get("multimodal_processed")
+                        )
             else:
                 await rag.process_document_complete(
                     file_path=file_path,
@@ -2592,7 +2647,14 @@ class RAGAnythingAdapter:
                 if text_processed and not multimodal_processed:
                     material.kb_error = "RAG-Anything text indexing succeeded, but multimodal/KG extraction only partially completed"
                 else:
-                    material.kb_error = "RAG-Anything indexed text successfully, but some advanced extraction steps failed"
+                    material.kb_error = (
+                        "RAG-Anything indexed text successfully, but some advanced extraction steps failed"
+                        + (
+                            f": {processing_error['message']}"
+                            if processing_error.get("message")
+                            else ""
+                        )
+                    )
             else:
                 material.kb_error = None if task.status == "completed" else (
                     processing_error["message"] or "RAG-Anything processing incomplete"
@@ -3074,6 +3136,20 @@ class RAGAnythingAdapter:
             query_trace["sources_after_structured_table_match"] = self._source_trace_summary(sources)
 
             stage_started = perf_counter()
+            sources, kg_backtrace_meta = self._augment_sources_with_kg_material_backtrace(
+                raw=raw,
+                question=retrieval_question,
+                answer=answer,
+                sources=sources,
+                class_id=class_id,
+            )
+            mark("kg_material_backtrace", stage_started)
+            query_trace["stage_timings_ms"] = dict(stage_timings_ms)
+            query_trace["kg_material_backtrace"] = kg_backtrace_meta
+            query_trace["source_count_after_kg_material_backtrace"] = len(sources or [])
+            query_trace["sources_after_kg_material_backtrace"] = self._source_trace_summary(sources)
+
+            stage_started = perf_counter()
             await self._emit_progress(
                 progress_callback,
                 stage="rerank",
@@ -3087,6 +3163,12 @@ class RAGAnythingAdapter:
                 sources=sources,
             )
             mark("rerank_sources", stage_started)
+            sources, relevance_filter_meta = self._filter_low_relevance_sources(sources)
+            rerank_meta = {
+                **rerank_meta,
+                "source_selected_count": len(sources or []),
+                "relevance_filter": relevance_filter_meta,
+            }
             await self._emit_progress(
                 progress_callback,
                 stage="rerank",
@@ -3098,6 +3180,7 @@ class RAGAnythingAdapter:
             query_trace["stage_timings_ms"] = dict(stage_timings_ms)
             query_trace["source_count_after_rerank"] = len(sources or [])
             query_trace["rerank"] = rerank_meta.get("rerank_trace")
+            query_trace["relevance_filter"] = relevance_filter_meta
             stage_started = perf_counter()
             sources = self._enrich_sources_with_material_metadata(sources, class_id)
             mark("metadata_enrichment", stage_started)
@@ -3460,6 +3543,303 @@ class RAGAnythingAdapter:
                 self._source_trace_item(source, index)
                 for index, source in enumerate(normalized_sources[:limit], start=1)
             ],
+        }
+
+    def _augment_sources_with_kg_material_backtrace(
+        self,
+        *,
+        raw: Any,
+        question: str,
+        answer: str,
+        sources: list[dict],
+        class_id: str,
+    ) -> tuple[list[dict], dict[str, Any]]:
+        kg_terms = self._kg_terms_used_in_answer(raw=raw, question=question, answer=answer)
+        if not kg_terms:
+            return sources, {"applied": False, "reason": "no_answer_aligned_kg_terms"}
+
+        try:
+            db = SessionLocal()
+        except Exception as exc:
+            logger.warning("rag_kg_backtrace_session_failed", class_id=class_id, error=str(exc))
+            return sources, {"applied": False, "reason": "session_failed", "error": str(exc)[:300]}
+
+        try:
+            entities = db.query(KnowledgeEntity).filter(
+                KnowledgeEntity.class_id == class_id,
+            ).all()
+            matched_entities = [
+                entity for entity in entities
+                if str(entity.status or "").lower() != "rejected"
+                and self._term_key(entity.name) in kg_terms
+            ]
+
+            material_ids: list[str] = []
+            hit_terms: list[str] = []
+            for entity in matched_entities:
+                if entity.name and entity.name not in hit_terms:
+                    hit_terms.append(entity.name)
+                if entity.source_material_id:
+                    material_ids.append(str(entity.source_material_id))
+                material_ids.extend(self._source_material_ids_from_provenance(entity.provenance))
+
+            material_ids = self._unique_strings(material_ids)
+            if not material_ids:
+                return sources, {
+                    "applied": False,
+                    "reason": "matched_kg_terms_without_material_ids",
+                    "matched_terms": hit_terms[:12],
+                }
+
+            materials = db.query(Material).filter(
+                Material.class_id == class_id,
+                Material.id.in_(material_ids),
+                Material.is_active == True,
+            ).all()
+            tasks = db.query(FileParseTask).filter(
+                FileParseTask.class_id == class_id,
+                FileParseTask.material_id.in_([material.id for material in materials]),
+                FileParseTask.status == "completed",
+            ).all()
+        except Exception as exc:
+            logger.warning("rag_kg_backtrace_lookup_failed", class_id=class_id, error=str(exc))
+            return sources, {"applied": False, "reason": "lookup_failed", "error": str(exc)[:300]}
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+        material_by_id = {str(material.id): material for material in materials}
+        terms_by_key = {self._term_key(term): term for term in hit_terms if self._term_key(term)}
+        existing_keys = self._source_dedupe_keys(sources)
+        backfilled: list[dict[str, Any]] = []
+        selected_chunk_count = 0
+        duplicate_source_count = 0
+        for task in tasks:
+            material = material_by_id.get(str(task.material_id))
+            if material is None:
+                continue
+            selected_chunks = self._select_kg_backtrace_chunks(task, set(terms_by_key), limit=3)
+            selected_chunk_count += len(selected_chunks)
+            for chunk in selected_chunks:
+                source = self._source_from_parse_task_chunk(
+                    material=material,
+                    task=task,
+                    chunk=chunk,
+                    hit_terms=[
+                        label for key, label in terms_by_key.items()
+                        if key and key in self._term_key(chunk.get("text") or chunk.get("content") or "")
+                    ] or hit_terms[:8],
+                )
+                source_keys = self._source_dedupe_key_variants(source)
+                if source_keys & existing_keys:
+                    duplicate_source_count += 1
+                    continue
+                existing_keys.update(source_keys)
+                backfilled.append(source)
+
+        if not backfilled:
+            if selected_chunk_count:
+                return sources, {
+                    "applied": True,
+                    "reason": "matched_material_chunks_already_present",
+                    "matched_terms": hit_terms[:12],
+                    "material_ids": material_ids[:12],
+                    "added_source_count": 0,
+                    "matched_chunk_count": selected_chunk_count,
+                    "duplicate_source_count": duplicate_source_count,
+                }
+            return sources, {
+                "applied": False,
+                "reason": "no_completed_chunks_for_matched_materials",
+                "matched_terms": hit_terms[:12],
+                "material_ids": material_ids[:12],
+            }
+
+        return [*backfilled, *(sources or [])], {
+            "applied": True,
+            "matched_terms": hit_terms[:12],
+            "material_ids": material_ids[:12],
+            "added_source_count": len(backfilled),
+            "matched_chunk_count": selected_chunk_count,
+            "duplicate_source_count": duplicate_source_count,
+            "added_sources": self._source_trace_summary(backfilled, limit=6),
+        }
+
+    def _kg_terms_used_in_answer(self, *, raw: Any, question: str, answer: str) -> set[str]:
+        raw_terms = self._kg_terms_from_raw_payload(raw)
+        if not raw_terms:
+            return set()
+        qa_key = self._term_key(f"{question}\n{answer}")
+        if not qa_key:
+            return set()
+        used: set[str] = set()
+        for term in raw_terms:
+            key = self._term_key(term)
+            if not key or len(key) <= 1:
+                continue
+            if self._is_noisy_kg_backtrace_term(term):
+                continue
+            if key in qa_key:
+                used.add(key)
+        return used
+
+    def _kg_terms_from_raw_payload(self, raw: Any) -> set[str]:
+        if not isinstance(raw, dict):
+            return set()
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        terms: set[str] = set()
+
+        def add_value(value: Any) -> None:
+            text = re.sub(r"\s+", " ", str(value or "").strip())
+            if text:
+                terms.add(text)
+
+        for entity in data.get("entities") or []:
+            if not isinstance(entity, dict):
+                add_value(entity)
+                continue
+            for key in ("entity_name", "name", "entity", "id", "label"):
+                add_value(entity.get(key))
+
+        for relation in data.get("relationships") or []:
+            if not isinstance(relation, dict):
+                continue
+            for key in ("src_id", "tgt_id", "source", "target", "source_name", "target_name"):
+                add_value(relation.get(key))
+            src_tgt = relation.get("src_tgt")
+            if isinstance(src_tgt, (list, tuple)):
+                for item in src_tgt:
+                    add_value(item)
+        return terms
+
+    def _is_noisy_kg_backtrace_term(self, term: str) -> bool:
+        key = self._term_key(term)
+        if not key:
+            return True
+        noisy = {
+            "表",
+            "表格",
+            "文件",
+            "资料",
+            "课程",
+            "课程资料",
+            "内容",
+            "步骤",
+            "事件描述",
+            "细节说明",
+            "学习建议",
+            "详细解释",
+            "简明结论",
+            "身份",
+            "故事类型",
+            "核心事件",
+            "教学建议",
+        }
+        noisy_keys = {self._term_key(value) for value in noisy | PROJECTION_COURSE_ARTIFACT_TERMS}
+        return key in noisy_keys
+
+    def _unique_strings(self, values: list[Any]) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            unique.append(text)
+        return unique
+
+    def _source_dedupe_keys(self, sources: list[dict] | None) -> set[str]:
+        keys: set[str] = set()
+        for source in sources or []:
+            if not isinstance(source, dict):
+                continue
+            keys.update(self._source_dedupe_key_variants(source))
+        return {key for key in keys if key}
+
+    def _source_dedupe_key(self, source: dict[str, Any]) -> str:
+        variants = self._source_dedupe_key_variants(source)
+        return next(iter(variants), "")
+
+    def _source_dedupe_key_variants(self, source: dict[str, Any]) -> set[str]:
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        chunk_id = source.get("chunk_id") or metadata.get("chunk_id")
+        material_id = source.get("material_id") or metadata.get("material_id")
+        variants: set[str] = set()
+        if chunk_id or material_id:
+            variants.add(f"{material_id or ''}:{chunk_id or ''}")
+        if chunk_id:
+            variants.add(f"chunk:{chunk_id}")
+        text = self._source_evidence_text(source)
+        text_key = self._term_key(text[:500])
+        if text_key:
+            variants.add(f"text:{text_key}")
+        return variants
+
+    def _select_kg_backtrace_chunks(
+        self,
+        task: FileParseTask,
+        term_keys: set[str],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        chunks = [chunk for chunk in (task.chunks or []) if isinstance(chunk, dict)]
+        if not chunks:
+            text = re.sub(r"\s+", " ", str(task.extracted_text or "").strip())
+            if not text:
+                return []
+            return [{
+                "chunk_id": f"{task.material_id}-extracted-text",
+                "text": text,
+                "page": 0,
+                "metadata": {"source": "file_parse_task_extracted_text"},
+            }]
+
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for index, chunk in enumerate(chunks):
+            text_key = self._term_key(chunk.get("text") or chunk.get("content") or "")
+            hit_count = sum(1 for term_key in term_keys if term_key and term_key in text_key)
+            scored.append((hit_count, -index, chunk))
+
+        matched = [chunk for hit_count, _, chunk in sorted(scored, reverse=True) if hit_count > 0]
+        if matched:
+            return matched[: max(1, int(limit))]
+        return chunks[: max(1, int(limit))]
+
+    def _source_from_parse_task_chunk(
+        self,
+        *,
+        material: Material,
+        task: FileParseTask,
+        chunk: dict[str, Any],
+        hit_terms: list[str],
+    ) -> dict[str, Any]:
+        chunk_metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+        text = self._clean_lightrag_chunk_text(chunk.get("text") or chunk.get("content") or "")
+        display_name = material.file_name or material.title or "unknown"
+        source_metadata = {
+            **chunk_metadata,
+            "source": "kg_material_backtrace",
+            "material_id": material.id,
+            "task_id": task.id,
+            "kg_hit_terms": hit_terms[:12],
+            "kg_backtrace": True,
+        }
+        return {
+            "name": display_name,
+            "source_name": display_name,
+            "file_name": display_name,
+            "type": material.mime_type,
+            "page": chunk.get("page") or chunk.get("page_idx") or chunk_metadata.get("page") or chunk_metadata.get("page_idx"),
+            "score": 1.0,
+            "retrieval_score": 1.0,
+            "chunk_id": chunk.get("chunk_id") or chunk.get("id") or chunk_metadata.get("chunk_id"),
+            "snippet": text,
+            "raw_text": text,
+            "material_id": material.id,
+            "metadata": source_metadata,
         }
 
     def _raw_context_trace(self, raw: Any) -> dict[str, Any]:
@@ -4457,6 +4837,51 @@ class RAGAnythingAdapter:
                 "before": self._source_trace_summary(candidates),
                 "after": self._source_trace_summary(normalized),
             },
+        }
+
+    def _filter_low_relevance_sources(self, sources: list[dict]) -> tuple[list[dict], dict[str, Any]]:
+        if not sources:
+            return sources, {"applied": False, "reason": "no_sources"}
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            score = (
+                self._safe_float(source.get("rerank_score"))
+                or self._safe_float(source.get("score"))
+                or self._safe_float(source.get("retrieval_score"))
+                or 0.0
+            )
+            scored.append((score, source))
+        if not scored:
+            return sources, {"applied": False, "reason": "no_scored_sources"}
+
+        best_score = max(score for score, _ in scored)
+        if best_score < 0.5:
+            return sources, {
+                "applied": False,
+                "reason": "best_score_below_filter_floor",
+                "best_score": round(best_score, 4),
+            }
+
+        threshold = max(0.25, best_score * 0.5)
+        kept = [source for score, source in scored if score >= threshold]
+        if not kept:
+            return sources, {
+                "applied": False,
+                "reason": "filter_would_drop_all",
+                "best_score": round(best_score, 4),
+                "threshold": round(threshold, 4),
+            }
+
+        return kept, {
+            "applied": len(kept) != len(sources),
+            "best_score": round(best_score, 4),
+            "threshold": round(threshold, 4),
+            "before_count": len(sources),
+            "after_count": len(kept),
+            "after": self._source_trace_summary(kept),
         }
 
     def _enrich_sources_with_material_metadata(self, sources: list[dict], class_id: str) -> list[dict]:

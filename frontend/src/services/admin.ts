@@ -45,7 +45,54 @@ export interface UpdateSystemSettingsPayload {
   };
 }
 
+export interface AdminAuditEvent {
+  id: string;
+  event_type: string;
+  status: string;
+  actor_id?: string | null;
+  actor_role?: string | null;
+  actor_name?: string | null;
+  target_type?: string | null;
+  target_id?: string | null;
+  course_id?: string | null;
+  class_id?: string | null;
+  material_id?: string | null;
+  summary?: string | null;
+  extra_data?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AdminAuditEventsResponse {
+  items: AdminAuditEvent[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ListAuditEventsParams {
+  event_type?: string;
+  status?: string;
+  actor_role?: string;
+  class_id?: string;
+  course_id?: string;
+  target_type?: string;
+  page?: number;
+  page_size?: number;
+}
+
 export const adminService = {
+  async listAuditEvents(
+    params: ListAuditEventsParams = {},
+  ): Promise<AdminAuditEventsResponse> {
+    if (shouldUseMockApi) {
+      return { items: [], total: 0, page: params.page || 1, page_size: params.page_size || 30 };
+    }
+
+    return http<AdminAuditEventsResponse>("/admin/audit-events", {
+      query: { ...params },
+    });
+  },
+
   async reviewRegistration(payload: ReviewRegistrationPayload): Promise<void> {
     if (shouldUseMockApi) return;
 
@@ -59,7 +106,7 @@ export const adminService = {
     if (shouldUseMockApi) return;
 
     await http<void>(`/admin/users/${payload.userId}/status`, {
-      method: "PATCH",
+      method: "PUT",
       body: payload,
     });
   },

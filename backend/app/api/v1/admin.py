@@ -12,7 +12,7 @@ from app.core.response import ok
 from app.core.config import settings
 from app.core.error_codes import ErrorCode
 from app.core.openapi_examples import responses_with_success
-from app.services import analytics_service, admin_service, kb_service, model_routing_service, rag_metrics_service
+from app.services import analytics_service, admin_service, audit_service, kb_service, model_routing_service, rag_metrics_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -145,6 +145,36 @@ def list_courses_admin(
         "created_at": course.created_at,
     } for course in courses]
     return ok(data={"items": data, "total": total, "page": page, "page_size": page_size})
+
+
+@router.get("/audit-events", response_model=None)
+def list_audit_events(
+    event_type: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    actor_role: Optional[str] = Query(None),
+    class_id: Optional[str] = Query(None),
+    course_id: Optional[str] = Query(None),
+    target_type: Optional[str] = Query(None),
+    date_from: Optional[datetime] = Query(None),
+    date_to: Optional[datetime] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_admin),
+):
+    return ok(data=audit_service.list_events(
+        db,
+        event_type=event_type,
+        status=status,
+        actor_role=actor_role,
+        class_id=class_id,
+        course_id=course_id,
+        target_type=target_type,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        page_size=page_size,
+    ))
 
 
 @router.get("/settings", response_model=None)

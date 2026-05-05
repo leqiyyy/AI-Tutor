@@ -12,6 +12,7 @@ from app.core.logging import get_logger
 from app.core.security import create_token, hash_password, verify_password
 from app.models.notification import VerifyCode
 from app.models.user import User
+from app.services import audit_service
 
 log = get_logger(__name__)
 
@@ -77,6 +78,14 @@ def register_user(db: Session, data: dict) -> User:
     db.add(user)
     db.commit()
     db.refresh(user)
+    audit_service.record_event(
+        event_type="auth.user_registered",
+        actor=user,
+        target_type="user",
+        target_id=user.id,
+        summary=f"{user.real_name or user.email} 注册为{_role_label(user.role)}",
+        extra_data={"email": user.email, "role": user.role},
+    )
     return user
 
 
@@ -101,3 +110,7 @@ def login_user(db: Session, account: str, password: str, role: Optional[str] = N
         "user_id": user.id,
         "real_name": user.real_name,
     }
+
+
+def _role_label(role: str) -> str:
+    return {"student": "学生", "teacher": "教师", "admin": "管理员"}.get(role, role)

@@ -19,7 +19,7 @@ from app.schemas.course import (
     JoinClassRequest,
     UpdateClassRequest,
 )
-from app.services import course_service, kb_service
+from app.services import audit_service, course_service, kb_service
 
 router = APIRouter(prefix="/classes", tags=["classes"])
 
@@ -194,6 +194,22 @@ async def upload_material(
     db.add(material)
     db.commit()
     db.refresh(material)
+    audit_service.record_event(
+        event_type="material.uploaded",
+        actor=current_user,
+        target_type="material",
+        target_id=material.id,
+        course_id=cls.course_id,
+        class_id=class_id,
+        material_id=material.id,
+        summary=f"教师上传资料：{material.file_name}",
+        extra_data={
+            "file_name": material.file_name,
+            "file_size": material.file_size,
+            "mime_type": material.mime_type,
+            "file_type": material.file_type,
+        },
+    )
 
     _task, action = await kb_service.ingest_material_with_retry(
         db,
@@ -205,6 +221,23 @@ async def upload_material(
     db.expire_all()
     material_id = material.id
     material = db.query(Material).filter(Material.id == material_id).first()
+    audit_service.record_event(
+        event_type=_index_event_type(material.kb_status),
+        status="failed" if material.kb_status == "failed" else "success",
+        actor=current_user,
+        target_type="material",
+        target_id=material.id,
+        course_id=cls.course_id,
+        class_id=class_id,
+        material_id=material.id,
+        summary=_index_event_summary(material.file_name, material.kb_status),
+        extra_data={
+            "file_name": material.file_name,
+            "kb_status": material.kb_status,
+            "kb_error": material.kb_error,
+            "action": action,
+        },
+    )
 
     return ok(
         data={
@@ -216,6 +249,22 @@ async def upload_material(
         },
         message="Material uploaded successfully",
     )
+
+
+def _index_event_type(kb_status: str | None) -> str:
+    if kb_status == "failed":
+        return "material.index_failed"
+    if kb_status == "indexed":
+        return "material.index_completed"
+    return "material.index_started"
+
+
+def _index_event_summary(file_name: str, kb_status: str | None) -> str:
+    if kb_status == "failed":
+        return f"资料索引失败：{file_name}"
+    if kb_status == "indexed":
+        return f"资料索引完成：{file_name}"
+    return f"资料索引已开始：{file_name}"
 
 
 @router.delete("/{class_id}/materials/{material_id}", response_model=None)

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Submission, Task
 from app.models.user import User
+from app.services import audit_service
 
 
 def _random_invite_code(length: int = 8) -> str:
@@ -163,6 +164,24 @@ def create_class(db: Session, teacher_id: str, data: dict) -> Class:
     db.add(ClassMember(class_id=cls.id, user_id=teacher_id, role="teacher"))
     db.commit()
     db.refresh(cls)
+    teacher = db.query(User).filter(User.id == teacher_id).first()
+    audit_service.record_event(
+        event_type="class.created",
+        actor=teacher,
+        actor_id=teacher_id,
+        actor_role="teacher",
+        target_type="class",
+        target_id=cls.id,
+        course_id=cls.course_id,
+        class_id=cls.id,
+        summary=f"教师创建班级：{cls.name}",
+        extra_data={
+            "class_name": cls.name,
+            "course_id": cls.course_id,
+            "invite_code": cls.invite_code,
+            "semester": cls.semester,
+        },
+    )
     return cls
 
 
@@ -243,6 +262,19 @@ def join_class_by_invite(db: Session, student_id: str, invite_code: str) -> Clas
         raise BadRequestException("You are already in this class")
     db.add(ClassMember(class_id=cls.id, user_id=student_id, role="student"))
     db.commit()
+    student = db.query(User).filter(User.id == student_id).first()
+    audit_service.record_event(
+        event_type="class.student_joined",
+        actor=student,
+        actor_id=student_id,
+        actor_role="student",
+        target_type="class",
+        target_id=cls.id,
+        course_id=cls.course_id,
+        class_id=cls.id,
+        summary=f"学生加入班级：{cls.name}",
+        extra_data={"class_name": cls.name, "invite_code": invite_code},
+    )
     return cls
 
 

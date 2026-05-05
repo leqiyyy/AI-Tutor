@@ -2,25 +2,25 @@
 
 ## 摘要
 
-随着高校课程教学资源的持续数字化，课程讲义、课件、实验指导书、答疑记录、图片资料和课堂录播等资源数量不断增加。然而，教学资源在实际使用中往往存在分散存储、格式异构、缺少统一索引和难以快速定位知识点等问题。学生在复习和自学过程中需要频繁检索资料并向教师提问，教师也需要反复回答相似问题，导致课程答疑和个性化辅导成本较高。大语言模型具备较强的自然语言理解和生成能力，为智能助教系统提供了新的技术基础，但通用大模型直接用于课程场景时容易出现回答脱离课程资料、缺少证据来源、课程边界不清和错误难以持续纠正等问题。因此，如何结合大语言模型、检索增强生成技术和课程知识组织机制，构建面向具体课程场景的可信 AI 助教平台，具有一定的研究意义和应用价值。
+随着高校课程教学资源的持续数字化，课程讲义、课件、实验指导书、答疑记录、图片资料和课堂录播等资源不断增加。教学资源在实际使用中存在格式异构、分散存储、缺少统一索引和知识点定位困难等问题，学生复习时需要反复查找资料，教师也需要多次回答相似问题。通用大语言模型具备自然语言理解和生成能力，但直接用于课程答疑时容易出现课程边界不清、回答缺少依据和错误难以纠正等情况。针对上述问题，本文设计并实现了一个基于大语言模型和检索增强生成的 AI 助教平台原型，目标是为具体课程提供资料管理、知识组织、课程问答和教师审核回流支持。
 
-本文围绕“基于大语言模型和检索增强生成的助教平台设计”这一主题，设计并实现了一个面向课程教学场景的 AI 助教平台原型。系统以计算机网络课程资源为典型应用对象，采用前后端分离架构，前端基于 React、Vite、TypeScript 和 Tailwind CSS 构建学生端、教师端和管理端界面，后端基于 FastAPI、SQLAlchemy 和 Pydantic 实现统一接口、权限控制、课程资料管理、智能问答、教师审核和学习分析等功能。知识库构建方面，系统支持本地文件系统与 MinIO 对象存储，支持 SQLite 开发数据库和 PostgreSQL 部署数据库，结合 Celery 与 Redis 预留异步索引任务能力。在 AI 知识引擎层，系统引入香港大学团队提出的 RAG-Anything 框架作为增强型多模态 RAG 主链，并保留本地 SimpleRAGEngine 作为回退链路。RAG-Anything 基于 LightRAG 的图增强检索思想，进一步面向文本、图像、表格和公式等多模态文档内容构建跨模态关系图与文本语义图，通过混合检索提升复杂课程资料问答能力。
+系统采用前后端分离架构，前端基于 React、Vite、TypeScript 和 Tailwind CSS 实现学生端、教师端和管理端页面，后端基于 FastAPI、SQLAlchemy 和 Pydantic 实现认证授权、班级空间、资料管理、智能问答、教师审核和学习记录等接口。课程知识处理方面，系统接入 RAG-Anything 与 LightRAG 相关能力，结合 MinerU 文档解析、嵌入模型、视觉语言模型和重排序模型，将课程资料转换为文本分块、内容项、引用来源和课程知识图谱投影。对于图片、表格和公式等内容，系统通过文本化描述为其参与检索提供路径；对于音视频资料，系统保留预处理和扩展接口，当前核心实现以文档型资料和图片内容为主。
 
-系统在实现中设计了课程资料上传、文件哈希去重、资料元数据落库、文档解析、内容分块、多模态内容项归一化、课程知识图谱原型构建、语义检索、图谱辅助检索、重排序、答案生成、引用溯源和低置信审核等完整处理链路。模型配置方面，系统支持生成模型、嵌入模型、视觉语言模型和重排序模型的 API、本地与 mock 多种后端路由方式；默认配置中可使用 OpenAI-compatible 生成接口、`text-embedding-3-small` 嵌入模型、VLM 图像理解接口和可插拔 reranker。教师审核机制方面，系统将低置信回答和学生点踩反馈转入审核队列，教师修正后的答案可回流到知识库，作为后续相似问题的优先证据，从而实现知识库层面的持续优化。测试与评估方面，系统通过自动化测试、主流程验证、RAG 性能事件记录和离线 benchmark 脚本支持功能可用性、检索指标、问答置信度、fallback 率和响应时延等指标分析。
+本文实现了班级空间基础功能、课程知识库构建、知识图谱构建、检索增强生成问答、教师审核与知识回流等模块。系统在问答阶段通过查询预处理、关键词抽取、双路检索、候选证据重排和回答生成，支持课程知识点关联检索和证据组织；在回答质量控制方面，将低可信度回答和学生负反馈转入教师审核流程，教师修正答案可作为补充知识回流到课程知识库。测试阶段通过功能测试和主流程验证，对资料上传、知识库构建、知识图谱展示、课程问答、引用溯源、教师审核回流等功能的可用性进行了验证。
 
-实验与原型验证结果表明，本文系统能够完成课程资料上传、知识库构建、课程问答、引用展示、教师审核回流和学习支持等核心流程，能够在无完整外部模型依赖时通过回退路径保持系统可运行，在具备模型 API 或本地模型服务时切换到增强 RAG 主链。系统仍存在知识图谱抽取偏启发式、多模态音视频深度解析不足、推荐策略以规则驱动为主和大规模用户评估尚需完善等局限。未来可进一步接入更成熟的 ASR、VLM、向量数据库和知识抽取模型，完善离线评测集与真实教学场景用户研究。
+测试结果说明，系统能够完成课程资料从上传、解析、索引到课程问答和审核回流的主要流程，并为课程场景下的 AI 助教应用提供了可运行原型。系统仍存在音视频深度解析不足、知识图谱语义抽取能力有限、推荐策略以规则为主和真实课堂评估规模不足等问题。后续可从多模态解析、知识抽取、检索评估和真实教学场景试用等方面继续完善。
 
 关键词：大语言模型；检索增强生成；RAG-Anything；LightRAG；知识图谱；智能助教；多模态文档解析
 
 ## Abstract
 
-With the continuous digitalization of higher education, course materials such as lecture notes, slides, lab instructions, Q&A records, images, and recorded lectures are rapidly accumulating. However, these resources are often scattered, heterogeneous, and difficult to retrieve precisely during self-study and review. Students frequently need to search course materials and ask repetitive questions, while teachers face increasing workload in answering similar questions and providing personalized guidance. Large language models provide strong natural language understanding and generation capabilities, but directly applying general-purpose LLMs to course tutoring may lead to hallucinated answers, weak course boundaries, lack of evidence, and insufficient correction mechanisms. Therefore, it is meaningful to design a trustworthy AI tutoring platform by integrating LLMs, retrieval-augmented generation, and course knowledge organization.
+With the continuous digitalization of higher education, course materials such as lecture notes, slides, laboratory instructions, Q&A records, images, and recorded lectures are rapidly accumulating. In actual teaching scenarios, these resources are often heterogeneous, scattered, and difficult to retrieve by knowledge points. Students spend considerable time searching materials during review, while teachers repeatedly answer similar questions. General-purpose large language models have strong language understanding and generation capabilities, but direct use in course tutoring may lead to weak course boundaries, insufficient evidence, and limited correction mechanisms. To address these problems, this thesis designs and implements an AI tutoring platform based on large language models and retrieval-augmented generation for course-specific teaching scenarios.
 
-This thesis designs and implements an AI tutoring platform based on large language models and retrieval-augmented generation. The system uses computer networking course resources as a representative scenario. It adopts a frontend-backend separated architecture: the frontend is built with React, Vite, TypeScript, and Tailwind CSS, while the backend is implemented with FastAPI, SQLAlchemy, and Pydantic. The platform supports authentication, course management, material ingestion, AI question answering, teacher review, feedback loop, learning analytics, and administration. For knowledge construction, the system supports local file storage and MinIO object storage, SQLite for development, PostgreSQL for deployment, and Celery with Redis for asynchronous indexing. At the AI knowledge engine layer, the system integrates RAG-Anything, an all-in-one multimodal RAG framework built on LightRAG, as the enhanced main retrieval chain, while retaining a local SimpleRAGEngine as a fallback path.
+The system adopts a frontend-backend separated architecture. The frontend is implemented with React, Vite, TypeScript, and Tailwind CSS, while the backend uses FastAPI, SQLAlchemy, and Pydantic to provide authentication, class space, material management, intelligent Q&A, teacher review, and learning record interfaces. For course knowledge processing, the system integrates RAG-Anything and LightRAG-related capabilities, together with MinerU document parsing, embedding models, vision-language models, and reranking models. Course materials are converted into text chunks, content items, citations, and business-side course knowledge graph projections. Images, tables, and equations are represented through textual descriptions so that multimodal materials can participate in retrieval; audio and video processing is retained as an extension path, while the current implementation mainly focuses on document materials and image content.
 
-The implemented pipeline includes material upload, file hash deduplication, metadata persistence, document parsing, text chunking, multimodal content item normalization, course knowledge graph prototype construction, semantic retrieval, graph-assisted retrieval, reranking, answer generation, citation persistence, and low-confidence review. The model routing layer supports API-based, local OpenAI-compatible, and mock backends for generation models, embedding models, vision-language models, and rerankers. Teacher review and feedback loop mechanisms enable low-confidence or disliked answers to be corrected by teachers and injected back into the knowledge base, improving future answers at the knowledge-service level. For evaluation, the system provides automated tests, end-to-end workflow validation, RAG query event logging, admin-side metrics, and offline benchmark scripts for measuring retrieval performance, confidence, fallback rate, and latency.
+The platform implements class space management, course knowledge base construction, knowledge graph construction, retrieval-augmented question answering, and teacher review with knowledge feedback. During Q&A, the system performs query preprocessing, keyword extraction, dual-path retrieval, candidate evidence reranking, and answer generation to support course knowledge association and evidence organization. Low-confidence answers and negative student feedback are transferred to the teacher review workflow, and teacher-corrected answers can be fed back into the course knowledge base as supplementary knowledge. Functional tests and workflow validation were conducted to verify the usability of material upload, knowledge base construction, knowledge graph display, course Q&A, citation tracing, and teacher review feedback.
 
-The prototype validation shows that the system can support key workflows such as course material ingestion, knowledge base construction, course-specific Q&A, citation display, teacher review, knowledge feedback, and learning support. It can maintain usability through fallback mechanisms when full model dependencies are unavailable and switch to the enhanced RAG-Anything chain when model APIs or local model services are configured. Limitations remain, including heuristic knowledge graph extraction, limited deep audio/video processing, rule-based recommendation, and insufficient large-scale user evaluation. Future work may introduce stronger ASR, VLM, vector database, knowledge extraction models, and more systematic educational evaluation.
+The results show that the prototype can complete the main workflow from material ingestion and indexing to course Q&A and review feedback. The system provides a runnable practice for applying LLMs and RAG to course tutoring. Remaining limitations include insufficient deep audio/video processing, limited semantic relation extraction in the knowledge graph, rule-based recommendation, and insufficient evaluation in real classroom scenarios. Future work may further improve multimodal parsing, knowledge extraction, retrieval evaluation, and real teaching deployment.
 
 Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; LightRAG; Knowledge Graph; AI Tutor; Multimodal Document Parsing
 
@@ -36,15 +36,15 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 在实际学习过程中，课程资料常常分散在教学平台、即时通信群、教师网盘、本地文件夹和学生个人笔记中。即使资料已经集中到某个平台，也往往只是以文件列表形式展示，缺少按知识点、章节关系、概念依赖和问题场景组织的结构化索引。学生复习某个知识点时，需要打开多个文件反复查找，难以及时判断某个概念出现在第几份资料、哪一页、与哪些知识点相关。对于包含图片、表格、公式和流程图的资料，普通全文搜索也很难覆盖其中的关键信息。
 
-因此，课程资源管理面临的核心矛盾不是“资源是否足够”，而是“资源能否被有效组织、检索和转化为学习支持”。本文系统将课程资料转化为可检索知识库，并进一步构建课程知识图谱原型，正是为了解决课程资源从静态文件到动态知识服务之间的转化问题。
+因此，课程资源管理的关键问题在于资源能否被有效组织、检索并转化为学习支持。本文系统将课程资料转化为可检索知识库，并进一步构建课程知识图谱原型，用于解决课程资源从静态文件到动态知识服务之间的转化问题。
 
 ### 1.1.2 教师重复答疑压力大，个性化辅导成本高
 
 课程教学中的答疑问题具有明显的重复性和集中性。在同一门课程中，不同学生经常围绕相同知识点提出类似问题。例如在计算机网络课程中，TCP 三次握手、拥塞控制、子网划分、HTTP 与 HTTPS 区别等问题会在多个班级和多个教学周期中反复出现。教师需要在课堂、课后、线上平台和作业反馈中多次解释这些内容，造成重复劳动。
 
-同时，学生的基础和学习节奏存在差异。部分学生希望得到基础概念解释，部分学生需要结合实验或代码理解原理，还有学生希望获得复习资料、错题解析或学习建议。传统答疑方式通常依赖教师人工判断和人工回复，难以同时满足及时性、个性化和可追溯性要求。若缺少系统化记录，教师也难以持续分析学生在哪些知识点上最容易出错，以及哪些资料最需要补充。
+同时，学生的基础和学习节奏存在差异。部分学生希望得到基础概念解释，部分学生需要结合实验或代码理解原理，还有学生希望获得复习资料、错题解析或学习建议。传统答疑方式通常依赖教师人工判断和人工回复，难以同时满足及时性、个性化和可追溯性要求。缺少系统化记录时，教师也难以持续分析学生在哪些知识点上最容易出错，以及哪些资料最需要补充。
 
-智能助教平台可以在一定程度上分担教师重复答疑压力。系统如果能够基于课程资料自动回答常见问题，并将低置信或学生不满意的问题转交教师审核，就可以形成“AI 初答、教师兜底、知识回流”的闭环。这样既能提高学生获得帮助的及时性，也能将教师精力更多投入到高价值问题解释和教学改进中。
+智能助教平台可以在一定程度上分担教师重复答疑压力。系统基于课程资料回答常见问题，并将低可信度或学生不满意的问题转交教师审核，可以形成“AI 初答、教师兜底、知识回流”的闭环。该流程能够提升学生获得帮助的及时性，也能将教师精力更多投入到高价值问题解释和教学改进中。
 
 ### 1.1.3 大语言模型可提升教学辅助能力，但直接应用仍存在局限
 
@@ -52,7 +52,7 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 然而，通用大语言模型并不天然适合直接作为课程助教。第一，模型回答主要依赖参数化知识，可能与当前课程讲义、教师要求或实验环境不一致。第二，模型容易在证据不足时生成看似合理但缺少依据的回答，产生“幻觉”风险。第三，通用模型通常无法明确给出回答来自哪份课程资料、哪一页或哪一段，学生和教师难以核验。第四，当模型回答错误时，如果系统缺少反馈与回流机制，错误难以被持续纠正。
 
-因此，本文系统并不把大语言模型作为唯一知识来源，而是将大语言模型定位为理解问题和组织语言的生成模块，将课程资料、检索增强生成、知识图谱和教师审核作为可信性约束手段。系统的目标不是构建通用聊天机器人，而是构建面向课程场景的可信 AI 助教平台。
+因此，本文系统将大语言模型定位为理解问题和组织语言的生成模块，将课程资料、检索增强生成、知识图谱和教师审核作为回答依据与质量控制手段。系统面向课程场景构建 AI 助教平台，重点支持基于课程资料的问答、引用溯源和教师修正回流。
 
 ### 1.1.4 面向课程场景的智能助教平台具有现实需求
 
@@ -66,7 +66,7 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 大语言模型在教育领域的应用主要包括智能问答、学习陪伴、作业辅导、教学内容生成、自动反馈和教师教学辅助等方向。相比传统基于规则或模板的问答系统，大语言模型能够理解更灵活的自然语言问题，并生成较自然的解释性文本。对于学生而言，这种能力降低了提问门槛；对于教师而言，模型可以辅助整理资料、生成教案和归纳常见问题。
 
-但是，教育场景对正确性、可解释性和课程一致性要求较高。学生可能依据模型回答进行学习和作业，如果回答不准确且没有证据来源，会直接影响学习效果。因此，当前研究越来越强调将大语言模型与外部知识库、课程资料、教学大纲和人工审核机制结合起来，而不是将模型作为无约束的开放域问答工具。
+但是，教育场景对正确性、可解释性和课程一致性要求较高。学生可能依据模型回答进行学习和作业，回答不准确且没有证据来源会直接影响学习效果。因此，当前研究越来越强调将大语言模型与外部知识库、课程资料、教学大纲和人工审核机制结合起来，使模型输出受到课程知识边界和人工审核机制约束。
 
 ### 1.2.2 基于 RAG 的课程问答与知识服务研究
 
@@ -76,7 +76,7 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 ### 1.2.3 多模态教学资源解析与知识组织研究
 
-真实教学资料具有明显的多模态特征。计算机网络课程中存在协议流程图、网络拓扑图、抓包截图、表格对比和公式说明；其他工程类课程也常包含图像、公式和实验数据表。若系统只处理纯文本内容，就会丢失大量教学信息。
+真实教学资料具有明显的多模态特征。计算机网络课程中存在协议流程图、网络拓扑图、抓包截图、表格对比和公式说明；其他工程类课程也常包含图像、公式和实验数据表。系统只处理纯文本内容时，许多图片、表格和公式中的教学信息难以参与检索。
 
 多模态教学资源解析通常涉及 OCR、版面分析、表格识别、公式提取、图片描述、语音识别和关键帧抽取等技术。香港大学团队提出的 RAG-Anything 框架面向现代文档中的文本、图像、表格、公式等内容，提出将多模态元素视为相互连接的知识实体，并通过双图构建和跨模态混合检索实现统一问答。该思想适合用于课程资料场景，因为课程资料中往往存在跨页面、跨模态、跨知识点的证据组合。
 
@@ -102,17 +102,17 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 ### 1.3.1 研究目标
 
-本文的研究目标包括以下五个方面：
+本文的系统设计目标包括以下五个方面：
 
-第一，设计基于 LLM+RAG 的 AI 助教技术框架，使系统能够基于课程资料而不是单纯依赖模型参数回答问题。
+第一，设计基于 LLM+RAG 的 AI 助教技术框架，使系统能够基于课程资料回答问题，减少对模型参数化知识的直接依赖。
 
 第二，构建面向计算机网络课程的知识库与课程知识图谱原型，将课程资料中的关键词、知识点和来源证据组织为可检索、可追溯的知识结构。
 
 第三，引入 RAG-Anything 作为多模态 RAG 增强主链，使系统具备处理文本、图片、表格和公式等复杂课程资料的架构能力。
 
-第四，开发智能对话系统，支持学生知识点查询、课程答疑、引用溯源、资料推荐和问题反馈，同时支持教师端备课辅助、学情分析和审核处理。
+第四，开发智能对话系统，支持学生知识点查询、课程答疑、引用溯源和问题反馈，同时支持教师端备课辅助、学情分析和审核处理。
 
-第五，建立反馈与评估机制，通过低置信审核、点踩反馈、教师修正、RAGQueryEvent 指标记录和离线 benchmark 支持系统持续改进与性能分析。
+第五，建立反馈与评估机制，通过低置信审核、点踩反馈、教师修正、RAGQueryEvent 指标记录和离线 benchmark 支持系统功能验证与后续改进。
 
 ### 1.3.2 主要研究内容
 
@@ -124,18 +124,18 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 4. 实现课程知识图谱原型构建，将解析关键词转化为实体和共现关系，并保存置信度、来源片段和 provenance 信息。
 5. 实现基于 RAG 的智能问答链路，包括查询改写、多路召回、图谱辅助检索、重排序、生成回答、citation 落库和低置信审核。
 6. 实现教师审核与知识回流机制，使教师修正答案能够作为知识补丁进入后续检索链路。
-7. 实现学习行为记录、学生画像、错题本、闪卡复习、规则推荐和管理端指标接口。
-8. 通过功能测试、回归测试、RAG 性能指标和离线 benchmark 验证系统原型的可行性。
+7. 实现学习行为记录、学生画像、闪卡复习、规则推荐和管理端指标接口，作为辅助学习支持功能。
+8. 通过功能测试、回归测试、RAG 性能指标和离线 benchmark 验证系统主要功能的可用性。
 
 ## 1.4 研究方法与技术路线
 
 本文采用文献研究法、系统分析法、原型实现法和实验测试法。首先，通过研究大语言模型、RAG、LightRAG、RAG-Anything、知识图谱和学习分析等相关技术，确定系统技术路线。其次，结合课程教学场景分析学生、教师和管理员的需求，设计系统功能结构和数据模型。然后，基于 FastAPI、React、SQLAlchemy、RAG-Anything 等技术实现系统原型。最后，通过自动化测试、主流程验证和指标记录分析系统功能和效果。
 
-技术路线可概括为：课程需求分析 -> 总体架构设计 -> 课程资料接入 -> 文档解析与内容分流 -> 语义嵌入与知识图谱构建 -> RAG 检索与答案生成 -> 教师审核与知识回流 -> 学习分析与推荐 -> 系统测试与评估。
+技术路线可概括为：课程需求分析 -> 总体架构设计 -> 班级空间基础功能 -> 课程资料接入 -> 文档解析与内容分流 -> 语义嵌入与知识图谱构建 -> RAG 检索与答案生成 -> 教师审核与知识回流 -> 系统测试与评估。
 
 ## 1.5 论文组织结构
 
-本文共分为六章。第一章介绍研究背景、研究现状、研究目标和技术路线。第二章介绍大语言模型、RAG、RAG-Anything、多模态解析、知识图谱、学习分析和系统架构等关键技术。第三章进行系统需求分析与总体设计，说明用户角色、功能需求、非功能需求、总体架构、业务流程和数据库接口设计。第四章详细介绍 AI 助教平台关键模块实现，包括课程资源入库、RAG-Anything 集成、知识图谱构建、问答链路、审核回流、学习分析和前端交互。第五章介绍系统测试与结果分析，包括测试环境、功能测试、典型案例、性能与稳定性分析以及系统局限。第六章总结全文工作并展望后续改进方向。
+本文共分为六章。第一章介绍研究背景、研究现状、系统设计目标和技术路线。第二章介绍大语言模型、RAG、RAG-Anything、多模态解析、知识图谱和系统架构等关键技术。第三章进行系统需求分析与总体设计，说明用户角色、核心功能需求、辅助功能需求、非功能需求、总体架构、业务流程和数据库接口设计。第四章详细介绍 AI 助教平台关键模块实现，包括班级空间基础功能、课程知识库构建、知识图谱构建、检索增强生成问答、教师审核与知识回流。第五章介绍系统测试与结果分析，包括测试环境、功能测试、知识库构建测试、问答链路测试、性能记录和系统局限。第六章总结全文工作并展望后续改进方向。
 
 ---
 
@@ -145,7 +145,7 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 ### 2.1.1 大语言模型的基本能力
 
-大语言模型通常以 Transformer 架构为基础，通过大规模语料预训练学习语言表达、语义关联和上下文推理能力。经过指令微调和对齐训练后，大语言模型能够根据用户指令完成问答、摘要、解释、翻译、代码辅助和内容生成等任务。对于 AI 助教平台而言，大语言模型最重要的能力不是记住所有课程知识，而是理解学生问题、组织检索到的证据、生成可读性较好的解释，并根据不同角色调整表达方式。
+大语言模型通常以 Transformer 架构为基础，通过大规模语料预训练学习语言表达、语义关联和上下文推理能力。经过指令微调和对齐训练后，大语言模型能够根据用户指令完成问答、摘要、解释、翻译、代码辅助和内容生成等任务。对于 AI 助教平台而言，大语言模型的核心作用是理解学生问题、组织检索到的证据、生成可读性较好的解释，并根据不同角色调整表达方式。
 
 在本文系统中，大语言模型位于问答链路的后端生成阶段。系统先通过 RAG 获取课程证据，再将证据、历史上下文和角色提示发送给生成模型。这样，模型主要负责语言组织和教学化解释，而课程事实依据来自外部知识库。
 
@@ -153,7 +153,16 @@ Keywords: Large Language Model; Retrieval-Augmented Generation; RAG-Anything; Li
 
 提示工程通过角色设定、任务说明、上下文注入、输出格式约束和安全边界控制大模型输出。在课程问答中，提示需要强调“优先依据课程资料回答”“证据不足时说明不确定性”“面向学生给出定义、解释和例子”“面向教师给出结构化教学建议”等要求。
 
-本文系统区分学生端和教师端回答风格。学生端回答强调概念解释、例子和学习建议；教师端回答强调简洁、结构化和课堂应用。提示工程不是孤立存在的，而是与检索证据、教师审核答案和用户角色共同决定最终回答。
+本文系统区分学生端和教师端回答风格。学生端回答强调概念解释、例子和学习建议；教师端回答强调简洁、结构化和课堂应用。提示工程与检索证据、教师审核答案和用户角色共同决定最终回答。
+
+表 2-1 给出了本文系统中大语言模型的主要使用位置。系统通过不同提示词和输入内容将同一类模型能力用于不同任务，避免将模型回答等同于课程知识本身。
+
+| 使用阶段 | 所在模块 | 主要输入 | 主要输出 |
+|---|---|---|---|
+| 课程问答生成 | 检索增强生成问答模块 | 用户问题、历史对话、检索证据、角色约束 | 带引用来源的课程回答 |
+| 查询理解 | 问答预处理与检索模块 | 用户原始问题、上下文、回答模式 | 独立问题、检索焦点词、关键词 |
+| 实体关系抽取 | 知识图谱构建模块 | 文本分块、内容项文本化描述、课程抽取约束 | 实体、关系和描述 |
+| 图片与公式描述 | 多模态解析模块 | 图片、公式截图、表格或图示内容 | OCR 文本、视觉描述、结构化说明 |
 
 ### 2.1.3 大语言模型在教育问答中的局限
 
@@ -181,6 +190,8 @@ RAG 的基本思想是在生成回答前先检索外部知识库，将检索结�
 | 适用场景 | 开放域通用问答 | 课程边界明确的教学问答 |
 | 主要风险 | 幻觉、知识过期 | 检索质量不足、资料覆盖不全 |
 
+本文未对 RAG 算法本身进行理论改进，主要工作是在课程教学场景下完成系统集成与应用适配。系统通过课程资料入库、引用来源保存、图谱展示、教师审核和知识回流等工程机制，使 RAG 能够服务于具体课程的资料问答和教学管理。
+
 ## 2.3 LightRAG 与 RAG-Anything
 
 ### 2.3.1 LightRAG 的图增强 RAG 思想
@@ -192,6 +203,15 @@ LightRAG 是一种图增强检索生成框架，其核心思想是将知识片�
 RAG-Anything 是香港大学团队在 LightRAG 基础上提出的 All-in-One 多模态 RAG 框架。官方仓库说明其支持从文档摄入、解析到多模态问答的端到端流程，可处理 PDF、Office 文档、图片、文本文件等格式，并针对图像、表格、数学公式和异构内容提供专门处理器。其论文强调将多模态内容视为相互连接的知识实体，通过双图构建同时捕获跨模态关系与文本语义，再通过跨模态混合检索结合结构导航和语义匹配。
 
 在本文系统中，RAG-Anything 被用作增强型 RAG 主链。系统不直接复制其底层所有算法，而是通过适配层将其接入课程资料入库和问答流程。文档解析默认使用 MinerU，解析方式为 auto；嵌入函数、生成函数和视觉函数由系统根据模型路由注入。RAG-Anything 负责处理复杂多模态文档和增强检索，本地数据库负责保存课程业务状态、解析任务、图谱原型、引用和审核记录。
+
+| 技术或工具 | 在系统中的角色 | 选用原因 | 使用边界 |
+|---|---|---|---|
+| LightRAG | 图增强检索与实体关系索引基础 | 支持 local、global、hybrid 等图检索模式 | 底层索引结果需通过业务表投影后用于前端展示 |
+| RAG-Anything | 多模态资料解析与检索主链 | 支持文档、图片、表格和公式等内容进入统一 RAG 流程 | 音视频深度处理依赖额外 ASR、关键帧和 VLM 能力 |
+| MinerU | 文档版面解析 | 适合解析 PDF、课件等包含复杂版面的课程资料 | 解析质量受文件清晰度和版面复杂度影响 |
+| SQLAlchemy | 后端 ORM 与数据库访问 | 统一管理用户、课程、资料、审核和学习记录 | 不是具体数据库产品，开发环境与部署环境可切换 |
+| SQLite/PostgreSQL | 关系数据库 | SQLite 适合开发调试，PostgreSQL 适合部署环境 | 不保存向量检索内部全部索引结构 |
+| MinIO/本地存储 | 文件存储 | 保存原始课件、图片和解析中间文件 | 与关系数据库共同构成资料存储层 |
 
 ### 2.3.3 双图机制在本文中的理解
 
@@ -207,13 +227,20 @@ RAG-Anything 的双图思想可理解为文本语义图和跨模态关系图。�
 
 ## 2.5 知识图谱与课程知识组织
 
-知识图谱以实体、关系和属性组织知识。在课程场景中，实体可表示知识点、术语、章节主题或公式，关系可表示共现、相关、先修或应用关系。本文系统构建的是课程知识图谱原型，而不是成熟专家图谱。其主要作用包括知识可视化、图谱辅助检索、资料来源追踪和后续学习推荐支撑。
+知识图谱以实体、关系和属性组织知识。在课程场景中，实体可表示知识点、术语、章节主题或公式，关系可表示共现、相关、先修或应用关系。本文系统构建课程知识图谱原型，主要作用包括知识可视化、图谱辅助检索、资料来源追踪和后续学习推荐支撑。
 
 系统将解析关键词转化为知识实体，将相邻或共现关键词建立为关系，并为实体和关系保存置信度、来源资料、页码、分块编号、模态类型和 provenance。这样，图谱不仅能展示概念之间的关系，也能追溯到具体课程资料。
 
+| 图谱元素 | 本文中的含义 | 示例类型 |
+|---|---|---|
+| 实体 | 课程中具有教学意义的知识对象 | 课程概念、公式、算法、实验步骤、工具、考核点 |
+| 关系 | 实体之间的教学或语义联系 | 先修、组成、解释、应用、考查、对比、相关 |
+| 来源 | 支撑实体或关系的资料位置 | 文件、页码、分块、内容项、模态类型 |
+| 属性 | 前端展示和检索辅助所需信息 | 置信度估计、出现次数、更新时间、provenance |
+
 ## 2.6 学习分析与个性化支持
 
-学习分析通过记录学生提问、资料访问、错题、闪卡复习和任务完成情况，形成对学生学习状态的描述。个性化支持则依据这些行为和知识库信息推荐资料、提示薄弱点或生成学习建议。本文系统采用规则驱动的推荐与画像构建方式，优先保证可解释性和原型可运行性。后续可在积累更多真实学习数据后引入复杂推荐模型。
+学习分析通过记录学生提问、资料访问、错题、闪卡复习和任务完成情况，形成对学生学习状态的描述。个性化支持则依据这些行为和知识库信息推荐资料、提示薄弱点或生成学习建议。本文系统采用规则驱动的推荐与画像构建方式，优先考虑可解释性和原型可运行性。后续可在积累更多真实学习数据后引入复杂推荐模型。
 
 ## 2.7 前后端分离与模块化架构
 
@@ -227,7 +254,7 @@ RAG-Anything 的双图思想可理解为文本语义图和跨模态关系图。�
 
 ### 3.1.1 学生用户场景
 
-学生用户主要需求包括查看课程资料、向 AI 助教提问、上传题目图片或文档、查看引用来源、对回答点赞或点踩、查看推荐资料、使用错题本和闪卡复习、查看学习周报或月报。学生端强调学习支持和交互体验，系统需要提供及时、可追溯、易理解的回答。
+学生用户主要需求包括查看课程资料、向 AI 助教提问、上传题目图片或文档、查看引用来源、对回答点赞或点踩、查看推荐资料、使用闪卡复习、查看学习记录。学生端强调学习支持和交互体验，系统需要提供及时、可追溯、易理解的回答。
 
 ### 3.1.2 教师用户场景
 
@@ -239,21 +266,36 @@ RAG-Anything 的双图思想可理解为文本语义图和跨模态关系图。�
 
 ## 3.2 功能需求分析
 
-| 功能模块 | 主要需求 | 说明 |
+系统功能需求分为核心功能和辅助功能。核心功能直接支撑课程资料入库、知识库构建、课程问答和教师审核闭环；辅助功能用于完善课程空间管理、学习记录和运行维护。
+
+**表 3-1 系统功能需求划分表**
+
+| 功能类型 | 功能模块 | 主要需求 | 说明 |
 |---|---|---|
-| 用户与权限 | 注册、登录、JWT 鉴权、角色控制 | 支持学生、教师、管理员 |
-| 课程与班级 | 课程创建、班级加入、成员管理 | 支持课程空间组织 |
-| 资料管理 | 上传、下载、预览、分析、去重 | 支持 local/MinIO 存储 |
-| 知识库构建 | 解析、分块、索引、状态查询、重试 | 支持同步和异步任务 |
-| 知识图谱 | 实体、关系、置信度、来源追踪 | 构建课程图谱原型 |
-| 智能问答 | 多轮对话、RAG 检索、生成回答、引用来源 | 支持学生端与教师端 |
-| 审核回流 | 低置信触发、点踩触发、教师修正、回灌知识库 | 提升回答可信性 |
-| 学习支持 | 学习记录、错题本、闪卡、推荐、报告 | 支持个性化学习 |
-| 管理监控 | 模型配置、RAG 性能、索引任务、实验结果 | 支持运行治理 |
+| 核心功能 | 用户与权限 | 注册、登录、JWT 鉴权、角色控制 | 支持学生、教师、管理员 |
+| 核心功能 | 班级空间 | 课程创建、班级加入、成员管理 | 支撑课程上下文和权限边界 |
+| 核心功能 | 资料管理 | 上传、下载、预览、去重、状态查看 | 支持 local/MinIO 存储 |
+| 核心功能 | 知识库构建 | 解析、分块、索引、状态查询、失败重试 | 支持同步和异步任务 |
+| 核心功能 | 知识图谱 | 实体、关系、来源追踪、图谱展示 | 构建课程图谱原型 |
+| 核心功能 | 智能问答 | 多轮对话、RAG 检索、生成回答、引用来源 | 支持学生端与教师端 |
+| 核心功能 | 审核回流 | 低可信度触发、点踩触发、教师修正、回灌知识库 | 支持回答纠错闭环 |
+| 辅助功能 | 通知与任务 | 通知发布、作业或测验发布、提交记录 | 支撑班级教学管理 |
+| 辅助功能 | 学习支持 | 学习记录、学生画像、闪卡、资料推荐 | 支持可解释的学习辅助 |
+| 辅助功能 | 管理监控 | 模型配置、RAG 性能、索引任务、实验结果 | 支持运行维护 |
 
 ## 3.3 非功能需求分析
 
-系统需要满足以下非功能需求。第一，可用性方面，学生和教师应能通过清晰页面完成提问、上传和审核等操作。第二，可维护性方面，后端采用模块化结构，RAG、解析器、存储和模型服务通过适配层接入，便于替换。第三，可扩展性方面，系统支持 RAG 引擎切换、模型路由、MinIO 存储、Celery 队列和多模态字段扩展。第四，安全性方面，系统使用 JWT 鉴权和角色权限控制，保证学生、教师、管理员访问边界。第五，稳定性方面，系统通过 fallback、重试、错误分类和管理员告警降低外部模型或解析器不可用带来的影响。
+系统非功能需求及对应设计措施如表 3-2 所示。
+
+**表 3-2 非功能需求设计表**
+
+| 非功能需求 | 设计措施 | 验证方式 |
+|---|---|---|
+| 可用性 | 学生端、教师端和管理端分角色组织页面；核心操作提供状态反馈 | 功能测试和主流程操作验证 |
+| 可维护性 | 后端采用模块化单体结构；RAG、解析器、存储和模型服务通过适配层接入 | 代码结构检查和接口测试 |
+| 可扩展性 | 支持 RAG 引擎切换、模型路由、MinIO 存储、Celery 队列和多模态字段扩展 | 配置切换测试和回退链路测试 |
+| 安全性 | 使用 JWT 鉴权、角色权限控制和班级成员校验 | 未授权访问、越权访问和角色隔离测试 |
+| 稳定性 | 设置 fallback、重试、错误分类和索引任务状态记录 | 异常输入测试、任务失败重试测试 |
 
 ## 3.4 系统总体架构设计
 
@@ -263,7 +305,7 @@ RAG-Anything 的双图思想可理解为文本语义图和跨模态关系图。�
 
 后端业务层使用 FastAPI 实现统一接口，API 路径以 `/api/v1` 为前缀。业务服务层包括认证服务、课程服务、知识库服务、聊天服务、学习分析服务、任务服务、闪卡服务、管理服务和模型路由服务。统一响应结构包含 code、message、data 和 meta，便于前后端联调。
 
-AI 知识处理层包括 RAG-Anything 适配器、本地 SimpleRAGEngine、查询改写模块、reranker 抽象层、简单解析器和模型路由服务。RAG-Anything 作为增强主链，负责多模态文档处理和混合检索；SimpleRAGEngine 作为回退链，保证无完整模型依赖时系统仍可运行。
+AI 知识处理层包括 RAG-Anything 适配器、本地 SimpleRAGEngine、查询改写模块、reranker 抽象层、简单解析器和模型路由服务。RAG-Anything 作为增强主链，负责多模态文档处理和混合检索；SimpleRAGEngine 作为回退链，支撑无完整模型依赖时的基础运行。
 
 数据基础设施层包括数据库、对象存储、缓存与队列。数据库开发环境默认 SQLite，部署环境可使用 PostgreSQL；存储支持本地文件系统和 MinIO；Redis 可用于缓存和 Celery broker；Celery 用于异步索引任务。
 
@@ -271,25 +313,118 @@ AI 知识处理层包括 RAG-Anything 适配器、本地 SimpleRAGEngine、查�
 
 ### 3.5.1 课程资料上传入库流程
 
-资料上传流程为：教师选择课程和班级 -> 上传文件 -> 系统校验权限 -> 计算文件哈希 -> 检测重复文件 -> 保存到本地或 MinIO -> 创建 Material 资料记录 -> 创建或更新 FileParseTask -> 根据配置同步执行或提交 Celery 队列 -> 调用 RAG-Anything 或本地解析器 -> 生成文本分块和 content items -> 同步课程知识图谱原型 -> 更新 KBSpace 状态 -> 返回解析任务和知识库状态。
+资料上传入库流程的目标是把教师上传的原始文件转化为可检索、可引用的课程知识。流程输入包括班级编号、上传教师、文件内容和资料类型；输出包括资料记录、解析任务、文本分块、内容项、索引状态和图谱投影。系统先校验教师是否拥有班级管理权限，再计算文件哈希并判断重复文件。新文件保存到本地存储或 MinIO 后，系统写入资料元数据并创建解析任务。后台任务完成文档解析、内容文本化、分块、索引写入和业务图谱同步，最后更新资料与知识空间状态。文件解析失败时，系统记录错误类别和重试信息，教师端和管理端可查看处理状态。
 
 ### 3.5.2 基于 RAG 的课程问答流程
 
-问答流程为：用户输入问题和附件 -> 系统保存用户消息 -> 读取历史对话 -> 加载模型路由配置 -> 选择 RAG 引擎 -> 执行 RAG-Anything 主链查询 -> 若主链失败则进入本地 fallback -> 查询改写和多路召回 -> 图谱辅助检索 -> reranker 重排序 -> 组织 top-k 证据 -> 调用生成模型或规则摘要 -> 保存 AI 消息和 citation -> 根据置信度触发审核 -> 返回回答、来源、建议追问和置信度。
+课程问答流程的目标是基于班级知识库生成带来源的回答。流程输入包括用户问题、聊天历史、班级上下文、用户角色和当前轮附件；输出包括回答正文、引用来源、质量标记和审核状态。系统保存用户消息后，根据回答模式判断是否进入课程检索。课程相关问题经过上下文整理和查询预处理后进入底层检索，系统根据高层关键词和低层关键词执行 local 与 global 双路召回，并结合多模态内容项、候选证据重排和引用标识生成最终上下文。生成模型依据检索证据组织回答，回答与引用来源保存到数据库。来源不足、质量标记较低或学生点踩时，系统创建教师审核项。
 
 ### 3.5.3 教师审核与知识回流流程
 
-审核回流流程为：系统发现低置信回答或学生点踩 -> 创建 ReviewItem -> 教师查看原问题和 AI 回答 -> 教师提交修正答案 -> 系统创建 ReviewSyncRecord -> 若教师选择加入知识库，则将问答对插入 RAG-Anything 或本地知识空间 -> 后续相似问题优先使用教师修正答案作为证据。
+审核回流流程的目标是让教师对 AI 回答进行质量把关，并将确认后的修正内容补充到课程知识库。流程输入包括原始问题、AI 回答、引用来源、学生反馈和触发原因；输出包括审核项、教师修正答案、同步记录和补充知识。教师在审核页面查看待处理问题后提交修正答案，系统更新审核项状态并创建同步记录。教师选择回流知识库时，系统将“问题-教师答案”组织为补充问答知识写入课程知识空间，后续相似问题可以检索到该补充内容。
 
 ### 3.5.4 学习分析与推荐流程
 
-学习分析流程为：系统记录学生提问、点踩、错题、闪卡复习和任务行为 -> 更新学习记录和学生画像 -> 结合近期问题、薄弱知识点、资料关键词和图谱实体生成推荐候选 -> 按规则评分并展示推荐资料 -> 管理端按模型路由切片分析问答和学习指标。
+学习分析与推荐属于辅助流程。系统记录学生提问、负反馈、闪卡复习、任务提交和推荐点击等行为，更新学习记录和学生画像。推荐接口结合近期问题、薄弱主题、资料关键词和图谱实体生成候选资料，再按规则排序并展示推荐理由。该流程用于补充学习支持，不作为本文主要结论依据。
 
 ## 3.6 数据库与接口设计
 
-系统核心数据库实体包括用户、课程、班级、班级成员、资料、任务、提交、知识空间、解析任务、知识实体、知识关系、聊天会话、聊天消息、引用、审核项、审核同步记录、学习记录、学生画像、错题、闪卡、通知和管理员设置。课程与班级构成教学组织基础；资料、知识空间和解析任务构成知识库生命周期；知识实体和关系构成课程知识图谱原型；聊天消息、引用和审核记录构成问答闭环；学习记录、画像、错题和闪卡构成学习支持。
+系统数据库采用关系模型组织业务数据，后端通过 SQLAlchemy ORM 完成对象映射。开发环境使用 SQLite 便于本地调试，部署环境可切换为 PostgreSQL。数据库设计围绕班级空间展开，所有课程资料、问答会话、知识图谱、审核记录和学习行为均通过课程或班级标识建立关联，从而实现不同班级之间的数据隔离。
+
+系统核心数据库实体可划分为五类。第一类是用户与班级组织实体，包括 `users`、`courses`、`classes` 和 `class_members`，用于保存学生、教师、管理员身份信息以及课程班级成员关系。第二类是教学管理实体，包括 `tasks`、`submissions`、`notifications` 和 `discussions`，用于支撑通知发布、作业考试、学生提交和班级讨论。第三类是知识库实体，包括 `materials`、`kb_spaces` 和 `file_parse_tasks`，用于记录课程资料、知识空间状态和文件解析任务。第四类是知识图谱与问答闭环实体，包括 `knowledge_entities`、`knowledge_relations`、`chat_sessions`、`chat_messages`、`chat_citations`、`review_items` 和 `review_sync_records`，用于保存课程知识点、图谱关系、问答消息、引用来源和教师审核回流记录。第五类是学习支持与运行监控实体，包括 `learning_records`、`student_profiles`、`study_mistakes`、`flashcards`、`flashcard_records`、`rag_query_events` 和 `admin_settings`，用于学习行为统计、画像生成、复习记录、问答事件分析和系统配置。
+
+表 3-3 给出了主要数据表的设计说明。为避免论文中过多罗列字段，表中只展示各表承担的核心职责和关键字段。
+
+**表 3-3 核心数据表设计说明**
+
+| 实体类别 | 数据表 | 关键字段 | 主要作用 |
+|---|---|---|---|
+| 用户与组织 | `users` | `id`、`email`、`role`、`student_id`、`teacher_id` | 保存用户身份、账号和角色信息 |
+| 用户与组织 | `courses` | `id`、`name`、`code`、`created_by` | 保存课程基本信息 |
+| 用户与组织 | `classes` | `id`、`course_id`、`teacher_id`、`invite_code` | 保存班级空间和邀请码 |
+| 用户与组织 | `class_members` | `id`、`class_id`、`user_id`、`role` | 保存学生、教师与班级的成员关系 |
+| 教学管理 | `tasks` | `id`、`class_id`、`created_by`、`task_type`、`due_date` | 保存作业、考试、测验等任务 |
+| 教学管理 | `submissions` | `id`、`task_id`、`student_id`、`status` | 保存学生提交内容和提交状态 |
+| 教学管理 | `notifications` | `id`、`user_id`、`title`、`type`、`is_read` | 保存系统通知和班级通知 |
+| 知识库 | `materials` | `id`、`class_id`、`uploaded_by`、`file_path`、`kb_status` | 保存课程资料元数据和知识库状态 |
+| 知识库 | `kb_spaces` | `id`、`course_id`、`class_id`、`status` | 保存课程或班级知识空间状态 |
+| 知识库 | `file_parse_tasks` | `id`、`kb_space_id`、`material_id`、`status`、`error_message` | 保存资料解析和索引任务状态 |
+| 知识图谱 | `knowledge_entities` | `id`、`class_id`、`name`、`entity_type`、`source_material_id` | 保存课程知识实体 |
+| 知识图谱 | `knowledge_relations` | `id`、`class_id`、`source_id`、`target_id`、`relation_type` | 保存知识实体之间的关系 |
+| 问答闭环 | `chat_sessions` | `id`、`class_id`、`user_id`、`title` | 保存用户在班级内的问答会话 |
+| 问答闭环 | `chat_messages` | `id`、`session_id`、`role`、`content`、`confidence` | 保存用户消息和 AI 回答 |
+| 问答闭环 | `chat_citations` | `id`、`message_id`、`source_title`、`page`、`score` | 保存回答引用来源 |
+| 问答闭环 | `review_items` | `id`、`message_id`、`class_id`、`student_id`、`status` | 保存低可信度回答和负反馈审核项 |
+| 问答闭环 | `review_sync_records` | `id`、`review_id`、`class_id`、`sync_status` | 保存教师修正答案回流知识库的同步记录 |
+| 学习支持 | `learning_records` | `id`、`user_id`、`class_id`、`activity_type` | 保存学习行为记录 |
+| 学习支持 | `student_profiles` | `id`、`user_id`、`weak_topics`、`strong_topics` | 保存学生画像快照 |
+| 学习支持 | `flashcards` | `id`、`class_id`、`user_id`、`question`、`answer` | 保存闪卡复习内容 |
+| 运行监控 | `rag_query_events` | `id`、`class_id`、`user_id`、`latency_ms`、`fallback_reason` | 保存 RAG 查询事件和性能指标 |
+
+各实体之间的关系以外键约束为主。`courses` 与 `classes` 是一对多关系，一个课程可以包含多个班级；`classes` 与 `class_members` 是一对多关系，班级成员表连接用户和班级；`classes` 与 `materials`、`tasks`、`chat_sessions`、`knowledge_entities` 均是一对多关系，体现班级空间是系统数据隔离的核心边界。知识库侧，`materials` 与 `file_parse_tasks` 关联，解析任务归属于具体知识空间 `kb_spaces`；图谱侧，`knowledge_relations` 通过 `source_id` 和 `target_id` 同时关联 `knowledge_entities`，形成实体之间的有向关系。问答侧，`chat_sessions` 包含多条 `chat_messages`，AI 回答消息可以关联多条 `chat_citations`，也可以在低可信度或负反馈情况下生成 `review_items`；教师处理审核后，`review_sync_records` 记录修正答案是否成功回流到知识库。学习支持侧，`learning_records`、`student_profiles` 和 `flashcards` 均以用户和班级为关联条件，用于统计学生在不同课程空间中的学习状态。
+
+**图 3-3 系统核心数据库 ER 图**
+
+```mermaid
+erDiagram
+    USERS ||--o{ COURSES : creates
+    USERS ||--o{ CLASSES : teaches
+    USERS ||--o{ CLASS_MEMBERS : joins
+    COURSES ||--o{ CLASSES : contains
+    CLASSES ||--o{ CLASS_MEMBERS : has
+
+    CLASSES ||--o{ MATERIALS : owns
+    USERS ||--o{ MATERIALS : uploads
+    COURSES ||--o{ KB_SPACES : has
+    CLASSES ||--o{ KB_SPACES : has
+    KB_SPACES ||--o{ FILE_PARSE_TASKS : includes
+    MATERIALS ||--o{ FILE_PARSE_TASKS : parsed_by
+
+    CLASSES ||--o{ KNOWLEDGE_ENTITIES : contains
+    MATERIALS ||--o{ KNOWLEDGE_ENTITIES : sources
+    KNOWLEDGE_ENTITIES ||--o{ KNOWLEDGE_RELATIONS : source
+    KNOWLEDGE_ENTITIES ||--o{ KNOWLEDGE_RELATIONS : target
+
+    CLASSES ||--o{ TASKS : publishes
+    TASKS ||--o{ SUBMISSIONS : receives
+    USERS ||--o{ SUBMISSIONS : submits
+    USERS ||--o{ NOTIFICATIONS : receives
+
+    CLASSES ||--o{ CHAT_SESSIONS : has
+    USERS ||--o{ CHAT_SESSIONS : starts
+    CHAT_SESSIONS ||--o{ CHAT_MESSAGES : contains
+    CHAT_MESSAGES ||--o{ CHAT_CITATIONS : cites
+    CHAT_MESSAGES ||--o| REVIEW_ITEMS : triggers
+    REVIEW_ITEMS ||--o{ REVIEW_SYNC_RECORDS : syncs
+    USERS ||--o{ REVIEW_ITEMS : reviewed_by
+
+    USERS ||--o{ LEARNING_RECORDS : generates
+    CLASSES ||--o{ LEARNING_RECORDS : records
+    USERS ||--o| STUDENT_PROFILES : has
+    USERS ||--o{ FLASHCARDS : owns
+    FLASHCARDS ||--o{ FLASHCARD_RECORDS : reviews
+    USERS ||--o{ RAG_QUERY_EVENTS : triggers
+    CLASSES ||--o{ RAG_QUERY_EVENTS : records
+```
+
+图 3-3 展示的是系统核心业务 ER 关系，省略了部分扩展表和枚举字段。实际实现中，个性化推荐还包含概念掌握度、学习偏好、风险信号、学习路径和推荐事件等扩展实体；管理端还包含管理员设置和审计事件等实体。这些扩展表围绕用户、班级和知识实体继续建立外键关系，不改变核心数据模型的组织方式。
 
 核心接口包括认证接口、课程接口、班级接口、资料上传与分析接口、知识库状态与任务接口、知识图谱接口、课程搜索接口、聊天问答接口、反馈接口、审核接口、学习报告接口、闪卡接口和管理端指标接口。接口设计遵循统一响应结构，便于前端处理成功和错误状态。
+
+**表 3-4 前端页面与后端接口对应关系**
+
+| 前端页面 | 主要功能 | 后端接口或模块 |
+|---|---|---|
+| 登录与注册页 | 验证码、注册、登录、获取当前用户 | 认证接口、用户服务 |
+| 教师课程页 | 班级创建、成员管理、任务通知发布 | 班级接口、任务接口、通知接口 |
+| 课程资料页 | 资料上传、资料列表、预览、知识库状态 | 资料接口、知识库任务接口 |
+| 知识图谱页 | 图谱节点边展示、搜索和详情查看 | 知识图谱接口 |
+| AI 助教页 | 多轮问答、附件理解、引用展示、反馈 | 聊天接口、RAG 服务、反馈接口 |
+| 教师审核页 | 待审核回答查看、修正、知识回流 | 审核接口、知识库同步服务 |
+| 学习支持页 | 学习记录、画像、闪卡和推荐 | 学习分析接口、推荐服务 |
+| 管理端页面 | 模型路由、索引任务、RAG 性能记录 | 管理接口、模型路由服务 |
+
+从数据流角度看，系统以班级空间作为课程资料和用户行为的边界。教师上传资料后，文件进入存储层，资料元数据和解析任务进入关系数据库，解析和索引结果进入底层 RAG 存储并同步生成业务侧图谱投影。学生提问时，系统从聊天记录、班级知识库、图谱投影和教师审核补充知识中组织证据，生成回答后再将消息、引用、质量标记和反馈写回数据库。该数据流使资料入库、问答生成和教师审核形成连续闭环。
 
 ## 3.7 本章小结
 
@@ -297,269 +432,277 @@ AI 知识处理层包括 RAG-Anything 适配器、本地 SimpleRAGEngine、查�
 
 ---
 
-# 第四章 AI助教平台关键模块设计与实现
+# 第四章 系统关键模块设计与实现
 
-## 4.1 平台关键模块总体实现思路
+本章在第三章总体设计基础上，围绕系统核心业务链路说明关键模块的实现方式。章节按照班级空间基础功能、课程知识库构建、知识图谱构建、检索增强生成问答、教师审核与知识回流、辅助学习功能组织内容，重点说明数据如何进入系统、如何被解析和索引、如何参与问答，以及教师修正内容如何回到知识库。
 
-本系统面向高校课程教学场景，目标是构建一个能够支持课程资料管理、知识库动态更新、基于课程证据的智能问答、教师审核回流以及学习分析的 AI 助教平台。系统整体采用前后端分离架构：前端使用 React、Vite、TypeScript 和 Tailwind CSS 构建学生端、教师端和管理端界面；后端使用 FastAPI 提供统一 REST API；数据库访问使用 SQLAlchemy ORM；数据存储支持本地文件系统和 MinIO 对象存储；异步索引任务通过 Celery 预留队列能力；RAG 知识引擎层采用 RAG-Anything 增强主链与 SimpleRAGEngine 本地回退链并存的方式实现。
+## 4.1 班级空间基础功能实现
 
-系统的技术重点不是简单调用一个大模型接口，而是将 LLM、Embedding、VLM、Parser、Reranker、数据库和存储共同组织为一条可追溯的课程知识处理链。默认配置中，生成模型可通过 OpenAI-compatible API 或本地模型服务提供，嵌入模型默认配置为 `text-embedding-3-small`，嵌入维度为 1536，RAG-Anything 解析器默认使用 MinerU，查询模式默认使用 mix。系统同时支持 mock 回退，用于无外部模型依赖时的开发和演示。
+### 4.1.1 模块概述
 
-## 4.2 课程资源管理与知识库构建模块设计与实现
+班级空间是系统中课程资料、成员权限、教学任务和 AI 问答的业务边界。教师创建班级后，系统生成邀请码并写入班级记录；学生通过邀请码加入班级后，系统建立学生与班级之间的成员关系。后续资料上传、任务发布、课程问答、知识图谱访问和教师审核均依据该成员关系进行权限判断。
 
-### 4.2.1 模块功能概述
+本模块采用前端页面调用后端 REST 接口、后端服务层封装业务规则、关系数据库保存业务状态的实现方式。除文件上传接口使用 `multipart/form-data` 外，注册、登录、班级创建、班级加入、任务发布和通知发布均以 JSON 请求体发送到后端。FastAPI 路由接收请求后，通过 Pydantic 模型校验字段，再由服务层完成数据库写入和权限判断。
 
-课程资源管理与知识库构建模块是知识服务链路的起点。教师上传课程资料后，系统需要完成文件保存、资料登记、重复检测、解析任务创建、文档解析、内容分块、多模态结构化、语义索引、图谱同步和状态更新。这个过程将原本静态的课程文件转化为可检索、可引用、可动态更新的知识库。
+### 4.1.2 功能实现
 
-### 4.2.2 文件上传、存储与元数据落库
+用户认证流程由验证码发送、账号注册、账号登录和当前用户信息获取组成。前端注册页面先调用验证码接口，提交邮箱和用途字段。后端生成 6 位数字验证码，将邮箱、验证码、用途、是否已使用、过期时间和创建时间写入 `verify_codes` 表。验证码有效期为 10 分钟；同一邮箱和用途下生成新验证码时，系统将旧验证码置为已使用，避免多个验证码同时有效。
 
-上传开始时，系统首先进行权限判断，确保教师只能向自己有权限的课程和班级上传资料。随后系统读取文件内容并计算 SHA-256 哈希值，用于判断同一班级下是否已有相同文件。若存在重复文件，系统复用已有资料和索引任务，避免重复解析和重复嵌入。
+注册请求发送到 `/auth/register`。学生注册请求包含姓名、学号、邮箱、密码、确认密码、验证码、学院、专业和年级等字段；教师注册请求包含姓名、工号、邮箱、密码、验证码、院系和职称等字段。后端先校验两次密码一致性，再检查 `users` 表中邮箱是否重复。验证码校验通过后，系统使用 bcrypt 对密码进行哈希处理，并将用户基础信息与学生或教师扩展字段写入 `users` 表。登录请求发送到 `/auth/login`，账号字段支持邮箱、学号或工号。密码校验通过后，系统生成 JWT 访问令牌，令牌 payload 包含用户编号、用户角色、签发时间和过期时间。前端在后续请求头中携带 `Bearer <token>`，后端统一认证依赖解析令牌并查询当前用户。
 
-对于新文件，系统通过存储适配层保存原始文件。开发阶段可使用本地文件系统，文件保存到上传目录；部署阶段可切换到 MinIO 对象存储。MinIO 适合保存大量课件、图片和实验资料，能够与后端服务解耦。文件保存后，系统在数据库中创建资料元数据，记录文件名、文件路径、大小、MIME 类型、资料类型、上传者、班级和知识库状态。资料状态初始为 pending，表示文件已经进入系统但尚未完成知识库构建。
+教师创建班级请求发送到 `/classes`。后端校验教师角色后，先判断请求中是否指定已有课程；指定课程时校验课程有效性，未指定课程时在 `courses` 表创建课程记录。随后系统生成 8 位邀请码，字符来源为大写字母和数字，并查询 `classes.invite_code` 判断冲突；邀请码重复时重新生成。班级创建成功后，系统向 `classes` 表写入课程编号、教师编号、班级名称、学期、邀请码和启用状态，并向 `class_members` 表写入教师成员关系。学生加入班级请求发送到 `/classes/join`，后端根据邀请码查询有效班级，再检查 `class_members` 表中是否已有该学生的成员记录，未加入时写入学生成员关系，重复加入时返回错误提示。
 
-### 4.2.3 同步索引与异步索引
+通知、作业、考试和测验统一依托班级权限实现。教师发布通知时，系统校验教师是否为该班级任课教师，再根据通知范围查询 `class_members` 表，为接收者写入 `notifications` 记录。教师创建任务时，系统向 `tasks` 表写入任务标题、描述、类型、截止时间、满分和发布状态；学生查询任务时只返回已发布任务。学生提交任务时，系统校验学生班级成员关系，再查询 `submissions` 表中是否已有提交记录；已有记录则更新，无记录则新建。提交完成后，系统向 `learning_records` 表写入任务提交行为，供后续学习统计使用。
 
-系统支持同步和异步两种索引方式。同步索引适合小文件和开发调试，上传接口在请求内直接执行解析和入库。异步索引适合较大文件或批量资料，系统先创建解析任务，再将任务提交给 Celery 队列，由 worker 在后台处理。异步方式返回解析任务 ID 和队列任务 ID，教师或管理员可以通过任务接口查询状态。
+**表 4-1 班级空间主要数据表**
 
-解析任务记录了资料从 pending 到 processing、completed 或 failed 的状态变化。任务元数据中保存尝试次数、最大重试次数、错误类别、队列状态、是否可重试、下一次重试时间和历史事件。通过这种任务化设计，知识库构建过程具有可观测性和可恢复性。
+| 数据表 | 写入时机 | 关键字段 | 作用 |
+|---|---|---|---|
+| `users` | 用户注册 | 邮箱、密码摘要、姓名、角色、学号或工号 | 保存用户身份信息 |
+| `verify_codes` | 发送验证码 | 邮箱、验证码、用途、是否使用、过期时间 | 支持邮箱验证码注册 |
+| `courses` | 教师创建课程或班级 | 课程名称、课程编号、描述、创建者 | 保存课程基本信息 |
+| `classes` | 教师创建班级 | 课程编号、教师编号、班级名称、学期、邀请码 | 保存班级空间信息 |
+| `class_members` | 创建班级或学生加入 | 班级编号、用户编号、成员角色 | 保存班级成员关系 |
+| `tasks` | 教师发布任务 | 班级编号、标题、类型、截止时间、发布状态 | 保存作业、考试和测验任务 |
+| `submissions` | 学生提交任务 | 任务编号、学生编号、内容、附件、状态 | 保存学生提交记录 |
+| `notifications` | 教师发布通知 | 接收用户、类型、标题、内容、已读状态 | 保存通知消息 |
 
-### 4.2.4 RAG-Anything 入库处理链路
+**图 4-1 班级创建与加入流程图**
 
-当系统选择 RAG-Anything 作为知识引擎时，入库过程由增强主链执行。系统按班级创建独立的 RAG-Anything 工作目录和解析输出目录，避免不同课程资料混杂。初始化 RAG-Anything 时，系统配置 MinerU 解析器、auto 解析方式和最大并发文件数，并向框架注入生成模型函数、嵌入模型函数和视觉模型函数。
+```mermaid
+flowchart TB
+    A["教师提交创建班级请求"] --> B["校验教师身份"]
+    B --> C["创建或复用课程记录"]
+    C --> D["生成唯一邀请码"]
+    D --> E["写入班级记录"]
+    E --> F["写入教师成员关系"]
+    G["学生提交邀请码"] --> H["查询有效班级"]
+    H --> I["检查是否已加入"]
+    I --> J["写入学生成员关系"]
+    J --> K["获得班级访问权限"]
+```
 
-具体处理过程为：系统将上传文件路径、输出目录、解析方式、文档 ID 和文件名传入 RAG-Anything 的完整文档处理流程。RAG-Anything 先进行文档解析，把 PDF、Office 文档、图片或文本文件拆解为文本块、图像、表格、公式等内容元素；随后进行内容分析和知识图谱索引，建立文本语义关系和跨模态关系；最后将结果写入 LightRAG/RAG-Anything 的工作目录，用于后续检索。
+## 4.2 课程知识库构建模块
 
-在本系统中，RAG-Anything 处理完成后，后端还会把必要结果同步到业务数据库，包括摘要、提取文本、文本分块、多模态内容项、处理状态和质量标签。质量标签用于判断资料是 complete、partial、text_only、multimodal_only 还是 failed。当文本处理成功但多模态处理未完全成功时，系统仍允许资料进入可检索状态，同时记录告警信息，便于教师理解资料处理边界。
+### 4.2.1 模块概述
 
-### 4.2.5 本地回退解析链路
+课程知识库构建模块负责将教师上传的课程资料转换为可检索、可引用和可展示的知识资源。模块输入包括原始资料文件、资料元数据、班级标识和上传教师信息；输出包括资料记录、解析任务、文本分块、内容项、向量索引、图谱索引和业务侧知识图谱投影。系统将原始文件、业务元数据和索引产物分层保存：原始文件用于下载、预览和重新解析；关系数据库保存资料状态、解析任务和前端展示信息；底层 RAG 存储保存文本分块、实体、关系、向量项和图结构，用于后续检索。
 
-为了保证系统在缺少完整 RAG-Anything 依赖、模型 API 或解析器环境时仍可运行，系统保留本地 SimpleRAGEngine。回退解析器会直接读取 txt、md、代码、json、csv、html、css 等文本类文件；对于 PDF 或其他二进制文件，会尝试提取可打印文本，若无法提取足够内容，则使用文件名和 MIME 类型构造回退文本。文本被切分为约 500 字符的分块，并保留 80 字符重叠，以减少知识点跨块断裂。
+### 4.2.2 资料上传存储
 
-本地解析器还会进行基础多模态信号识别。例如，检测 Markdown 表格或 CSV 表格并生成 table 内容项，检测公式模式并生成 formula 内容项，识别图片文件并生成 image 内容项。虽然该能力不等同于成熟多模态理解，但为原型系统提供了稳定的文档型多模态基础。
+教师在班级资料页面选择文件并提交后，前端以 `multipart/form-data` 形式调用资料上传接口。后端校验当前用户是否为该班级教师，随后读取上传文件，计算 SHA-256 哈希，识别文件扩展名和 MIME 类型，并将原始文件保存到本地文件系统或 MinIO 对象存储。保存完成后，系统在资料表中写入文件名称、文件路径、文件大小、MIME 类型、文件类型、上传者、班级标识和知识库状态。同一班级下存在相同哈希文件时，系统复用已有资料记录和解析结果，减少重复索引。
 
-### 4.2.6 content items 归一化
+资料上传接口完成业务记录后创建或复用解析任务。解析任务初始状态为 `pending`，进入后台任务后更新为 `processing`，完成解析和索引后更新为 `completed`，异常时更新为 `failed` 并保存错误信息。前端资料列表依据资料状态展示待解析、解析中、已索引和失败等处理结果。
 
-解析结果不能只保存为纯文本。系统将文本、表格、公式、图片等内容统一归一化为 content items。每个内容项包含内容类型、文本、来源文件、页码、分块 ID、表格 Markdown、公式 LaTeX、图片路径、OCR 文本、布局信息、时间片和扩展元数据等字段。
+**表 4-2 课程资料存储对象说明**
 
-归一化的意义在于让不同解析器输出可以进入同一条后续处理链。无论内容来自 RAG-Anything、MinerU 还是本地解析器，系统都可以用统一结构进行文件分析、图谱构建、检索候选生成和前端展示。这也是多模态资料从“格式复杂的原始文件”转化为“可被 AI 系统处理的知识单元”的关键步骤。
-
-### 4.2.7 知识库状态、重试与告警
-
-系统使用知识空间记录课程或班级知识库状态，包括文档数量、分块数量和最近构建时间。每次资料解析完成后，系统重新统计已完成任务和分块数量，更新知识空间状态。
-
-对于失败任务，系统支持单文件重试、批量重试和自动重试。错误会被归类为超时、上游服务、解析器、权限或未知错误。当任务达到最大失败次数或自动重试轮次耗尽时，系统会向管理员发送通知，提示人工介入。这种机制使课程资料入库从不可见的后台流程变成可监控、可诊断、可恢复的工程流程。
-
-## 4.3 多模态资料解析与 RAG-Anything 双图机制适配
-
-### 4.3.1 RAG-Anything 的双图思想
-
-RAG-Anything 面向真实文档中普遍存在的多模态内容。传统 RAG 通常把文档转换为纯文本，再进行分块和向量检索，这会弱化图片、表格、公式和版面关系。RAG-Anything 的重要思想是把多模态内容视为相互连接的知识实体，并通过双图构建同时表达文本语义关系和跨模态关系。
-
-文本语义图继承 LightRAG 的图增强思想，主要组织文本实体、文本块和语义关系，用于支持局部概念检索和全局主题检索。跨模态关系图则组织图片、表格、公式、版面元素和文本说明之间的联系，用于处理问题证据跨模态分布的情况。检索时，系统既可以利用语义相似度匹配，也可以沿图结构导航相关内容，从而形成跨模态混合检索。
-
-### 4.3.2 本系统如何承接双图机制
-
-本文系统通过两层方式使用 RAG-Anything 的双图能力。第一层是在 RAG-Anything 主链内部，由框架完成文档解析、内容分析、多模态知识图谱索引和混合检索。第二层是在业务数据库中保存可见的课程知识图谱原型和 content items，使系统前端、管理端和评估接口能够看到资料来源、内容模态和知识点关系。
-
-也就是说，RAG-Anything 解决的是底层多模态 RAG 能力，本文系统解决的是课程业务闭环。两者结合后，系统既具备多模态文档处理能力，又具备课程管理、权限控制、审核回流和学习分析能力。
-
-### 4.3.3 文档解析后的内容分流
-
-文档解析后，系统将内容分流为两条主要链路。第一条是语义检索链路：文本块和可文本化内容进入嵌入模型，生成向量表示，用于语义检索和 RAG 问答。第二条是知识组织链路：关键词、知识实体、表格、公式、图片说明和来源信息进入课程知识图谱原型，用于知识点展示、图谱辅助检索和 provenance 追踪。
-
-在工程实现中，文本分块会直接进入 chunks；表格、公式和图片进入 content items；关键词进入知识图谱构建过程；RAG-Anything 的处理状态进入质量标签；资料元数据进入 Material；解析过程进入 FileParseTask。通过这种分流，系统实现了从原始文件到检索、图谱、引用和评估的多目标处理。
-
-### 4.3.4 音视频处理边界
-
-音视频资料的完整处理通常需要 ASR 转写、关键帧抽取、OCR、VLM 图像描述和时间片索引。本文系统已经在数据结构和模型路由层预留 audio、video、timestamp_start、timestamp_end 和 VLM 后端配置，也规划了 transcript、keyframes 和 OCR 等接口。但当前可稳定运行的核心主要集中在文档型资料、图片附件、表格和公式基础处理上。因此，论文中将系统表述为具备基础多模态资料处理能力和音视频扩展基础，而不是成熟复杂多模态理解系统。
-
-## 4.4 课程知识图谱原型构建与动态更新
-
-### 4.4.1 图谱数据模型
-
-课程知识图谱由实体和关系组成。实体表示课程中的知识点、术语或关键词，关系表示知识点之间的共现或关联。系统为实体和关系保存置信度、来源资料、来源片段和 provenance。来源片段记录页码、分块编号、来源文件名和模态类型；provenance 记录来源资料集合、首次出现时间、最近出现时间和出现次数。
-
-这种设计使图谱具有可追溯性。教师在查看某个知识点时，不仅能看到知识点名称，也能知道它来自哪些课程资料、在哪些分块中出现、是否被多次资料支持。
-
-### 4.4.2 知识抽取方法
-
-当前系统采用启发式关键词抽取构建课程知识图谱原型。解析器会基于文件名和文本内容提取英文词项和中文短语，去除常见停用词，并按词频选择代表性关键词。系统将这些关键词作为知识实体，并将相邻关键词之间建立共现关系。
-
-这种方法的优点是可解释、实现稳定、适合原型阶段；不足是关系语义较粗，不能自动区分“先修”“包含”“因果”“应用”等复杂关系。因此本文明确将其定义为课程知识图谱原型。后续可以引入信息抽取模型或大语言模型结构化抽取，将共现关系升级为更细粒度语义关系。
-
-### 4.4.3 增量更新与 provenance 合并
-
-当新资料入库时，如果某个知识实体首次出现，系统创建新节点；如果实体已存在，系统不会覆盖旧节点，而是合并新的来源资料、页码、分块和模态信息，并增加出现次数。关系也采用类似策略，重复出现的关系会提高权重并融合来源信息。
-
-这种增量更新机制适合课程动态更新。教师新增资料后，系统能够补充已有知识图谱，而不是每次完全重建所有知识结构。由于 provenance 保存了来源资料集合，系统也能追踪知识点从哪些资料中逐步积累。
-
-### 4.4.4 图谱辅助检索
-
-图谱不仅用于展示，也参与检索。当用户问题命中某个知识实体时，系统将该实体相关词项作为图谱扩展词，用于增强候选分块打分。系统支持 lexical、hybrid 和 graph 三种检索策略。lexical 侧重词项匹配，graph 侧重图谱实体扩展，hybrid 同时考虑词项匹配、图谱增强和查询变体覆盖度。
-
-候选分块最终会得到综合检索分数，包括词项重合分、图谱增强分和查询覆盖分。这样，图谱能够在证据召回阶段提高相关课程知识点的覆盖率。
-
-## 4.5 检索增强问答模块设计与实现
-
-### 4.5.1 问答处理总流程
-
-问答模块接收学生或教师的问题后，首先保存用户消息并记录学习行为，然后读取最近多轮历史对话作为上下文。系统从管理端配置中读取当前 RAG 引擎和模型路由，决定使用 RAG-Anything 主链还是本地回退链。RAG 查询完成后，系统保存 AI 回答和引用来源，并根据置信度判断是否创建审核任务。
-
-完整流程可概括为：问题输入 -> 会话保存 -> 历史上下文组装 -> 模型路由决策 -> RAG 检索 -> 候选重排 -> 证据拼接 -> 答案生成 -> 引用落库 -> 置信度判断 -> 审核触发 -> 指标记录。
-
-### 4.5.2 模型路由与模型选择
-
-系统不是固定绑定某一个模型，而是设计了统一模型路由层。生成模型、嵌入模型、视觉语言模型和重排序模型都支持 API、本地和 mock 模式。API 模式可对接中转站或兼容 OpenAI 协议的模型服务；本地模式可对接本地部署的大模型或嵌入模型服务；mock 模式用于开发环境和自动化测试。
-
-生成模型用于组织最终回答。代码配置中默认模型名为 `claude-opus-4-6`，但实际可通过管理端修改为其他兼容模型。嵌入模型用于把文本块转化为向量表示，默认配置为 `text-embedding-3-small`，维度为 1536。视觉语言模型用于理解用户上传的图片或文档中的视觉元素，可配置为支持图像输入的多模态模型。重排序模型用于在候选证据召回后重新排序，可选择外部 API reranker、本地 CrossEncoder 或启发式 mock reranker。
-
-这种路由设计使系统既能在低成本环境中运行，也能在实验环境中切换不同模型组合进行比较。
-
-### 4.5.3 RAG-Anything 主链查询
-
-当 RAG-Anything 主链可用时，系统优先使用其原生查询能力。对于普通文本问题，系统调用文本查询；对于带图片附件的问题，系统优先进入多模态查询路径。查询模式默认 mix，可根据实验切换为 local、global、hybrid 等模式。主链返回结果后，系统将不同格式的返回值统一整理为回答文本、来源列表和置信度。
-
-如果 RAG-Anything 初始化失败、模型配置不足、查询异常或返回空回答，系统不会直接中断服务，而是记录 fallback 原因并进入本地回退链。这样可以保证用户仍能获得基于已有分块和图谱的回答。
-
-### 4.5.4 查询改写与多路召回
-
-学生问题往往表达不规范，例如“这个怎么理解”“三次握手第三次能不能带数据”可能与资料中的标准术语不完全一致。为提高召回率，系统支持查询改写。查询改写可以保留原始问题，也可以生成关键词式、简化式或紧凑式查询变体。
-
-系统对每个查询变体分别检索课程分块，然后合并候选结果。若某个分块被多个查询变体命中，说明它对问题更稳定相关，系统会给予一定覆盖度加分。多路召回能够缓解学生表述和资料表述不一致的问题。
-
-### 4.5.5 重排序与证据选择
-
-初步召回的候选证据可能包含噪声，因此需要重排序。系统将候选分块发送给 reranker，并结合问题、检索策略、教师审核答案和图片上下文计算重排分数。最终系统选择 top-k 证据用于答案生成。top-k 默认配置为 3，避免上下文过长导致模型注意力分散。
-
-证据选择不仅考虑文本相似度，也考虑图谱命中、查询覆盖、教师审核答案和多模态附件。这样可以使回答更贴近课程知识和教师修正内容。
-
-### 4.5.6 答案生成与引用溯源
-
-答案生成阶段，系统将问题、历史对话、课程证据、教师修正答案和图片描述组织成提示，发送给生成模型。学生端提示强调耐心讲解和例子，教师端提示强调结构化教学建议。若生成模型不可用，系统会基于检索片段生成规则化摘要，保证基本可用。
-
-生成回答后，系统将答案保存到聊天消息表，将引用来源保存到 citation 表。每条引用包含来源名称、页码、资料类型、分块编号和相关分数。前端在回答下方展示引用标签，使学生可以追溯答案来源。
-
-### 4.5.7 置信度、审核和可观测性
-
-系统为每次回答计算或接收置信度。置信度低于阈值时自动触发教师审核；学生点踩也会触发审核。每次 RAG 查询都会记录事件，包括引擎、查询模式、是否使用多模态、是否 fallback、fallback 原因、时延、置信度、来源数量、检索策略、重排序器、查询改写和模型路由等信息。
-
-这些事件用于管理端 RAG 性能分析。管理员可以查看主链成功率、fallback 率、平均置信度、来源数量和延迟分布，也可以做查询改写消融和模型路由切片分析。这使系统具备实验评估和迭代优化基础。
-
-## 4.6 教师审核与知识回流模块设计与实现
-
-### 4.6.1 审核触发
-
-系统通过低置信回答和学生点踩触发教师审核。低置信说明系统检索证据不足或答案可靠性不高；点踩说明学生认为回答不准确、不相关或解释不清楚。触发审核后，系统保存原问题、AI 回答、学生信息、触发原因和当前状态。
-
-### 4.6.2 教师修正与状态流转
-
-教师在审核界面查看待处理问题，提交修正答案。系统将审核项状态更新为 resolved，并创建同步记录。同步记录用于追踪教师答案是否成功进入知识库。若同步成功，状态为 synced；若外部 RAG 引擎不可用或写入失败，状态为 failed，并保存失败原因。
-
-### 4.6.3 知识回流
-
-教师答案回流并不是训练大模型参数，而是将经过教师确认的问答内容加入可检索知识源。在 RAG-Anything 主链中，系统将人工问答作为文本内容插入知识索引；在本地回退链中，系统将问答保存到知识空间扩展数据，并在后续检索中优先匹配审核记录。这样，类似问题再次出现时，系统能够优先使用教师修正答案。
-
-### 4.6.4 可信性作用
-
-审核回流机制使系统从单向生成工具变为可纠错的课程知识服务平台。学生反馈暴露问题，教师审核提供权威修正，系统回灌知识库形成持续改进。该机制特别适合教育场景，因为教师仍保留最终知识把关权。
-
-## 4.7 学习分析与个性化支持模块设计与实现
-
-### 4.7.1 学习行为记录
-
-系统记录学生提问、点踩、错题、闪卡复习、任务提交等行为。学习记录保存行为类型、关联对象、持续时间和扩展数据。通过这些记录，系统可以统计学生活跃度、提问次数、薄弱知识点和学习进度。
-
-### 4.7.2 学生画像
-
-学生画像保存偏好课程、强项主题、薄弱主题、总提问数、点踩次数、任务完成率、活跃度和最近活跃时间。画像不是复杂黑箱模型，而是基于行为统计和规则生成的可解释画像。它为推荐资料、学习报告和教师学情分析提供基础。
-
-### 4.7.3 错题本与闪卡
-
-错题本记录题目、章节、学生答案、正确答案、解析、错误次数和掌握状态。闪卡记录问题、答案、标签、难度系数、复习间隔、下次复习时间和复习次数。学生通过错题和闪卡把一次性问答转化为持续复习过程。
-
-### 4.7.4 个性化推荐
-
-当前推荐主要采用规则驱动策略。系统可根据学生近期问题、薄弱知识点、错题章节、资料关键词和图谱实体匹配资料，生成推荐列表和推荐理由。规则推荐虽然不如复杂推荐模型强大，但具有可解释、易调试、适合原型阶段的优势。
-
-## 4.8 前后端交互与可视化实现
-
-学生端课程页包括课程资料、AI 助教、任务中心、错题本、闪卡、互动空间和学习报告。AI 助教支持多轮对话、附件上传、图片预览、快捷提问、引用展示、点赞点踩和个性化推荐。
-
-教师端课程页包括资料上传、资料管理、知识图谱、任务发布、学生管理、待审核问题、班级讨论和教师版 AI 助教。教师版 AI 助教侧重教案生成、试卷生成、学情分析和教学建议。
-
-管理端提供用户管理、课程管理、审核管理、系统设置、模型配置、模型路由、RAG 性能、索引任务和实验结果接口。前端部分页面仍存在原型化模拟数据，但后端已经具备核心真实接口，后续可逐步替换为真实数据联动。
-
-## 4.9 关键技术实现链路汇总
-
-为避免关键实现只停留在概念层面，本节从工程链路角度对系统所使用的工具、模型、数据存储和算法处理流程进行归纳说明。系统的核心并不是简单地把用户问题转发给大语言模型，而是将课程资料、文档解析、语义检索、知识图谱、教师审核和学习分析组织成一个可持续更新的闭环。
-
-### 4.9.1 模型与工具选型汇总
-
-系统的模型层采用可替换的路由设计，不将某一个云端模型或本地模型写死在业务流程中。生成模型用于理解用户问题、组织答案和生成教学解释；嵌入模型用于将课程分块、标题、知识点和用户问题映射到向量空间；视觉语言模型用于对图片、图表、公式截图等视觉内容进行描述；重排序模型用于在初次召回后对候选证据进行相关性排序。原型系统默认面向 OpenAI-compatible API 设计，同时保留 local 与 mock 后端，便于在没有外部模型服务时完成系统流程验证。
-
-| 技术环节 | 使用工具或模型 | 在系统中的作用 |
+| 对象 | 保存内容 | 主要作用 |
 |---|---|---|
-| Web 后端 | FastAPI、Uvicorn、Pydantic | 提供课程、知识库、问答、审核、学习分析等 REST 接口 |
-| 数据持久化 | SQLAlchemy、Alembic、SQLite/PostgreSQL | 管理用户、课程、资料、索引任务、聊天记录、审核记录和指标数据 |
-| 异步任务 | Celery、Redis | 将耗时的文档解析、索引构建和重试任务从请求线程中解耦 |
-| 对象存储 | Local Storage、MinIO | 保存原始课件、解析中间文件、图片资源和结果文件 |
-| 文档解析 | RAG-Anything、MinerU、SimpleParser | 对 PDF、Office、Markdown、图片等资料进行解析和结构化 |
-| RAG 主框架 | RAG-Anything、LightRAG 思想 | 构建文本知识图和多模态关系图，支持混合检索与跨模态问答 |
-| 嵌入模型 | text-embedding-3-small 或兼容嵌入模型 | 生成文本分块和问题向量，支撑语义检索 |
-| 生成模型 | OpenAI-compatible LLM、本地 LLM、mock | 根据检索证据生成带引用的教学回答 |
-| 视觉语言模型 | OpenAI-compatible VLM、本地 VLM、mock | 将图片、图表、公式等视觉内容转写为可检索语义 |
-| 重排序模型 | API reranker、本地 CrossEncoder、mock/none | 对候选证据进行二次排序，提高最终上下文质量 |
-| 前端实现 | React、Vite、TypeScript、Tailwind CSS | 实现学生端、教师端和管理端的交互界面 |
+| 原始文件 | 教师上传的 PDF、PPT、Word、MD、TXT、图片、音频和视频等文件 | 下载、预览、重新解析、引用溯源 |
+| 资料元数据 | 文件名、路径、大小、类型、上传者、班级、知识库状态 | 权限控制、资料列表展示、状态跟踪 |
+| 解析任务 | 解析状态、解析文本、文本分块、内容项、错误信息 | 后台索引、解析预览、失败重试 |
+| 底层索引 | 文本分块、实体、关系、向量项和图结构 | RAG 检索、图增强召回、上下文组合 |
+| 业务图谱 | 面向前端展示的实体和关系投影 | 知识图谱可视化、学习画像关联 |
 
-这种选型方式使系统具备较好的可迁移性：在毕业设计演示环境中可以使用 mock 或本地轻量链路验证流程，在具备 API Key 或本地大模型环境时可以切换到真实模型服务；在单机开发环境中可以使用 SQLite 与本地存储，在部署环境中可以切换到 PostgreSQL、Redis 和 MinIO。
+### 4.2.3 原子单元解析
 
-### 4.9.2 从课程资料到可检索知识的完整链路
+课程资料进入检索系统前，需要被转换为粒度适中且可追溯的原子单元。原子单元是系统中最小的可检索知识对象，可以是文本段落、表格、公式、图片区域、音频转写片段或视频关键帧片段。每个原子单元保存内容本体、模态类型、来源文件、页码或时间戳、位置元数据和文本化描述，用于后续向量嵌入、实体关系抽取、引用溯源和前端预览。
 
-课程资料进入系统后，首先由后端接收上传请求，校验课程权限、文件类型和文件大小。系统计算文件哈希，用于判断同一课程下是否已有相同资料，避免重复解析和重复索引。随后，原始文件被保存到本地存储或 MinIO，数据库中同步写入资料元数据，包括课程编号、文件名、存储路径、文件类型、文件大小、哈希值和索引状态。
+系统根据文件类型采用不同解析方式。PDF、PPT 和 Word 等文档资料进入 MinerU/RAG-Anything 文档解析流程，生成段落、标题、表格、公式和图片等内容项；MD 和 TXT 文件直接读取文本，并对 Markdown 表格进行结构化抽取；图片资料保存图片路径、OCR 文本和视觉描述；音频资料通过 ASR 生成转写片段；视频资料通过 ASR 和关键帧抽取生成字幕片段、关键帧路径和视觉描述。当前系统对音视频以预处理接入为主，核心测试集中在文档、图片、表格和公式内容。
 
-在入库触发方式上，系统同时支持同步索引和异步索引。同步索引适合小文件和演示场景，上传后立即尝试解析并构建索引；异步索引适合 PDF、PPT、图片较多的课件和批量资料，上传接口只负责创建解析任务，真正的解析、嵌入、图谱更新和状态写回由 Celery worker 执行。解析任务包含 pending、running、completed、failed 等状态，并记录错误信息、重试次数和任务标识，教师端与管理端可以据此查看知识库构建进度。
+为了统一进入索引流程，系统将不同模态内容转换为文本化表示。普通文本以段落或分块内容进入索引；表格以表头、行列数据和表格事实描述进入索引；公式以公式文本、变量说明和上下文进入索引；图片以 OCR 文本、图注和视觉描述进入索引；音频和视频以转写文本、关键帧描述和时间戳上下文进入索引。原始文件仍保留在文件存储中，用于证据展示和重新解析。
 
-当 RAG-Anything 主链可用时，系统将原始文件交给 RAG-Anything 的文档处理流程，由 MinerU 对文档版面进行解析。对于 PDF 或课件资料，MinerU 能够识别正文、标题、表格、图片、公式等元素，并输出结构化结果。系统再将这些结果归一化为统一的 content items，每个内容项包含模态类型、文本内容、页码或位置、来源文件、置信度、元数据和可追溯标识。对于无法进入主链的文件，系统使用本地 SimpleParser 读取文本或基础格式内容，并构建简化分块，保证平台在模型服务不完整时仍然能够完成基本检索问答。
+本文将第 $j$ 个原子单元表示为：
 
-经过解析后的内容会被分流处理。纯文本段落、标题、表格说明和公式说明进入语义嵌入流程，系统调用嵌入模型生成向量表示；图片、图表、公式截图等视觉内容会先由 VLM 生成文字说明，再进入嵌入和索引流程；关键词、标题层级、页码位置、章节结构和共现实体会进入知识图谱构建流程。通过这种分流方式，原始课程文件被转化为三类可使用知识：向量化语义证据、结构化知识图谱节点关系、多模态内容索引。
+$$
+u_j=(id_j,m_j,c_j,d_j,p_j,e_j)
+$$
 
-### 4.9.3 双图机制与知识组织方式
+其中，$id_j$ 表示原子单元标识，$m_j$ 表示模态类型，$c_j$ 表示原始或结构化内容，$d_j$ 表示可检索语义描述，$p_j$ 表示来源位置，$e_j$ 表示扩展元数据。原子单元进入索引前被转换为文本化片段：
 
-RAG-Anything 在 LightRAG 的基础上面向多模态场景进行了扩展，其核心思想可以概括为双图组织：一类图用于表达文本知识之间的语义实体与关系，另一类图用于表达多模态内容之间以及多模态内容与文本片段之间的关联。本文系统在工程实现中借鉴该思想，将课程资料解析结果组织为文本知识图和多模态关系图。
+$$
+t_j=g(c_j,m_j,p_j)
+$$
 
-文本知识图以课程概念、章节标题、关键术语和问答条目为节点，边表示包含、相关、共现、来源于、被审核补充等关系。例如，在计算机网络课程中，“TCP 三次握手”“SYN”“ACK”“连接建立”“可靠传输”等可以作为节点，课程课件中的章节结构和文本共现关系可以形成边。该图谱主要服务于知识点查询、相近概念扩展和检索上下文增强。
+$t_j$ 随后参与文本分块、向量嵌入、实体关系抽取和图谱构建。
 
-多模态关系图以图片、表格、公式、页面区域和解析文本为节点，边表示位于同一页、由图片转写得到、表格解释、公式说明、引用同一标题等关系。例如，一页课件中的拥塞控制示意图会与其图注、所在章节标题以及附近解释段落形成关联。学生询问“课件里那个拥塞窗口变化图是什么意思”时，系统可以通过多模态关系图找到图像说明和相邻文本，而不是只依赖普通文本关键词匹配。
+**算法 4-1 原子单元解析流程**
 
-在当前原型中，课程知识图谱以数据库中的结构化记录和图谱接口形式实现，关系抽取以关键词、章节层级、共现和教师审核结果为主要依据，属于可解释的启发式图谱构建方式。该实现能满足毕业设计阶段对课程知识组织、图谱展示和辅助检索的需求；后续可进一步接入专门的信息抽取模型，将关系类型扩展为先修、定义、应用、因果、易错点等更细粒度语义关系。
+```text
+Input: 课程资料文件、文件类型、班级标识
+Output: 原子单元集合、文本分块集合
+1. 识别文件扩展名和 MIME 类型
+2. 文档资料解析标题、段落、表格、公式和图片内容
+3. MD/TXT 资料读取文本并抽取 Markdown 表格
+4. 图片资料生成 OCR 文本和视觉描述
+5. 音频或视频资料生成转写文本和关键帧说明
+6. 为内容项补充来源文件、页码、时间戳和模态类型
+7. 将不同模态内容转换为文本化片段
+8. 输出可进入索引流程的文本分块和元数据
+```
 
-### 4.9.4 问答时的检索与生成流程
+## 4.3 知识图谱构建模块
 
-用户提问进入系统后，首先进行课程权限校验和会话上下文读取。随后，系统根据配置决定是否进行查询改写。查询改写的作用是将口语化问题转化为更适合检索的查询，例如把“这个算法为什么会超时”扩展为“时间复杂度、循环次数、算法优化、课程章节”等检索表达。系统会保留原始问题和改写问题，避免改写结果完全偏离用户意图。
+### 4.3.1 模块概述
 
-检索阶段采用多路召回思路。第一路是语义向量检索，即将用户问题嵌入为向量，并在课程资料分块中寻找语义接近的内容；第二路是关键词或文本检索，用于保证专有名词、公式符号、缩写词能够被召回；第三路是图谱辅助检索，根据问题中的术语匹配课程知识图谱节点，并扩展相邻节点、来源片段和教师审核补充内容；第四路是多模态关系召回，当问题涉及图片、表格、公式或附件时，系统优先检索对应的 content items 及其相邻上下文。
+知识图谱构建模块负责从课程资料中抽取课程知识点及其关联关系，并形成可用于检索增强和前端展示的课程知识结构。系统中的图谱构建由 RAG-Anything 与 LightRAG 协同完成：RAG-Anything 负责资料解析、内容项组织和入库调度，将不同类型的课程资料转换为可索引文本或内容列表；LightRAG 负责文本分块、实体关系抽取、向量写入和图结构维护。索引完成后，系统从底层处理结果和解析任务元数据中提取适合教学展示的实体与关系，保存到 `knowledge_entities` 和 `knowledge_relations` 表。
 
-候选证据召回后，系统会进行去重、截断和重排序。去重用于避免同一页或同一段材料重复进入上下文；截断用于控制生成模型的输入长度；重排序用于根据问题和证据之间的相关性选择最有帮助的若干条证据。最终进入生成模型的内容包括用户问题、课程上下文、检索证据、引用来源、回答风格约束和安全提示。生成模型需要在证据范围内回答问题，尽量给出分步骤解释，并在答案中附带来源信息。当检索证据不足时，系统应明确说明资料中暂未找到充分依据，而不是编造答案。
+底层索引图谱强调检索效率和上下文组合，业务侧图谱强调教学可读性、来源追踪和前端交互。业务图谱同步时过滤技术性节点，并补充来源资料、可信度估计和 provenance 信息，使前端展示的节点更接近课程知识点。
 
-答案生成完成后，系统会计算或估计置信度，并根据来源数量、检索得分、是否 fallback、模型调用状态等因素判断是否需要教师审核。若答案置信度较低、来源为空、学生点踩或系统出现 fallback，平台会创建待审核记录。这样，RAG 问答不只是一次性回答，而是与教师审核和知识库更新形成闭环。
+### 4.3.2 文本知识图谱构建
 
-### 4.9.5 动态知识更新与反馈迭代
+文本图谱构建路径主要处理课程文档、纯文本资料和转写文本。资料索引完成后，系统将文本化内容交给 LightRAG 的实体关系抽取流程，得到实体名称、实体类型、实体描述和关系描述。抽取得到的结果进入底层图结构，同时以描述文本形式进入向量索引，使后续查询能够同时命中文本证据和概念关系。
 
-动态知识更新体现在两个层面。第一是资料层面的更新。教师新增或替换课件后，系统会重新执行上传、解析、分块、嵌入、图谱更新和状态写回流程，使新的课程内容能够被后续问答检索到。通过文件哈希和任务状态管理，系统能够减少重复处理，并在解析失败时保留重试和告警能力。
+系统在官方实体关系抽取提示词后追加课程知识图谱抽取约束。该约束要求抽取对象聚焦稳定教学知识，过滤文件名、路径、页码和解析标识等低语义内容。实体类型覆盖课程概念、公式算法、例题习题、实验步骤和考核要点等教学对象；关系语义覆盖先修、组成、解释、应用、考查和对比等课程关系。
 
-第二是反馈层面的更新。学生对回答进行点赞、点踩或补充反馈后，系统会记录反馈类型、对应问题、答案、来源和会话信息。教师在审核端查看低置信回答或负反馈回答，可以修改标准答案、补充解释或确认原答案有效。教师确认后的内容会作为高可信问答资料回流知识库，并与原问题、相关知识点和来源资料建立联系。后续相似问题触发检索时，教师审核答案可以作为优先证据参与生成，从而提升课程场景中的回答一致性和可信度。
+**表 4-3 文本图谱抽取提示词约束**
 
-需要说明的是，本文系统中的“迭代优化”主要指知识库和提示上下文层面的优化，而不是在线直接微调大模型参数。这样设计的原因在于毕业设计原型更强调可控性和可追溯性：教师修正内容可以立即进入知识库，被引用、查看和再次审核；而在线训练模型需要更多数据治理、训练资源和安全评估，适合作为后续扩展方向。
+| 约束类别 | 主要内容 |
+|---|---|
+| 抽取目标 | 构建课程知识图谱，优先抽取具有教学意义的知识点及其关系 |
+| 实体类型 | course_concept、prerequisite、learning_objective、formula、algorithm、example、exercise、misconception、experiment_step、tool、assessment_point |
+| 关系语义 | prerequisite_of、part_of、explains、uses_formula、applies_algorithm、example_of、tests、causes、contrasts_with、related_to |
+| 过滤对象 | 文件名、路径、页码、解析编号和无教学意义的泛化词 |
+| 描述要求 | 实体描述和关系描述基于课程资料内容 |
 
-### 4.9.6 工程降级与可部署性设计
+### 4.3.3 跨模态知识图谱构建
 
-考虑到毕业设计演示环境与真实部署环境可能存在差异，系统在工程上采用主链增强、回退保底的设计。理想情况下，RAG-Anything、MinerU、真实嵌入模型、真实生成模型和 VLM 均可用，系统能够完成较完整的多模态 RAG 流程；当其中某一环节不可用时，系统会进入本地解析、mock 模型或简化检索链路，保证课程资料管理、基础问答、审核和指标记录等核心流程仍能运行。
+跨模态图谱构建路径用于处理非文本资料与课程概念之间的关联。系统先在入库阶段把表格、公式和图片等内容转换为内容项和文本化描述，再将这些描述作为实体关系抽取和图谱同步的证据。表格转换为结构化文本和事实描述，公式转换为公式文本、变量说明和上下文，图片转换为 OCR 文本、图注和视觉描述。音视频资料在当前系统中以转写文本和关键帧说明作为扩展输入。
 
-部署方面，开发环境可以使用 SQLite、本地文件存储和单进程后端，便于调试；演示或准生产环境可以使用 PostgreSQL、Redis、Celery worker 和 MinIO，提高并发处理能力和文件管理能力。模型服务既可以调用云端 API，也可以通过 OpenAI-compatible 接口接入本地部署模型，例如本地 LLM、嵌入模型和视觉语言模型。该设计使系统既符合毕业设计原型要求，也具备向真实课程平台扩展的基础。
+RAG-Anything 多模态解析阶段使用官方视觉解析提示词，引导视觉语言模型识别可见文字、结构信息和内容关系。系统在官方提示词后追加教育场景指导语，使解析结果更关注课程知识点、公式含义、图表信息和解题线索。跨模态图谱中的节点仍以课程知识点为主，模态信息主要体现在来源和证据上。系统将非文本内容中的有效语义转换为可抽取的概念与关系，同时保留原始模态来源。
 
-## 4.10 本章小结
+### 4.3.4 图谱融合与可视化实现
 
-本章详细说明了系统关键模块的实现流程。系统通过课程资料入库、RAG-Anything 多模态处理、本地回退解析、content items 归一化、课程知识图谱原型、RAG 问答、教师审核回流和学习分析，形成了面向课程场景的 AI 助教闭环。与简单聊天机器人不同，本文系统强调课程资料依据、引用溯源、动态更新、模型路由和可观测评估。
+文本图谱构建路径和跨模态图谱构建路径最终汇入统一课程知识图谱。系统先将不同来源的内容统一转换为可索引文本，底层抽取得到的实体和关系共同进入 RAG-Anything/LightRAG 索引空间。融合时，系统以规范化后的实体名称作为主要重合依据；同一课程概念在多个来源中出现时，系统将其合并为同一个实体，并把来源位置、模态类型和资料编号记录到来源信息中。关系融合以源实体、目标实体和关系类型为依据；相同关系重复出现时，系统增加关系权重并合并证据来源。
+
+统一课程知识图谱形成后，系统将其中适合教学展示的部分投影到本地业务数据库。投影流程读取底层处理状态中的显式实体关系；显式结果不足时，从解析摘要、文本分块和内容项中抽取候选概念作为补充。投影阶段过滤文件路径、页码编号和低语义词，使本地图谱保留课程知识点及其关系。
+
+本地图谱使用 `knowledge_entities` 和 `knowledge_relations` 两张表保存。实体写入时，系统以“班级编号 + 实体名称”为合并依据查询 `knowledge_entities` 表；未查询到同名实体时创建新记录，查询到同名实体时合并来源并更新可信度估计。关系写入时，系统以“班级编号 + 源实体 + 目标实体 + 关系类型”为合并依据查询 `knowledge_relations` 表；未查询到同类关系时创建新记录，查询到同类关系时增加关系权重并合并 provenance 信息。前端图谱组件通过课程图谱接口读取 `nodes`、`edges` 和 `meta`，使用 SVG 实现搜索、过滤、展开和详情查看。
+
+**图 4-2 知识图谱融合与可视化流程图**
+
+```mermaid
+flowchart TB
+    A["文本资料实体关系"] --> C["实体名称规范化"]
+    B["跨模态内容实体关系"] --> C
+    C --> D["实体重合合并"]
+    D --> E["统一课程知识图谱"]
+    E --> F["业务投影流程"]
+    F --> G["低语义节点过滤"]
+    F --> H["来源与 provenance 聚合"]
+    G --> I["knowledge_entities"]
+    H --> I
+    G --> J["knowledge_relations"]
+    H --> J
+    I --> K["图谱数据接口"]
+    J --> K
+    K --> L["前端 SVG 可视化"]
+```
+
+## 4.4 检索增强生成问答模块
+
+### 4.4.1 模块概述
+
+检索增强生成问答模块接收学生或教师在班级空间中的问题，结合课程知识库检索相关证据，再调用大语言模型生成带引用来源的回答。模块输入包括用户问题、班级标识、用户角色、聊天历史、回答模式和临时附件；输出包括回答正文、引用来源、可信度估计、追问建议、查询追踪信息和审核标记。
+
+问答模块根据问题类型选择处理路径。课程知识问答进入课程知识库检索，系统状态查询、闲聊和教师工具请求进入快速回答或状态回复路径。课程问答主路径包括问题预处理、关键词抽取、双路检索、候选证据重排和最终回答生成。
+
+### 4.4.2 用户问题预处理
+
+用户问题预处理包括会话管理、回答模式识别、多轮上下文整理、附件处理和查询改写。系统获取或创建聊天会话，并保存用户原始问题。课程相关问题进入上下文整理流程，系统从最近聊天历史中识别追问、代词省略和对上一轮回答的澄清，再形成较完整的独立问题。
+
+查询改写采用规则型方法实现。系统根据问题内容识别定义、机制、对比、计算、例题、实验步骤和因果解释等意图，并生成少量检索焦点词。最终提交给检索流程的文本由独立问题和紧凑焦点词组成，查询文本长度受到控制，以减少对底层关键词抽取的干扰。当前轮附件只参与本轮问答；教师明确将附件提升为课程资料时，附件进入资料上传和知识库构建流程。
+
+### 4.4.3 关键词提取
+
+查询阶段的关键词处理由业务层焦点词生成、LightRAG 检索关键词抽取和 RAG-Anything 多模态线索组织共同构成。业务层焦点词由本系统查询改写模块生成，用于丰富最终提交给底层检索引擎的查询文本。
+
+检索层关键词由 LightRAG 在查询阶段调用大语言模型抽取。关键词抽取提示词要求模型输出 JSON 结构，并将关键词划分为 `high_level_keywords` 和 `low_level_keywords` 两类。高层关键词描述问题主题、意图和抽象概念，适合用于关系检索和全局知识发现；低层关键词描述具体实体、术语和细节，适合用于实体检索和局部证据定位。本系统构造底层 LLM 函数时保留 `keyword_extraction` 标记，因此关键词抽取调用能够在日志中被独立识别。
+
+RAG-Anything 在多模态检索中提供内容项组织、VLM 增强查询和显式多模态查询入口。对于图像、公式或表格相关问题，系统在索引阶段生成的 OCR 文本、视觉描述、表格事实描述和公式说明参与底层关键词抽取、向量匹配和图谱检索。当前轮上传图片时，后端先调用视觉模型生成图片描述，再把图片描述与用户问题共同提交给查询流程。带图片附件的问题调用 RAG-Anything 多模态查询入口；普通文本问答调用 LightRAG 引用查询接口，以获得结构化来源。
+
+### 4.4.4 双路检索
+
+普通文本问答主路径采用 LightRAG 的 hybrid 查询模式。hybrid 模式合并 local 与 global 两条检索路径：local 路径以低层关键词为主要线索，优先召回相关实体，并由实体扩展相邻关系和文本分块；global 路径以高层关键词为主要线索，优先召回相关关系，并由关系两端补充实体和文本分块。
+
+系统实现中的双路检索包括四个步骤：根据有效查询文本抽取高层关键词和低层关键词；local 路径检索实体向量并扩展实体相关关系；global 路径检索关系向量并补充关系两端实体；合并两条路径的实体、关系和文本分块，去除重复证据，并在 token 预算内组织为检索上下文。系统配置中的 `mix` 查询模式在普通文本问答中映射到结构化引用更稳定的 hybrid 查询；RAG-Anything 通用查询和多模态查询路径保留 mix 参数，用于引入文本分块向量召回结果。
+
+**算法 4-2 双路检索流程**
+
+```text
+Input: 有效查询文本、班级知识库、用户角色约束
+Output: 候选证据集合
+1. 由 LightRAG 使用大语言模型抽取高层关键词和低层关键词
+2. local 路径使用低层关键词召回实体
+3. 根据实体扩展相关关系和文本分块
+4. global 路径使用高层关键词召回关系
+5. 根据关系补充两端实体和文本分块
+6. 合并 local 与 global 结果并去重
+7. 根据来源、相关性和 token 预算组织候选证据
+```
+
+### 4.4.5 候选证据重排与最终回答生成
+
+双路检索得到的候选证据包括文本分块、实体描述、关系描述和局部图结构。系统对候选证据进行标准化处理，补充资料名称、页码、分块标识、模态类型和检索分数，过滤已删除资料来源，并对重复来源进行合并。表格证据保留表头和行列信息，图片证据保留 OCR 文本、视觉描述和来源图片，视频证据保留转写片段和时间戳。
+
+候选证据排序综合考虑检索相关性、来源可用性、证据类型、引用完整性和 token 预算。系统启用重排序模型时，对候选证据进行进一步精排；重排序服务不可用时，适配层按照检索返回分数、来源数量和证据覆盖情况进行启发式排序。最终进入大语言模型上下文的内容包括用户问题、筛选后的历史消息、角色化回答约束、文本证据、实体关系证据和引用标识。
+
+回答生成提示词强调课程证据约束。学生端回答侧重概念解释、步骤说明和易错点提示；教师端回答侧重教学讲解重点、学生困惑位置和补充练习建议。模型生成回答后，系统解析回答正文中的引用标识，并将结构化来源保存为问答引用记录。可信度估计属于启发式质量指标，主要依据来源数量、来源质量、检索分数和证据覆盖情况生成，用于触发教师审核和管理端质量分析。
+
+**图 4-3 RAG 问答模块总体流程图**
+
+```mermaid
+flowchart TB
+    A["用户问题"] --> B["会话与权限校验"]
+    B --> C["问题预处理"]
+    C --> D["关键词抽取"]
+    D --> E["local 实体检索"]
+    D --> F["global 关系检索"]
+    E --> G["候选证据合并"]
+    F --> G
+    G --> H["重排与证据选择"]
+    H --> I["生成带引用回答"]
+    I --> J["保存消息、引用和质量记录"]
+    J --> K["教师审核判断"]
+```
+
+## 4.5 教师审核与知识回流模块
+
+### 4.5.1 模块概述
+
+教师审核与知识回流模块用于处理 AI 回答质量无法完全由模型自动控制的问题。系统在回答生成后，根据可信度估计、引用来源数量、证据质量和学生反馈判断是否需要教师介入。需要审核的回答进入教师审核队列，教师可以查看原始问题、AI 回答、学生反馈原因、引用来源和触发原因，并提交修正答案。
+
+### 4.5.2 教师审核与知识回流实现
+
+系统在两类情况下生成审核项。第一，AI 回答的可信度估计较低、来源数量不足或证据质量较弱时，系统自动创建低可信度审核项。第二，学生对 AI 回答点踩并填写反馈原因时，系统创建或更新负反馈审核项。审核项保存消息标识、班级标识、学生标识、触发类型、原始问题、AI 回答、审核状态和创建时间。
+
+教师进入审核页面后，可以按班级和状态查看待审核回答。审核详情展示学生问题、AI 回答、学生反馈、引用来源和系统判断原因。教师提交修正答案后，系统保存教师答案、审核人和审核时间，并将审核项状态更新为已解决。教师选择回流知识库时，系统创建同步记录，将学生问题、教师标准答案、班级标识和审核来源组织为补充问答知识，写入课程知识库。
+
+知识回流以增量知识方式补充课程知识空间。该方式保留原始资料来源，并使教师在真实答疑中形成的高质量答案被后续检索利用。同步完成后，系统记录同步状态和同步备注；同步失败时，教师和管理员可以根据错误信息重试或人工处理。
+
+**算法 4-3 教师审核与知识回流流程**
+
+```text
+Input: AI 回答、引用来源、可信度估计、学生反馈
+Output: 审核项、教师修正答案、知识库增量内容
+1. 根据来源数量、证据质量和可信度估计判断是否需要审核
+2. 学生提交负向反馈时创建或更新审核项
+3. 教师查看原始问题、AI 回答、反馈原因和引用来源
+4. 教师提交修正答案
+5. 更新审核项状态、审核人和审核时间
+6. 教师选择回流知识库时，构造“问题-教师答案”补充知识
+7. 写入课程知识库并记录同步状态
+```
+
+## 4.6 辅助学习功能实现
+
+辅助学习功能用于记录学生在课程空间中的学习行为，并为资料推荐和教师学情查看提供基础数据。系统记录学生提问、负反馈、任务提交、闪卡复习和推荐点击等行为，写入 `learning_records` 表。学生画像接口以班级为统计范围，从学习行为、聊天记录、任务提交和闪卡复习中统计提问次数、任务完成率、活跃度、强项主题和薄弱主题，并写入 `student_profiles` 表。
+
+资料推荐采用规则化排序方式实现。推荐接口根据学生画像中的薄弱主题、近期提问关键词、班级热点问题和历史反馈生成候选资源。资料候选来自 `materials` 表，系统优先考虑与薄弱主题匹配、已完成知识库索引、近期上传且在班级问题中热度较高的资料。候选生成后，系统根据主题匹配、资料新近度、知识库状态、班级问题热度和学生历史反馈计算排序分数，并返回推荐理由。该功能属于辅助学习支持，当前实现以可解释规则为主。
+
+## 4.7 本章小结
+
+本章按照系统实际业务链路说明了关键模块实现。班级空间基础功能为课程资料、任务通知、成员权限和学习行为提供业务载体；课程知识库构建模块完成资料上传、存储、原子单元解析和索引写入；知识图谱构建模块将文本和跨模态解析结果转化为课程概念及其关系，并投影到本地业务图谱用于可视化；检索增强生成问答模块通过问题预处理、关键词提取、双路检索、候选证据整理和回答生成实现基于课程证据的智能答疑；教师审核与知识回流模块将低质量回答和学生反馈转化为可修正、可回流的增量知识。
 
 ---
 
@@ -567,9 +710,9 @@ RAG-Anything 在 LightRAG 的基础上面向多模态场景进行了扩展，其
 
 ## 5.1 实验环境与部署配置
 
-系统后端运行环境为 Python 3 环境，主要依赖包括 FastAPI、Uvicorn、SQLAlchemy、Alembic、Pydantic、python-jose、Passlib、Celery、Redis、MinIO SDK、HTTPX 和 Pytest。前端运行环境为 Node.js，主要依赖包括 React、Vite、TypeScript、Tailwind CSS、React Router 和 Recharts。数据库开发环境使用 SQLite，Docker Compose 部署环境提供 PostgreSQL 16 和 Redis 7。对象存储可在本地文件系统和 MinIO 之间切换。
+系统测试围绕核心功能可用性展开，重点验证班级空间、资料上传、知识库构建、知识图谱展示、课程问答、引用溯源、教师审核回流和辅助学习功能是否能够按预期运行。测试环境包括后端服务、前端页面、关系数据库、文件存储、异步任务和模型路由配置。开发环境使用 SQLite 与本地文件存储，Docker Compose 部署环境提供 PostgreSQL、Redis 和后端 worker。模型配置支持 API、本地和 mock 三种后端，RAG-Anything 主链依赖生成模型、嵌入模型和解析器服务，本地回退链用于缺少完整外部模型依赖时的流程验证。
 
-模型配置方面，系统支持生成模型、嵌入模型、VLM 和 reranker 的 API、本地和 mock 后端。RAG-Anything 主链要求真实生成模型和嵌入模型可用；在缺少模型服务时，系统使用本地回退链保证主流程验证。
+**表 5-1 系统测试环境配置表**
 
 | 类型 | 配置 |
 |---|---|
@@ -588,77 +731,122 @@ RAG-Anything 在 LightRAG 的基础上面向多模态场景进行了扩展，其
 
 ## 5.2 系统功能测试
 
-### 5.2.1 用户与课程管理测试
+功能测试采用黑盒测试和接口验证结合的方式进行。测试用例覆盖正常流程、异常输入和权限边界，结果以“通过/未通过”和实际现象记录。表 5-2 给出了核心功能测试汇总。
 
-用户与课程管理测试包括注册、登录、JWT 鉴权、角色权限、课程列表、班级创建、班级加入和成员查询。测试重点是学生、教师和管理员是否只能访问自己权限范围内的数据。后端测试覆盖认证和课程基础流程，说明系统具备基础权限控制能力。
+**表 5-2 核心功能测试汇总表**
 
-### 5.2.2 资料上传与知识库构建测试
+| 编号 | 测试目标 | 前置条件 | 测试输入 | 预期结果 | 实际结果 |
+|---|---|---|---|---|---|
+| T01 | 用户注册与登录 | 邮箱未注册 | 学生或教师注册信息、验证码、密码 | 注册成功，登录后返回 JWT | 通过 |
+| T02 | 重复账号检测 | 邮箱已存在 | 相同邮箱注册请求 | 返回邮箱已存在提示 | 通过 |
+| T03 | 班级创建 | 教师已登录 | 课程信息、班级名称、学期 | 创建班级并生成邀请码 | 通过 |
+| T04 | 学生加入班级 | 学生已登录 | 有效邀请码 | 写入班级成员关系 | 通过 |
+| T05 | 越权访问控制 | 学生不属于目标班级 | 查询目标班级资料 | 拒绝访问 | 通过 |
+| T06 | 任务与通知发布 | 教师拥有班级权限 | 通知或任务内容 | 写入通知或任务记录 | 通过 |
+| T07 | 资料上传 | 教师拥有班级权限 | 课程文件 | 保存原始文件并创建解析任务 | 通过 |
+| T08 | 重复资料上传 | 班级已有相同哈希文件 | 相同文件 | 复用已有资料或索引记录 | 通过 |
+| T09 | 知识图谱展示 | 资料已完成解析 | 查询课程图谱接口 | 返回节点、边和元数据 | 通过 |
+| T10 | 课程问答 | 知识库存在相关资料 | 课程问题 | 返回回答和引用来源 | 通过 |
+| T11 | 负反馈审核 | 已生成 AI 回答 | 学生点踩反馈 | 创建或更新审核项 | 通过 |
+| T12 | 教师修正回流 | 审核项待处理 | 教师修正答案 | 更新审核状态并生成同步记录 | 通过 |
 
-资料上传测试包括文本文件、Markdown 文件、表格/公式样例、图片样例和重复文件上传。系统应能够保存资料、创建解析任务、完成分块、生成 content items、更新知识库状态，并在重复文件上传时复用已有索引。多模态回归测试验证了上传、文件分析和知识图谱之间的链路，检查 text、table、formula 和 image 等模态是否可见，以及图谱节点是否包含 confidence、source_span 和 provenance。
+从测试结果看，系统核心业务流程可以完成闭环。权限相关测试表明，接口能够根据用户角色和班级成员关系限制访问范围；资料与知识库测试表明，系统能够保存文件、创建解析任务并更新状态；问答与审核测试表明，回答、引用、反馈和教师修正能够在数据库中形成连续记录。
 
-### 5.2.3 AI 问答与审核回流测试
+## 5.3 质量评估设计
 
-问答测试包括普通课程问题、无检索结果问题、低置信回答、学生点踩和教师审核。系统应能够返回回答、来源、建议追问、置信度和 needs_review 标记；当回答置信度低或被点踩时，系统应创建审核项；教师提交修正答案后，系统应记录同步状态并将答案回流知识库。
+### 5.3.1 索引质量评估
 
-### 5.2.4 学习支持与管理端指标测试
+索引质量评估用于判断课程资料是否被正确解析并进入知识库。测试文件集应覆盖普通文本、Markdown、PDF、图片、表格和公式等资料类型；音视频资料在当前系统中记录为扩展测试对象，重点观察上传与预处理状态。每个文件的记录项包括解析状态、索引耗时、文本覆盖情况、分块数量、内容项数量、实体数量、关系数量和错误信息。
 
-学习支持测试包括学习记录、错题本、闪卡复习、学生报告和通知功能。管理端指标测试包括 RAG 性能接口、查询改写消融接口、模型路由接口、个性化路由指标接口和离线 benchmark 报告生成。测试说明系统不仅能完成业务流程，也能输出实验分析数据。
+**表 5-3 索引质量评估记录项**
 
-## 5.3 典型案例分析
+| 评估项 | 含义 | 记录来源 |
+|---|---|---|
+| 解析状态 | pending、processing、completed、failed 等任务状态 | 解析任务表 |
+| 索引耗时 | 从任务开始到状态完成的时间 | 任务开始和结束时间 |
+| 文本覆盖情况 | 解析文本是否覆盖资料主要内容 | 解析文本与人工抽查 |
+| 分块数量 | 进入检索流程的文本分块数量 | 解析任务元数据或底层索引统计 |
+| 内容项数量 | 表格、公式、图片等结构化内容项数量 | content items |
+| 实体与关系数量 | 投影到业务图谱的节点和边数量 | `knowledge_entities`、`knowledge_relations` |
+| 错误信息 | 解析器、模型服务或权限错误 | 任务错误字段与日志 |
 
-以计算机网络课程为例，教师上传包含 TCP 协议讲解的课程资料。系统保存文件、创建解析任务、调用解析器生成文本分块和内容项，并将关键词如 tcp、握手、拥塞控制等同步为知识实体。学生随后提问“TCP 三次握手是什么”，系统先基于问题检索相关分块，结合图谱词项和重排序选择证据，再生成回答并返回来源文件和页码。若学生认为回答不完整并点踩，系统创建审核项。教师补充“三次握手第三次可以携带数据，但前两次不应携带数据”的说明后，系统将该问答回流知识库。后续学生提出类似问题时，教师审核答案会作为优先上下文，提高回答质量。
+索引质量评估不直接说明问答答案正确，只用于确认资料是否完成了从原始文件到可检索知识的转换。对于解析失败或文本覆盖不足的资料，系统通过失败状态、错误信息和重试入口提示教师或管理员处理。
 
-该案例体现了资料上传、知识库构建、RAG 问答、引用溯源、学生反馈、教师审核和知识回流的完整闭环。
+### 5.3.2 检索质量评估
+
+检索质量评估用于判断系统能否在课程知识库中找到与问题相关的证据。评估问题集由课程知识点问题、定义解释问题、对比问题、公式或表格问题和资料定位问题组成。每个样本包含问题、标准答案要点、标准证据片段和所属知识点。运行测试时，系统记录 Top-k 检索结果，并与人工标注的标准证据进行对比。
+
+**表 5-4 检索质量评价指标**
+
+| 指标 | 计算含义 | 适用目的 |
+|---|---|---|
+| Recall@k | 前 k 个结果中是否包含标准证据 | 衡量证据召回能力 |
+| MRR | 标准证据首次出现位置的倒数 | 衡量正确证据排序位置 |
+| nDCG@k | 考虑相关性等级的排序质量 | 衡量多条证据排序效果 |
+| 引用有效率 | 回答引用是否能对应到真实资料 | 衡量引用溯源质量 |
+
+本文系统评估重点放在检索链路是否能够召回课程资料中的可核验证据。由于当前样本规模有限，检索指标用于描述原型测试表现和后续优化依据，不作为大规模教学效果结论。
+
+### 5.3.3 生成质量评估
+
+生成质量评估用于判断模型回答是否依据检索证据生成。评估采用人工评分方式，从答案准确性、证据一致性、完整性、可解释性和引用完整性五个维度进行判断。答案准确性关注回答是否符合课程资料；证据一致性关注回答内容是否能由引用片段支撑；完整性关注是否覆盖问题关键点；可解释性关注是否适合学生理解；引用完整性关注是否展示来源文件、页码或分块标识。
+
+**表 5-5 生成质量人工评分维度**
+
+| 评分维度 | 评价标准 |
+|---|---|
+| 准确性 | 回答与课程资料和教师标准答案一致 |
+| 证据一致性 | 回答中的关键结论能够由引用来源支撑 |
+| 完整性 | 覆盖问题主要要求，缺少内容较少 |
+| 可解释性 | 语言清晰，步骤或概念解释符合学习场景 |
+| 引用完整性 | 引用来源可追溯，来源信息无明显缺失 |
+
+生成质量评估中，证据不足、引用为空、回答超出资料范围和结构异常均记录为典型错误类型。该评估方式能够帮助分析 RAG 问答链路中的问题来源，是资料覆盖不足、检索不准、重排序失效还是生成模型表达问题。
 
 ## 5.4 性能与稳定性分析
 
 当前系统原型并未进行大规模并发压测，因此性能分析主要基于主流程运行、自动化测试和指标接口。系统通过 RAGQueryEvent 记录每次问答的成功状态、时延、置信度、来源数量、fallback 原因和模型路由。管理端可聚合查询总数、成功率、fallback 率、主链成功率、平均置信度和延迟分位数。
 
-知识库构建方面，系统通过解析任务状态、队列任务 ID、重试次数、冷却时间和失败告警保证稳定性。即使 RAG-Anything 主链不可用，系统也能回退到本地解析和检索路径。该设计牺牲了一部分多模态增强能力，但提高了原型系统可运行性。
+知识库构建方面，系统通过解析任务状态、队列任务 ID、重试次数、冷却时间和失败告警维护稳定性。RAG-Anything 主链不可用时，系统回退到本地解析和检索路径。该处理会减少一部分多模态增强能力，但能维持原型系统的基础运行。
 
-离线 benchmark 脚本支持固定问题集执行、RAG 指标快照、可选多模态 fixture 检查、Recall@k、nDCG@k、MRR 和 baseline 对比报告。该能力为后续论文实验补充真实数据提供基础。
+离线 benchmark 脚本支持固定问题集执行、RAG 指标快照、可选多模态 fixture 检查、Recall@k、nDCG@k、MRR 和 baseline 对比报告。该能力为后续补充更完整的真实测试数据提供基础。
 
 ## 5.5 用户评估设计与原型可用性分析
 
 用户评估可面向学生、教师和管理员三类角色展开。学生侧评估关注回答是否准确、解释是否清晰、引用是否有帮助、推荐资料是否相关；教师侧评估关注资料上传与审核流程是否顺畅、AI 回答是否减轻重复答疑、学情分析是否有参考价值；管理员侧评估关注模型配置、索引任务和性能指标是否便于维护。
 
-由于当前阶段主要完成系统原型开发和核心功能测试，尚未进行大规模正式教学部署。论文后续可通过小规模试用问卷、访谈和任务完成时间统计补充用户评估结果。建议指标包括回答满意度、引用可信度、资料推荐满意度、教师审核效率和系统易用性评分。
+由于当前阶段主要完成系统原型开发和核心功能测试，尚未进行大规模正式教学部署。后续可通过小规模试用问卷、访谈和任务完成时间统计补充用户评估结果。建议指标包括回答满意度、引用可信度、资料推荐满意度、教师审核效率和系统易用性评分。
 
 ## 5.6 系统局限性分析
 
-第一，课程知识图谱构建仍偏启发式。当前主要基于关键词和共现关系，尚未形成成熟语义关系抽取。
-
-第二，多模态处理仍处于基础支持阶段。文档型多模态能力已经具备架构基础，但音视频 ASR、关键帧抽取和复杂视觉理解仍需完善。
-
-第三，RAG-Anything 主链与本地回退链并存。该设计提高了稳定性，但也意味着不同环境下问答效果可能存在差异。
-
-第四，推荐策略以规则驱动为主。当前推荐可解释但精度有限，尚未训练复杂个性化推荐模型。
-
-第五，大规模用户评估尚未充分开展。后续需要在真实课程中收集更多学生和教师反馈。
+系统局限主要体现在五个方面。第一，课程知识图谱构建仍偏启发式，当前主要依赖关键词、共现关系和模型抽取提示词，关系语义粒度有限。第二，多模态处理仍处于基础支持阶段，图片、表格和公式可以通过文本化描述参与检索，音视频主要完成上传和预处理接入，深度解析仍需完善。第三，核心链路依赖 MinerU、VLM 和外部大模型服务，模型服务质量和可用性会影响解析和问答效果。第四，索引和检索过程涉及多次模型调用，资料规模增大后会带来耗时和存储压力。第五，推荐策略以规则驱动为主，大规模真实课堂用户评估仍需补充。
 
 ## 5.7 实验指标与用户评估量表设计
 
-为了使系统测试结果能够支撑论文结论，本文将实验指标划分为功能正确性、检索质量、回答质量、系统性能和用户主观评价五类。功能正确性主要验证系统是否能够完成既定业务流程；检索质量用于衡量 RAG 模块能否找到正确证据；回答质量用于评价生成答案的准确性和可读性；系统性能用于分析平台在资料入库和问答过程中的响应表现；用户主观评价用于反映学生和教师对原型系统的实际接受程度。
+为了使系统测试结果能够支撑论文结论，本文将实验指标划分为功能正确性、索引质量、检索质量、回答质量、系统性能和用户主观评价六类。功能正确性主要验证系统是否能够完成既定业务流程；索引质量用于判断课程资料是否被解析和进入知识库；检索质量用于衡量 RAG 模块能否找到正确证据；回答质量用于评价生成答案的证据一致性和可读性；系统性能用于分析平台在资料入库和问答过程中的响应表现；用户主观评价用于反映学生和教师对原型系统的接受程度。
+
+**表 5-6 实验指标与评价方式**
 
 | 指标类别 | 指标名称 | 评价方式 |
 |---|---|---|
 | 功能正确性 | 上传成功率、索引成功率、审核流转成功率 | 根据测试用例执行结果统计 |
+| 索引质量 | 解析状态、分块数量、内容项数量、图谱节点边数量 | 根据解析任务和图谱表统计 |
 | 检索质量 | Recall@k、MRR、nDCG@k | 使用带标准证据的离线问题集计算 |
 | 回答质量 | 答案准确性、证据一致性、引用完整性 | 人工评分与样例对比结合 |
 | 系统性能 | 平均响应时间、P95 延迟、fallback 率 | 根据 RAGQueryEvent 和管理端指标统计 |
 | 用户评价 | 满意度、易用性、可信度、减负效果 | 问卷评分与访谈反馈结合 |
 
-离线检索实验可构建若干课程问题样本，每个样本包含问题、标准答案、标准证据片段和所属知识点。实验时分别运行普通关键词检索、向量检索、图谱辅助检索和混合检索，对比不同策略下的 Recall@k、MRR 和 nDCG@k。若混合检索能够在 Top-k 结果中更稳定地召回标准证据，则说明向量语义、关键词匹配和图谱扩展的组合对课程问答具有实际价值。
+离线检索实验可构建若干课程问题样本，每个样本包含问题、标准答案、标准证据片段和所属知识点。实验时分别运行普通关键词检索、向量检索、图谱辅助检索和混合检索，对比不同策略下的 Recall@k、MRR 和 nDCG@k。当混合检索在 Top-k 结果中更稳定地召回标准证据时，可以说明向量语义、关键词匹配和图谱扩展的组合对课程问答具有实际价值。
 
 回答质量评估可以采用五级评分。准确性评价答案是否符合课程资料；完整性评价是否覆盖问题关键点；可解释性评价是否有步骤化说明；引用可信度评价是否给出有效来源；教学适配性评价回答是否适合学生理解。每个问题由至少两名评估者评分，最终取平均值，并记录典型错误类型，例如证据不足、概念混淆、回答过短、引用缺失和生成内容超出资料范围。
 
 用户评估方面，学生问卷可包含“回答是否有帮助”“引用资料是否增强信任”“系统是否节省查找资料时间”“推荐资料是否相关”“界面操作是否清晰”等条目；教师问卷可包含“资料上传与审核是否顺畅”“系统是否减少重复答疑”“审核回流是否有价值”“学情分析是否有参考意义”等条目。评分采用 1 至 5 分李克特量表，并结合开放式问题收集改进建议。
 
-在论文撰写中，如果后续补充真实实验数据，可以将本节设计转化为正式结果表。例如，给出不同检索策略的 Recall@5 对比、学生满意度均值、教师审核效率变化和典型问答案例评分。若暂时缺少大规模真实数据，也应明确说明当前结果主要来自原型功能测试、离线样例和小规模试用反馈，避免夸大系统效果。
+后续补充真实实验数据时，可以将本节指标转化为正式结果表，给出不同检索策略的 Recall@5 对比、学生满意度均值、教师审核效率变化和典型问答案例评分。当前结论主要来自原型功能测试、离线样例和主流程验证，因此论文结论限定为系统主要功能可用和具备后续评估基础。
 
 ## 5.8 本章小结
 
-本章从实验环境、功能测试、典型案例、性能稳定性和用户评估设计角度分析了系统原型。结果表明，系统能够完成课程资料入库、知识库构建、RAG 问答、引用溯源、审核回流和学习支持等核心流程，并具备指标记录和离线评估基础。同时，系统在知识抽取、多模态深度理解、推荐模型和正式用户研究方面仍有改进空间。
+本章从实验环境、功能测试、索引质量评估、检索质量评估、生成质量评估、性能稳定性和用户评估设计角度分析了系统原型。测试结果说明，系统能够完成课程资料入库、知识库构建、RAG 问答、引用溯源、审核回流和辅助学习支持等主要流程，并具备指标记录和离线评估基础。同时，系统在知识抽取、多模态深度理解、推荐模型和正式用户研究方面仍有改进空间。
 
 ---
 
@@ -668,19 +856,19 @@ RAG-Anything 在 LightRAG 的基础上面向多模态场景进行了扩展，其
 
 本文围绕“基于大语言模型和检索增强生成的助教平台设计”开展研究，针对课程资源分散、教师重复答疑压力大、通用大模型回答缺少课程边界和证据来源等问题，设计并实现了一个面向课程教学场景的 AI 助教平台原型。
 
-系统采用 React + FastAPI 的前后端分离架构，后端基于 SQLAlchemy 管理课程、资料、知识库、聊天、审核和学习分析数据。知识引擎方面，系统引入 RAG-Anything 作为增强型多模态 RAG 主链，并保留本地 SimpleRAGEngine 作为回退链。系统支持课程资料上传、文件去重、本地/MinIO 存储、同步/异步索引、MinerU 文档解析、多模态 content items 归一化、课程知识图谱原型构建、查询改写、图谱辅助检索、reranker 重排序、答案生成、citation 落库、低置信审核、教师修正回流和学习分析。
+系统采用 React + FastAPI 的前后端分离架构，后端基于 SQLAlchemy 管理课程、班级、资料、知识库、聊天、审核和学习记录数据。知识引擎方面，系统接入 RAG-Anything 与 LightRAG 相关能力，并保留本地 SimpleRAGEngine 作为回退链。系统实现了课程资料上传、文件去重、本地/MinIO 存储、同步/异步索引、MinerU 文档解析、内容项归一化、课程知识图谱投影、问题预处理、双路检索、候选证据重排、答案生成、引用落库、教师审核回流和辅助学习支持。
 
-本文的主要成果包括：第一，完成了 LLM+RAG 助教平台总体架构设计；第二，实现了课程资料动态入库和知识库状态管理；第三，构建了带置信度和 provenance 的课程知识图谱原型；第四，实现了可追溯的 RAG 问答链路；第五，设计了教师审核与知识回流机制；第六，提供了学习分析、错题、闪卡和规则推荐能力；第七，建立了管理端 RAG 指标和离线 benchmark 评估基础。
+本文的主要工作包括：第一，完成了 LLM+RAG 助教平台总体架构设计；第二，实现了班级空间、资料上传和知识库状态管理；第三，构建了带来源信息的课程知识图谱原型；第四，实现了可追溯的 RAG 问答链路；第五，设计了教师审核与知识回流机制；第六，提供了学习记录、学生画像、闪卡和规则推荐等辅助学习能力；第七，建立了管理端 RAG 指标和离线 benchmark 评估基础。系统测试验证了资料上传、知识库构建、知识图谱展示、课程问答、引用溯源和教师审核回流等主要功能的可用性。
 
 ## 6.2 不足分析
 
-当前系统仍存在以下不足。首先，知识图谱抽取主要依赖关键词和共现关系，缺少更强的语义关系抽取能力。其次，多模态处理在图片、表格和公式方面已有基础，但音视频深度解析仍未完全实现。再次，系统的个性化推荐主要由规则驱动，尚未充分利用真实学习数据训练推荐模型。此外，虽然系统具备自动化测试和实验指标接口，但真实课堂环境中的大规模用户评估仍需补充。
+当前系统仍存在以下不足。首先，知识图谱抽取受到文档解析质量、抽取提示词和模型能力影响，关系语义粒度仍有限。其次，多模态处理在图片、表格和公式方面已有基础，音视频资料主要完成上传和预处理接入，深度解析仍未完全实现。再次，系统较依赖 MinerU、VLM 和外部大模型服务，无法对模型内部能力进行直接改进。此外，知识库索引和检索过程涉及多次模型调用，资料规模增大后会带来耗时和存储压力。最后，个性化推荐主要由规则驱动，真实课堂环境中的大规模用户评估仍需补充。
 
 ## 6.3 未来工作展望
 
-后续工作可从以下方向展开。第一，接入更成熟的 ASR 与 VLM 能力，对课堂录播、实验视频和图片资料进行更完整的转写和视觉理解。第二，引入向量数据库和更强的 reranker，提高大规模课程资料下的检索效率与证据质量。第三，使用大语言模型或信息抽取模型改进课程知识图谱构建，将共现关系升级为先修、包含、因果、应用等语义关系。第四，积累教师审核数据，将其整理为微调或偏好优化数据集，进一步提升模型在课程场景中的回答风格和准确性。第五，在真实课程中开展用户评估，通过问卷、访谈、日志分析和学习效果对比验证系统实用性。
+后续工作可从以下方向展开。第一，完善音视频资料处理链路，接入更成熟的 ASR、关键帧抽取和视觉语言模型，对课堂录播、实验视频和图片资料进行更完整的转写、定位和描述。第二，优化知识库构建效率，在资料解析、向量嵌入、图谱索引和任务调度环节增加批处理、缓存和增量更新机制，降低大规模资料入库耗时。第三，改进课程知识图谱构建方法，引入更稳定的信息抽取模型或人工校正流程，将当前较粗的共现关系逐步扩展为先修、包含、因果、应用和考查等语义关系。第四，完善检索与生成评估体系，构建规模更稳定的课程问题集和标准证据集，对不同检索策略、重排序方式和提示词配置进行对比。第五，在真实课程中开展小规模试用，通过问卷、访谈、日志分析和教师审核记录评估系统对学习支持和教学管理的实际帮助。
 
-总体而言，本文系统已经实现面向课程场景的 AI 助教平台核心原型，为 LLM、RAG、多模态解析、课程知识图谱和教师审核闭环在教学场景中的结合提供了可运行实践基础。
+总体而言，本文完成了面向课程场景的 AI 助教平台核心原型，为 LLM、RAG、多模态解析、课程知识图谱和教师审核闭环在教学场景中的结合提供了可运行实践基础。
 
 ---
 
@@ -770,11 +958,16 @@ RAG_ANSWER_TOP_K=3
 3. 图 2-2 RAG-Anything 双图与跨模态检索示意图  
 4. 图 3-1 系统总体架构图  
 5. 图 3-2 课程资料上传与知识库构建流程图  
-6. 图 4-1 资料入库与索引任务化链路图  
-7. 图 4-2 content items 多模态内容分流图  
-8. 图 4-3 课程知识图谱原型数据结构图  
-9. 图 4-4 RAG 问答处理链路图  
-10. 图 4-5 教师审核与知识回流流程图  
-11. 表 4-1 系统模型、工具与配置说明表  
-12. 表 5-1 系统测试环境配置表  
-13. 表 5-2 功能测试结果汇总表  
+6. 图 3-3 系统核心数据库 ER 图
+7. 表 3-3 核心数据表设计说明
+8. 图 4-1 班级创建与加入流程图
+9. 图 4-2 知识图谱融合与可视化流程图
+10. 图 4-3 RAG 问答模块总体流程图
+11. 表 4-1 班级空间主要数据表
+12. 表 4-2 课程资料存储对象说明
+13. 表 4-3 文本图谱抽取提示词约束
+14. 表 5-1 系统测试环境配置表
+15. 表 5-2 核心功能测试汇总表
+16. 表 5-3 索引质量评估记录项
+17. 表 5-4 检索质量评价指标
+18. 表 5-5 生成质量人工评分维度

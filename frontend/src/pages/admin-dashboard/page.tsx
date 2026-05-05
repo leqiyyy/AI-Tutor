@@ -4,6 +4,7 @@ import ProductSidePanel from '../../components/ProductSidePanel';
 import { useAuth } from '@/hooks/use-auth';
 import { authService } from '@/services/auth';
 import { adminService } from '@/services/admin';
+import type { AdminAuditEvent } from '@/services/admin';
 import { dashboardService } from '@/services/dashboard';
 import type {
   AdminAuditAnswer,
@@ -28,6 +29,11 @@ export default function AdminDashboard() {
   const [courses, setCourses] = useState<AdminCourseRow[]>([]);
   const [auditAnswers, setAuditAnswers] = useState<AdminAuditAnswer[]>([]);
   const [auditReports, setAuditReports] = useState<AdminAuditReport[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AdminAuditEvent[]>([]);
+  const [auditEventsLoading, setAuditEventsLoading] = useState(false);
+  const [auditEventsRefreshKey, setAuditEventsRefreshKey] = useState(0);
+  const [auditEventStatus, setAuditEventStatus] = useState('');
+  const [auditEventType, setAuditEventType] = useState('');
   const [sensitiveWords, setSensitiveWords] = useState<string[]>([]);
   const [newSensitiveWord, setNewSensitiveWord] = useState('');
   const [systemSettings, setSystemSettings] = useState({
@@ -75,6 +81,37 @@ export default function AdminDashboard() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'events') {
+      return;
+    }
+
+    let mounted = true;
+    setAuditEventsLoading(true);
+    adminService
+      .listAuditEvents({
+        status: auditEventStatus || undefined,
+        event_type: auditEventType || undefined,
+        page: 1,
+        page_size: 50,
+      })
+      .then((data) => {
+        if (!mounted) return;
+        setAuditEvents(data.items);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setDashboardError(error instanceof Error ? error.message : '系统事件加载失败');
+      })
+      .finally(() => {
+        if (mounted) setAuditEventsLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [activeTab, auditEventStatus, auditEventType, auditEventsRefreshKey]);
 
   const handleLogout = () => {
     authService.logout();
@@ -245,6 +282,18 @@ export default function AdminDashboard() {
   const displayName = dashboardData?.greetingName || user?.displayName || user?.name || '管理员';
   const accountLabel = user?.email || user?.account || '';
   const avatarInitial = displayName.trim().charAt(0) || '管';
+  const eventTypeOptions = [
+    ['auth.user_registered', '用户注册'],
+    ['class.created', '创建班级'],
+    ['class.student_joined', '学生加班'],
+    ['material.uploaded', '资料上传'],
+    ['material.downloaded', '资料下载'],
+    ['material.index_completed', '索引完成'],
+    ['material.index_failed', '索引失败'],
+    ['chat.query_started', '问答开始'],
+    ['chat.query_completed', '问答完成'],
+    ['chat.query_failed', '问答失败'],
+  ];
 
   return (
     <div className="soft-dash soft-dash-admin min-h-screen bg-gray-50">
@@ -265,6 +314,7 @@ export default function AdminDashboard() {
                   内容审核
                   <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
                 </button>
+                <button onClick={() => setActiveTab('events')} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'events' ? 'bg-teal-50 text-teal-600' : 'text-gray-600 hover:text-gray-900'}`}>系统事件</button>
                 <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'settings' ? 'bg-teal-50 text-teal-600' : 'text-gray-600 hover:text-gray-900'}`}>系统设置</button>
               </div>
             </div>
@@ -749,6 +799,86 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        {activeTab === 'events' && (
+          <div className="max-w-7xl mx-auto">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900">系统事件</h1>
+                <p className="text-sm text-gray-500 mt-1">注册、班级、资料、索引和 AI 问答的关键操作记录</p>
+              </div>
+              <button
+                onClick={() => setAuditEventsRefreshKey((value) => value + 1)}
+                className="px-4 py-2 text-sm font-medium text-teal-600 border border-teal-200 rounded-lg hover:bg-teal-50 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <i className="ri-refresh-line mr-1"></i>刷新
+              </button>
+            </div>
+
+            <div className="bg-white rounded-lg border border-gray-200">
+              <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-100">
+                <select value={auditEventType} onChange={(e) => setAuditEventType(e.target.value)} className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  <option value="">全部事件</option>
+                  {eventTypeOptions.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <select value={auditEventStatus} onChange={(e) => setAuditEventStatus(e.target.value)} className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  <option value="">全部状态</option>
+                  <option value="success">成功</option>
+                  <option value="failed">失败</option>
+                </select>
+                <div className="text-sm text-gray-500">{auditEventsLoading ? '正在加载...' : `共 ${auditEvents.length} 条`}</div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">时间</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">事件</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">状态</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作者</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">说明</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {auditEvents.map((event) => (
+                      <tr key={event.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{formatEventTime(event.created_at)}</td>
+                        <td className="px-4 py-3">
+                          <div className="text-sm font-medium text-gray-900">{eventTypeLabel(event.event_type)}</div>
+                          <div className="text-xs text-gray-500">{event.event_type}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${event.status === 'failed' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                            {event.status === 'failed' ? '失败' : '成功'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="text-sm text-gray-900">{event.actor_name || '系统'}</div>
+                          <div className="text-xs text-gray-500">{roleLabel(event.actor_role)}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="text-sm text-gray-900 max-w-xl truncate">{event.summary || '-'}</div>
+                          <div className="text-xs text-gray-500 mt-1">
+                            {event.class_id ? `班级 ${event.class_id.slice(0, 8)}` : ''}
+                            {event.material_id ? ` · 资料 ${event.material_id.slice(0, 8)}` : ''}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {!auditEventsLoading && auditEvents.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-10 text-center text-sm text-gray-500">暂无系统事件</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'settings' && (
           <div className="max-w-4xl mx-auto">
             <h1 className="text-2xl font-bold text-gray-900 mb-6">系统设置</h1>
@@ -861,4 +991,38 @@ export default function AdminDashboard() {
       <ProductSidePanel role="admin" />
     </div>
   );
+}
+
+function eventTypeLabel(eventType: string) {
+  const labels: Record<string, string> = {
+    'auth.user_registered': '用户注册',
+    'class.created': '创建班级',
+    'class.student_joined': '学生加班',
+    'material.uploaded': '资料上传',
+    'material.downloaded': '资料下载',
+    'material.index_started': '索引开始',
+    'material.index_completed': '索引完成',
+    'material.index_failed': '索引失败',
+    'chat.query_started': '问答开始',
+    'chat.query_completed': '问答完成',
+    'chat.query_failed': '问答失败',
+  };
+  return labels[eventType] || eventType;
+}
+
+function roleLabel(role?: string | null) {
+  return { student: '学生', teacher: '教师', admin: '管理员' }[role || ''] || role || '系统';
+}
+
+function formatEventTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }

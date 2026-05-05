@@ -16,7 +16,7 @@ from app.models.personalization import (
     StudentLearningPreference,
     StudentRiskSignal,
 )
-from app.models.admin import AdminSetting
+from app.models.admin import AdminAuditEvent, AdminSetting
 
 __all__ = [
     "User",
@@ -28,5 +28,5 @@ __all__ = [
     "StudentConceptMastery", "StudentLearningPreference", "StudentRiskSignal",
     "LearningConcept", "LearningConceptRelation", "LearningResourceLink",
     "LearningPath", "LearningPathStep", "RecommendationEvent",
-    "AdminSetting",
+    "AdminSetting", "AdminAuditEvent",
 ]

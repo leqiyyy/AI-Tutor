@@ -16,6 +16,7 @@ from app.models.course import Class, ClassMember, Course, Material
 from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.user import User
+from app.services import audit_service
 
 _UNSET = object()
 log = get_logger(__name__)
@@ -826,6 +827,30 @@ async def process_parse_task_by_id(
             )
             db.expire_all()
             final_task = db.query(FileParseTask).filter(FileParseTask.id == parse_task_id).first()
+        if final_task:
+            final_material = db.query(Material).filter(Material.id == final_task.material_id).first()
+            final_class = db.query(Class).filter(Class.id == final_task.class_id).first()
+            success = final_task.status == "completed"
+            file_name = final_material.file_name if final_material else final_task.material_id
+            audit_service.record_event(
+                event_type="material.index_completed" if success else "material.index_failed",
+                status="success" if success else "failed",
+                actor_id=final_material.uploaded_by if final_material else None,
+                actor_role="teacher",
+                target_type="material",
+                target_id=final_task.material_id,
+                course_id=final_class.course_id if final_class else final_task.course_id,
+                class_id=final_task.class_id,
+                material_id=final_task.material_id,
+                summary=f"资料索引{'完成' if success else '失败'}：{file_name}",
+                extra_data={
+                    "parse_task_id": final_task.id,
+                    "kb_status": final_material.kb_status if final_material else None,
+                    "task_status": final_task.status,
+                    "error_message": final_task.error_message,
+                    "auto_retry": auto_retry,
+                },
+            )
         return {
             "ok": bool(final_task and final_task.status == "completed"),
             "action": action,

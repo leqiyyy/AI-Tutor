@@ -26,7 +26,7 @@ from app.models.course import Class, ClassMember, Material, Submission, Task
 from app.models.chat import ChatCitation, ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
 from app.models.knowledge import FileParseTask, KBSpace
 from app.models.user import User
-from app.services import admin_service, analytics_service, conversation_context_service, model_routing_service, rag_metrics_service
+from app.services import admin_service, analytics_service, audit_service, conversation_context_service, model_routing_service, rag_metrics_service
 from app.services.question_router import QuestionRoute, classify_direct_intent, route_question
 
 log = get_logger(__name__)
@@ -176,6 +176,10 @@ def _msg_to_dict(message: ChatMessage) -> dict:
     }
 
 
+def _role_label(role: str) -> str:
+    return {"student": "学生", "teacher": "教师", "admin": "管理员"}.get(role, role)
+
+
 async def send_message(
     db: Session,
     class_id: str,
@@ -241,6 +245,21 @@ async def send_message(
         extra_data={"role": role},
     )
     analytics_service.record_question_topics(db, class_id, content)
+    audit_service.record_event(
+        event_type="chat.query_started",
+        actor_id=user_id,
+        actor_role=role,
+        target_type="chat_message",
+        target_id=user_msg.id,
+        class_id=class_id,
+        summary=f"{_role_label(role)}提交 AI 助教问题",
+        extra_data={
+            "session_id": session.id,
+            "question_preview": content[:200],
+            "answer_mode": answer_mode,
+            "attachment_count": len(prepared_attachments or []),
+        },
+    )
     await _emit_progress(
         progress_callback,
         stage="message_saved",
@@ -289,6 +308,24 @@ async def send_message(
             confidence=routed_answer.get("confidence", 1.0),
         )
         direct_result["route_meta"] = _build_response_route_meta(question_route, retrieval_used=False)
+        audit_service.record_event(
+            event_type="chat.query_completed",
+            actor_id=user_id,
+            actor_role=role,
+            target_type="chat_message",
+            target_id=direct_result["ai_message"]["id"],
+            class_id=class_id,
+            summary=f"{_role_label(role)}的 AI 助教问题已直接回答",
+            extra_data={
+                "session_id": session.id,
+                "user_message_id": user_msg.id,
+                "question_preview": content[:200],
+                "route": question_route.route,
+                "intent": question_route.intent,
+                "retrieval_used": False,
+                "latency_ms": round((perf_counter() - progress_started) * 1000, 2),
+            },
+        )
         await _emit_progress(
             progress_callback,
             stage="completed",
@@ -332,6 +369,24 @@ async def send_message(
             confidence=0.82,
         )
         direct_result["route_meta"] = _build_response_route_meta(question_route, retrieval_used=False)
+        audit_service.record_event(
+            event_type="chat.query_completed",
+            actor_id=user_id,
+            actor_role=role,
+            target_type="chat_message",
+            target_id=direct_result["ai_message"]["id"],
+            class_id=class_id,
+            summary=f"{_role_label(role)}的 AI 助教问题已快速回答",
+            extra_data={
+                "session_id": session.id,
+                "user_message_id": user_msg.id,
+                "question_preview": content[:200],
+                "route": question_route.route,
+                "intent": question_route.intent,
+                "retrieval_used": False,
+                "latency_ms": round((perf_counter() - progress_started) * 1000, 2),
+            },
+        )
         await _emit_progress(
             progress_callback,
             stage="completed",
@@ -570,6 +625,38 @@ async def send_message(
     )
     db.commit()
     db.refresh(ai_msg)
+    result_meta = getattr(result, "meta", {}) or {}
+    used_fallback = bool(result_meta.get("used_fallback"))
+    audit_service.record_event(
+        event_type="chat.query_failed" if used_fallback else "chat.query_completed",
+        status="failed" if used_fallback else "success",
+        actor_id=user_id,
+        actor_role=role,
+        target_type="chat_message",
+        target_id=ai_msg.id,
+        class_id=class_id,
+        summary=(
+            f"{_role_label(role)}的 AI 助教问题触发兜底回复"
+            if used_fallback
+            else f"{_role_label(role)}的 AI 助教问题已完成检索回答"
+        ),
+        extra_data={
+            "session_id": session.id,
+            "user_message_id": user_msg.id,
+            "question_preview": content[:200],
+            "route": question_route.route,
+            "intent": question_route.intent,
+            "retrieval_used": True,
+            "engine": result_meta.get("engine"),
+            "query_mode": result_meta.get("query_mode"),
+            "query_method": result_meta.get("query_method"),
+            "used_fallback": used_fallback,
+            "fallback_reason": result_meta.get("fallback_reason"),
+            "latency_ms": round((perf_counter() - progress_started) * 1000, 2),
+            "source_count": len(result.sources or []),
+            "confidence": result.confidence,
+        },
+    )
     await _emit_progress(
         progress_callback,
         stage="completed",
