@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.index{fill:#edf5ff;stroke:#6aa3dc}.filter{fill:#fff7e6;stroke:#d6a03c}.local{fill:#eef9f1;stroke:#6fb879}.front{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .node{fill:#e0f2fe;stroke:#0284c7;stroke-width:2}.bad{fill:#fee2e2;stroke:#dc2626;stroke-width:2}.edge{stroke:#64748b;stroke-width:1.8}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">知识图谱投影与前端展示示例</text>
+  <text x="60" y="94" class="sub">合并后的索引图谱被读取并投影到本地知识实体和知识关系表，前端展示时过滤 relation_endpoint、文件名和解析产物类节点。</text>
+
+  <rect x="70" y="150" width="250" height="210" class="box index"/>
+  <text x="95" y="190" class="head">索引图谱</text>
+  <line x1="145" y1="250" x2="220" y2="230" class="edge"/>
+  <line x1="220" y1="230" x2="255" y2="300" class="edge"/>
+  <circle cx="145" cy="250" r="28" class="node"/><circle cx="220" cy="230" r="28" class="node"/><circle cx="255" cy="300" r="24" class="bad"/>
+  <text x="100" y="335" class="body">实体、关系、chunk 来源</text>
+
+  <rect x="405" y="150" width="250" height="210" class="box filter"/>
+  <text x="430" y="190" class="head">投影过滤</text>
+  <text x="430" y="228" class="body">保留课程实体</text>
+  <text x="430" y="258" class="body">保留可解释关系</text>
+  <text x="430" y="288" class="body">隐藏 relation_endpoint</text>
+  <text x="430" y="318" class="body">隐藏文件名与解析产物节点</text>
+
+  <rect x="740" y="150" width="250" height="210" class="box local"/>
+  <text x="765" y="190" class="head">本地图谱表</text>
+  <text x="765" y="228" class="body">KnowledgeEntity</text>
+  <text x="765" y="258" class="body">KnowledgeRelation</text>
+  <text x="765" y="288" class="body">material_id / course_id</text>
+  <text x="765" y="318" class="body">description / confidence</text>
+
+  <rect x="405" y="465" width="585" height="160" class="box front"/>
+  <text x="430" y="505" class="head">前端可视化结果</text>
+  <circle cx="500" cy="565" r="26" class="node"/><circle cx="610" cy="535" r="26" class="node"/><circle cx="735" cy="575" r="26" class="node"/><circle cx="855" cy="540" r="26" class="node"/>
+  <line x1="526" y1="559" x2="584" y2="541" class="edge"/><line x1="635" y1="544" x2="710" y2="565" class="edge"/><line x1="760" y1="568" x2="830" y2="548" class="edge"/>
+  <text x="430" y="610" class="small">展示稳定课程概念、公式、例题和多模态证据；不展示低质量解析端点。</text>
+
+  <path d="M320 255 H400" class="arrow"/>
+  <path d="M655 255 H735" class="arrow"/>
+  <path d="M865 360 V460" class="arrow"/>
+  <path d="M530 360 V460" class="arrow"/>
+</svg>

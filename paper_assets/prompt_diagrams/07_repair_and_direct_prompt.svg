@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.subtitle{font-size:17px;fill:#536179}
+      .box{fill:#fff;stroke:#ccd5e4;stroke-width:2;rx:8}.blue{fill:#edf5ff;stroke:#74a7df}.green{fill:#eef9f1;stroke:#73b77d}.orange{fill:#fff6e8;stroke:#d8a13f}.gray{fill:#f3f4f6;stroke:#9aa5b1}
+      .head{font-size:19px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">答案修复与快速回答 Prompt</text>
+  <text x="60" y="96" class="subtitle">这两类 prompt 由本系统单独构造，不属于 RAG-Anything 或 LightRAG 官方模板。</text>
+
+  <rect x="80" y="145" width="500" height="215" class="box blue"/>
+  <text x="110" y="185" class="head">答案修复 Prompt</text>
+  <text x="110" y="221" class="body">触发条件：回答乱码、重复或结构异常</text>
+  <text x="110" y="249" class="body">输入：原问题、已检索资料片段、异常原回答</text>
+  <text x="110" y="277" class="body">要求：仅依据资料，先结论，再 2-4 个要点</text>
+  <text x="110" y="305" class="body">系统身份：面向中国高校课程的 AI 助教</text>
+  <text x="110" y="333" class="small">作用：提高最终呈现质量，不重新扩大检索范围。</text>
+
+  <rect x="700" y="145" width="500" height="215" class="box green"/>
+  <text x="730" y="185" class="head">快速回答 / 教师工具 Prompt</text>
+  <text x="730" y="221" class="body">触发条件：直接问答或教师工具场景</text>
+  <text x="730" y="249" class="body">快速回答：不得声称来自课程知识库</text>
+  <text x="730" y="277" class="body">教师工具：输出可直接使用的教学内容</text>
+  <text x="730" y="305" class="body">上下文不足时说明需要教师补充</text>
+  <text x="730" y="333" class="small">作用：绕过 RAG 检索，面向轻量问答和工具生成。</text>
+
+  <path d="M330 360 V450" class="arrow"/><path d="M950 360 V450" class="arrow"/>
+
+  <rect x="230" y="480" width="820" height="140" class="box gray"/>
+  <text x="265" y="520" class="head">论文展示建议</text>
+  <text x="265" y="556" class="body">将这类 prompt 放在“问答质量控制与教师工具”小节中，作为系统补充链路说明。</text>
+  <text x="265" y="586" class="body">正文强调其由系统自定义构造，避免和官方框架 prompt 混淆。</text>
+</svg>

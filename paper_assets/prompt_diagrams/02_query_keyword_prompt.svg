@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.subtitle{font-size:17px;fill:#536179}
+      .box{fill:#fff;stroke:#ccd5e4;stroke-width:2;rx:8}.blue{fill:#edf5ff;stroke:#74a7df}.green{fill:#eef9f1;stroke:#73b77d}.orange{fill:#fff6e8;stroke:#d8a13f}.gray{fill:#f3f4f6;stroke:#9aa5b1}
+      .head{font-size:19px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">查询解析与关键词抽取 Prompt</text>
+  <text x="60" y="96" class="subtitle">文本查询由 LightRAG 抽取高层与低层关键词；带多模态附件时，RAG-Anything 先生成附件描述并增强查询文本。</text>
+
+  <rect x="70" y="145" width="270" height="145" class="box orange"/>
+  <text x="95" y="184" class="head">输入</text>
+  <text x="95" y="220" class="body">用户问题</text>
+  <text x="95" y="248" class="body">历史对话摘要</text>
+  <text x="95" y="276" class="body">可选图片/表格/公式附件</text>
+
+  <rect x="455" y="120" width="335" height="190" class="box blue"/>
+  <text x="480" y="160" class="head">LightRAG keywords_extraction</text>
+  <text x="480" y="196" class="body">Role：RAG 关键词抽取器</text>
+  <text x="480" y="224" class="body">Goal：抽取两类关键词</text>
+  <text x="480" y="252" class="body">Constraints：输出 JSON、来自问题本身</text>
+  <text x="480" y="280" class="body">变量：{query}、{language}、示例</text>
+
+  <rect x="900" y="120" width="310" height="190" class="box gray"/>
+  <text x="925" y="160" class="head">输出</text>
+  <text x="925" y="196" class="body">high_level_keywords</text>
+  <text x="925" y="224" class="body">用于 global / 图谱语义召回</text>
+  <text x="925" y="258" class="body">low_level_keywords</text>
+  <text x="925" y="286" class="body">用于 local / 实体细节召回</text>
+
+  <path d="M340 215 H450" class="arrow"/><path d="M790 215 H895" class="arrow"/>
+
+  <rect x="170" y="395" width="360" height="185" class="box blue"/>
+  <text x="195" y="435" class="head">RAG-Anything 查询多模态增强</text>
+  <text x="195" y="471" class="body">根据附件类型选择 QUERY_* prompt</text>
+  <text x="195" y="499" class="body">图片：生成简要视觉描述</text>
+  <text x="195" y="527" class="body">表格/公式/通用内容：生成摘要说明</text>
+  <text x="195" y="555" class="body">追加 QUERY_ENHANCEMENT_SUFFIX</text>
+
+  <rect x="670" y="395" width="360" height="185" class="box green"/>
+  <text x="695" y="435" class="head">增强后的查询文本</text>
+  <text x="695" y="471" class="body">原始问题</text>
+  <text x="695" y="499" class="body">+ Related multimodal content</text>
+  <text x="695" y="527" class="body">+ 综合回答要求</text>
+  <text x="695" y="555" class="body">随后进入 LightRAG 查询流程</text>
+
+  <path d="M530 488 H665" class="arrow"/>
+  <path d="M850 395 C850 345 620 352 620 315" class="arrow"/>
+  <text x="82" y="690" class="small">注：本项目代码未替换官方关键词抽取模板；角色化课程回答指导语在后续回答生成阶段传入。</text>
+</svg>

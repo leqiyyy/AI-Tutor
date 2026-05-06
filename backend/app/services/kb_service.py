@@ -1385,6 +1385,8 @@ def _task_to_summary(task: FileParseTask, material: Material | None) -> dict:
         "alert_count": int(alert.get("count", 0) or 0),
         "last_alert_reason": alert.get("last_reason"),
         "last_alert_at": alert.get("last_alert_at"),
+        "stage_trace": extra.get("stage_trace"),
+        "model_call_trace": extra.get("model_call_trace"),
         "updated_at": task.updated_at,
         "created_at": task.created_at,
     }

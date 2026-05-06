@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}
+      .subtitle{font-size:17px;fill:#536179}
+      .box{fill:#ffffff;stroke:#ccd5e4;stroke-width:2;rx:8}
+      .official{fill:#edf5ff;stroke:#74a7df}
+      .addon{fill:#eef9f1;stroke:#73b77d}
+      .runtime{fill:#fff6e8;stroke:#d8a13f}
+      .output{fill:#f3f4f6;stroke:#9aa5b1}
+      .head{font-size:19px;font-weight:700}
+      .body{font-size:15px;fill:#334155}
+      .small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">Prompt 结构总览</text>
+  <text x="60" y="96" class="subtitle">官方模板保持原有输出约束，本系统在运行时追加教育场景指导语，并注入用户问题、课程证据和角色信息。</text>
+
+  <rect x="70" y="150" width="300" height="170" class="box official"/>
+  <text x="95" y="190" class="head">官方 Prompt 模板</text>
+  <text x="95" y="226" class="body">LightRAG：关键词抽取、</text>
+  <text x="95" y="252" class="body">实体关系抽取、回答生成</text>
+  <text x="95" y="288" class="body">RAG-Anything：图片、表格、</text>
+  <text x="95" y="314" class="body">公式和查询多模态增强</text>
+
+  <rect x="490" y="150" width="300" height="170" class="box addon"/>
+  <text x="515" y="190" class="head">AI Tutor 追加指导语</text>
+  <text x="515" y="226" class="body">课程领域：RAG_EDUCATION_SUBJECT</text>
+  <text x="515" y="252" class="body">回答：证据优先、说明不确定</text>
+  <text x="515" y="278" class="body">图谱：限定课程实体和关系语义</text>
+  <text x="515" y="304" class="body">多模态：提取学习相关视觉信息</text>
+
+  <rect x="910" y="150" width="300" height="170" class="box runtime"/>
+  <text x="935" y="190" class="head">运行时变量</text>
+  <text x="935" y="226" class="body">用户问题、历史对话</text>
+  <text x="935" y="252" class="body">检索到的图谱数据和文本块</text>
+  <text x="935" y="278" class="body">图片、表格、公式内容项</text>
+  <text x="935" y="304" class="body">用户角色与课程配置</text>
+
+  <path d="M370 235 H485" class="arrow"/>
+  <path d="M790 235 H905" class="arrow"/>
+  <path d="M1060 320 V405" class="arrow"/>
+  <path d="M640 320 V405" class="arrow"/>
+  <path d="M220 320 V405" class="arrow"/>
+
+  <rect x="150" y="430" width="980" height="190" class="box output"/>
+  <text x="185" y="470" class="head">模型调用输入</text>
+  <text x="185" y="506" class="body">完整 Prompt = 官方模板 + 本系统追加指导语 + 运行时变量</text>
+  <text x="185" y="536" class="body">追加方式：保留官方格式要求，在模板末尾追加教育场景约束；查询角色指导语在接口支持时通过 user_prompt 传入。</text>
+  <text x="185" y="574" class="body">输出结果进入不同链路：关键词用于检索，实体关系用于知识图谱，视觉描述用于索引，最终回答用于聊天记录与引用溯源。</text>
+  <text x="185" y="604" class="small">图中展示的是 prompt 组成框架，论文正文可配合表格说明各阶段作用。</text>
+</svg>

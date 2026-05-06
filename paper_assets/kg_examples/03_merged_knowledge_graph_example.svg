@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .node text{font-size:15px;font-weight:700}.desc{font-size:13px;fill:#64748b}
+      .edge{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#7c3aed;stroke-width:2.2;fill:none;stroke-dasharray:7 6;marker-end:url(#arrowPurple)}
+      .merge{stroke:#059669;stroke-width:3;fill:none;stroke-dasharray:10 7}
+      .label{font-size:13px;fill:#334155}
+      .concept{fill:#e0f2fe;stroke:#0284c7;stroke-width:2}.modal{fill:#ede9fe;stroke:#7c3aed;stroke-width:2}.formula{fill:#fef3c7;stroke:#d97706;stroke-width:2}.example{fill:#dcfce7;stroke:#16a34a;stroke-width:2}.root{fill:#dbeafe;stroke:#2563eb;stroke-width:3}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+    <marker id="arrowPurple" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#7c3aed"/></marker>
+  </defs>
+  <rect width="1280" height="820" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">合并后的课程知识图谱示例</text>
+  <text x="60" y="94" class="sub">文本图谱与跨模态图谱在 LightRAG 索引图谱中共同维护；系统投影到本地展示图时，按实体名称、类型和关系来源进行展示与过滤。</text>
+
+  <g class="node">
+    <circle cx="640" cy="125" r="56" class="root"/>
+    <text x="604" y="121">课程空间</text><text x="604" y="146">知识图谱</text>
+  </g>
+
+  <path d="M640 180 C560 215 500 255 445 310" class="edge"/>
+  <path d="M640 180 C720 215 780 255 835 310" class="edge"/>
+  <text x="505" y="232" class="label">contains</text>
+  <text x="742" y="232" class="label">contains</text>
+
+  <g class="node">
+    <circle cx="430" cy="335" r="66" class="concept"/>
+    <text x="396" y="331">文本实体</text><text x="394" y="357">拥塞控制</text>
+  </g>
+  <g class="node">
+    <circle cx="850" cy="335" r="66" class="concept"/>
+    <text x="807" y="331">跨模态实体</text><text x="814" y="357">拥塞窗口</text>
+  </g>
+
+  <ellipse cx="640" cy="335" rx="86" ry="48" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="603" y="331" class="label" font-weight="700">实体融合点</text>
+  <text x="582" y="357" class="desc">名称/别名/语义重合</text>
+  <path d="M500 335 H552" class="merge"/>
+  <path d="M728 335 H780" class="merge"/>
+
+  <g class="node">
+    <circle cx="640" cy="510" r="72" class="concept"/>
+    <text x="596" y="506">合并后实体</text><text x="599" y="533">拥塞控制</text>
+  </g>
+  <path d="M640 383 V435" class="edge"/>
+  <text x="658" y="417" class="label">merge_to</text>
+
+  <g class="node">
+    <circle cx="300" cy="610" r="58" class="formula"/>
+    <text x="274" y="606">公式</text><text x="247" y="631">窗口增长规则</text>
+  </g>
+  <g class="node">
+    <rect x="815" y="560" width="200" height="105" rx="14" class="modal"/>
+    <text x="867" y="602">图片证据</text><text x="847" y="630">拥塞窗口变化图</text>
+  </g>
+  <g class="node">
+    <circle cx="960" cy="470" r="58" class="example"/>
+    <text x="932" y="466">例题</text><text x="913" y="491">吞吐量计算</text>
+  </g>
+
+  <path d="M590 555 C510 620 405 650 330 635" class="edge"/>
+  <text x="445" y="662" class="label">uses_formula</text>
+  <path d="M700 555 C770 620 835 650 900 635" class="dash"/>
+  <text x="735" y="666" class="label">supported_by_modal</text>
+  <path d="M710 490 C785 440 865 430 920 455" class="edge"/>
+  <text x="790" y="426" class="label">example_of</text>
+
+  <rect x="70" y="690" width="540" height="92" class="box"/>
+  <text x="95" y="725" class="label">说明：文本节点和跨模态节点不会在前端简单重复展示为两套孤立图。</text>
+  <text x="95" y="752" class="desc">投影展示时保留课程概念、公式、例题和可追溯的多模态证据节点，并隐藏解析产物类无效节点。</text>
+</svg>

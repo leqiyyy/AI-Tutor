@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900" viewBox="0 0 1280 900">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.official{fill:#edf5ff;stroke:#6aa3dc}.addon{fill:#eef9f1;stroke:#6fb879}.input{fill:#fff7e6;stroke:#d6a03c}.rule{fill:#f8f0ff;stroke:#a37bd1}.out{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}.mono{font-family:Consolas,"Courier New",monospace;font-size:14px;fill:#0f172a}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="900" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">多模态原子单元 VLM 描述生成 Prompt 拆解</text>
+  <text x="60" y="94" class="sub">对应 RAG-Anything 官方 vision_prompt、table_prompt、equation_prompt、generic_prompt；本系统在模板末尾追加教育场景指导语。</text>
+
+  <rect x="60" y="140" width="300" height="190" class="box input"/>
+  <text x="85" y="180" class="head">原子单元输入</text>
+  <text x="85" y="216" class="body">image：{image_path}、{captions}、{footnotes}</text>
+  <text x="85" y="244" class="body">table：{table_img_path}、{table_caption}</text>
+  <text x="85" y="272" class="body">table：{table_body}、{table_footnote}</text>
+  <text x="85" y="300" class="body">equation：{equation_text}、{equation_format}</text>
+
+  <rect x="410" y="140" width="300" height="190" class="box official"/>
+  <text x="435" y="180" class="head">官方任务要求</text>
+  <text x="435" y="216" class="body">image：分析布局、对象、文字、关系</text>
+  <text x="435" y="244" class="body">table：分析结构、表头、数据点、趋势</text>
+  <text x="435" y="272" class="body">equation：解释数学含义、变量、应用场景</text>
+  <text x="435" y="300" class="body">generic：分析结构、关键信息、组件关系</text>
+
+  <rect x="760" y="140" width="300" height="190" class="box rule"/>
+  <text x="785" y="180" class="head">输出格式约束</text>
+  <text x="785" y="212" class="body">输出 JSON 对象</text>
+  <rect x="790" y="228" width="245" height="88" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="808" y="253" class="mono">{</text>
+  <text x="828" y="277" class="mono">"detailed_description": ...,</text>
+  <text x="828" y="301" class="mono">"entity_info": { ... }</text>
+  <text x="808" y="325" class="mono">}</text>
+
+  <rect x="205" y="425" width="390" height="190" class="box out"/>
+  <text x="230" y="465" class="head">VLM 生成的描述</text>
+  <text x="230" y="500" class="body">detailed_description</text>
+  <rect x="235" y="516" width="310" height="60" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="252" y="541" class="mono">"完整视觉/表格/公式描述"</text>
+  <text x="230" y="596" class="body">用于文本索引、检索和实体关系抽取</text>
+
+  <rect x="685" y="425" width="390" height="190" class="box out"/>
+  <text x="710" y="465" class="head">VLM 生成的摘要</text>
+  <text x="710" y="500" class="body">entity_info</text>
+  <rect x="715" y="516" width="305" height="72" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="732" y="541" class="mono">{ "entity_name": ...,</text>
+  <text x="732" y="565" class="mono">  "entity_type": ...,</text>
+  <text x="732" y="589" class="mono">  "summary": ... }</text>
+
+  <rect x="165" y="695" width="950" height="120" class="box addon"/>
+  <text x="195" y="735" class="head">本系统追加指导语位置</text>
+  <text x="195" y="769" class="body">模板末尾追加：识别标题、可见文字、坐标轴、图例、变量、单位、步骤和学习相关关系。</text>
+  <text x="195" y="797" class="body">关注课程概念、先修知识、公式、例题、习题、易错点和实验步骤；保留官方 JSON 输出格式。</text>
+
+  <path d="M360 235 H405" class="arrow"/><path d="M710 235 H755" class="arrow"/>
+  <path d="M910 330 V390 H400 V420" class="arrow"/><path d="M910 330 V390 H880 V420" class="arrow"/>
+  <path d="M640 615 V690" class="arrow"/>
+</svg>

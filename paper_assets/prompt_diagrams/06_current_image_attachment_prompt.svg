@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.subtitle{font-size:17px;fill:#536179}
+      .box{fill:#fff;stroke:#ccd5e4;stroke-width:2;rx:8}.blue{fill:#edf5ff;stroke:#74a7df}.green{fill:#eef9f1;stroke:#73b77d}.orange{fill:#fff6e8;stroke:#d8a13f}.gray{fill:#f3f4f6;stroke:#9aa5b1}
+      .head{font-size:19px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">本轮图片附件理解 Prompt</text>
+  <text x="60" y="96" class="subtitle">用户在聊天中临时上传图片时，系统先调用 VLM 生成图片描述，再把描述作为本轮查询辅助信息。</text>
+
+  <rect x="80" y="150" width="300" height="190" class="box orange"/>
+  <text x="105" y="190" class="head">输入</text>
+  <text x="105" y="226" class="body">用户问题</text>
+  <text x="105" y="254" class="body">图片 base64 / data URL</text>
+  <text x="105" y="282" class="body">用户角色与课程上下文</text>
+
+  <rect x="490" y="150" width="330" height="190" class="box blue"/>
+  <text x="515" y="190" class="head">系统构造的 VLM Prompt</text>
+  <text x="515" y="226" class="body">角色：课程 AI 助教辅助理解图片</text>
+  <text x="515" y="254" class="body">任务：提取题目内容、可见文字、</text>
+  <text x="515" y="282" class="body">图示信息和解题线索</text>
+
+  <rect x="930" y="150" width="270" height="190" class="box gray"/>
+  <text x="955" y="190" class="head">输出</text>
+  <text x="955" y="226" class="body">图片文本描述</text>
+  <text x="955" y="254" class="body">作为当前轮查询补充</text>
+  <text x="955" y="282" class="body">默认不写入课程知识库</text>
+
+  <path d="M380 245 H485" class="arrow"/><path d="M820 245 H925" class="arrow"/>
+
+  <rect x="235" y="455" width="810" height="145" class="box green"/>
+  <text x="270" y="495" class="head">和资料索引阶段的区别</text>
+  <text x="270" y="531" class="body">本轮附件描述服务于当前问题理解；课程资料中的图片描述服务于知识库索引、检索和图谱抽取。</text>
+  <text x="270" y="561" class="body">两者都调用 VLM，但持久化位置和作用阶段不同。</text>
+</svg>

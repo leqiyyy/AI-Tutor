@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.subtitle{font-size:17px;fill:#536179}
+      .box{fill:#fff;stroke:#ccd5e4;stroke-width:2;rx:8}.blue{fill:#edf5ff;stroke:#74a7df}.green{fill:#eef9f1;stroke:#73b77d}.orange{fill:#fff6e8;stroke:#d8a13f}.gray{fill:#f3f4f6;stroke:#9aa5b1}
+      .head{font-size:19px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">实体关系抽取 Prompt</text>
+  <text x="60" y="96" class="subtitle">文本分块和多模态描述都被转换为可索引文本后，由 LightRAG 的实体关系抽取模板生成课程知识图谱元素。</text>
+
+  <rect x="70" y="145" width="300" height="200" class="box orange"/>
+  <text x="95" y="185" class="head">输入文本</text>
+  <text x="95" y="221" class="body">正文 chunk</text>
+  <text x="95" y="249" class="body">表格事实描述</text>
+  <text x="95" y="277" class="body">公式文本化说明</text>
+  <text x="95" y="305" class="body">图片/VLM 视觉描述</text>
+
+  <rect x="455" y="120" width="340" height="250" class="box blue"/>
+  <text x="480" y="160" class="head">LightRAG 图谱抽取模板</text>
+  <text x="480" y="196" class="body">entity_extraction_system_prompt</text>
+  <text x="480" y="224" class="body">entity_extraction_user_prompt</text>
+  <text x="480" y="252" class="body">entity_continue_extraction_user_prompt</text>
+  <text x="480" y="280" class="body">entity_if_loop_extraction_user_prompt</text>
+  <text x="480" y="308" class="body">summarize_entity_descriptions</text>
+  <text x="480" y="336" class="body">格式：entity / relation 记录与分隔符</text>
+
+  <rect x="900" y="145" width="310" height="200" class="box green"/>
+  <text x="925" y="185" class="head">课程图谱追加指导语</text>
+  <text x="925" y="221" class="body">限定课程实体类型</text>
+  <text x="925" y="249" class="body">限定关系语义</text>
+  <text x="925" y="277" class="body">过滤文件名、路径、chunk ID</text>
+  <text x="925" y="305" class="body">要求中文规范命名与证据可追溯</text>
+
+  <path d="M370 245 H450" class="arrow"/><path d="M795 245 H895" class="arrow"/>
+  <path d="M625 370 V455" class="arrow"/><path d="M1055 345 V455" class="arrow"/>
+
+  <rect x="230" y="480" width="820" height="160" class="box gray"/>
+  <text x="265" y="520" class="head">输出与后处理</text>
+  <text x="265" y="556" class="body">实体：名称、类型、描述；关系：源实体、目标实体、关键词、描述</text>
+  <text x="265" y="586" class="body">LightRAG 维护索引图谱；系统再读取结果并投影到本地知识实体与知识关系表</text>
+  <text x="265" y="616" class="small">跨模态图谱的实体关系来源于多模态描述文本，不单独使用另一套抽取格式。</text>
+</svg>

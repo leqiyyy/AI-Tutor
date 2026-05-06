@@ -88,7 +88,7 @@ export default function LoginPage() {
   return (
     <div className="auth-soft min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
       {/* 左侧品牌区 */}
-      <div className="hidden lg:flex lg:w-[52%] relative flex-col justify-between overflow-hidden">
+      <div className="hidden lg:flex lg:w-[52%] relative flex-col overflow-hidden">
         <img
           src="https://readdy.ai/api/search-image?query=Beautiful%20Chinese%20university%20campus%20cherry%20blossom%20trees%20in%20full%20bloom%20along%20a%20serene%20pathway%20with%20modern%20academic%20buildings%20in%20the%20background%2C%20soft%20warm%20spring%20light%20filtering%20through%20pink%20petals%2C%20elegant%20and%20peaceful%20atmosphere%2C%20high%20quality%20photography%20style%20with%20shallow%20depth%20of%20field%2C%20pastel%20pink%20and%20white%20tones%2C%20professional%20educational%20institution%20aesthetic&width=900&height=1080&seq=login-bg-1&orientation=portrait"
           alt="珞樱学堂"
@@ -107,42 +107,30 @@ export default function LoginPage() {
         </div>
 
         {/* 中间文案 */}
-        <div className="relative z-10 px-10 pb-4">
-          <h1 className="text-4xl font-bold text-white leading-tight mb-4">
-            智能AI助教<br />赋能高校教学
-          </h1>
-          <p className="text-white/80 text-base leading-relaxed mb-8">
-            基于大语言模型与知识图谱的新一代<br />高校师生互动学习平台
-          </p>
-          <div className="flex flex-col gap-3">
-            {[
-              { icon: 'ri-robot-2-line', text: 'AI助教实时答疑，知识图谱精准检索' },
-              { icon: 'ri-book-3-line', text: '课程资料智能解析，学习路径个性推荐' },
-              { icon: 'ri-bar-chart-2-line', text: '学情数据可视化，教学效果全面掌握' },
-            ].map((item, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/15 backdrop-blur-sm">
-                  <i className={`${item.icon} text-white text-sm`}></i>
+        <div className="relative z-10 flex-1 flex items-center px-10 pb-16">
+          <div className="max-w-xl">
+            <h1 className="text-4xl font-bold text-white leading-tight mb-5">
+              基于大语言模型和检索增强生成的AI助教平台
+            </h1>
+            <p className="text-white text-base leading-relaxed mb-8">
+              面向课程知识库构建、智能问答与教学辅助场景，提供面向师生的学习支持服务。
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { icon: 'ri-database-2-line', title: '课程知识库', desc: '支持课程资料解析与索引构建' },
+                { icon: 'ri-node-tree', title: '知识图谱', desc: '组织课程概念与知识关系' },
+                { icon: 'ri-chat-3-line', title: '检索增强问答', desc: '结合课程证据生成回答' },
+                { icon: 'ri-user-settings-line', title: '教师审核回流', desc: '支持问答质量审核与知识沉淀' },
+              ].map((item) => (
+                <div key={item.title} className="rounded-xl bg-white/18 backdrop-blur-sm border border-white/25 p-4">
+                  <div className="w-9 h-9 flex items-center justify-center rounded-lg bg-white/25 mb-3">
+                    <i className={`${item.icon} text-white text-lg`}></i>
+                  </div>
+                  <div className="text-white text-sm font-semibold">{item.title}</div>
+                  <div className="text-white text-xs leading-relaxed mt-1">{item.desc}</div>
                 </div>
-                <span className="text-white/85 text-sm">{item.text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* 底部统计 */}
-        <div className="relative z-10 px-10 pb-10">
-          <div className="flex items-center gap-6 pt-6 border-t border-white/20">
-            {[
-              { num: '12,000+', label: '在校学生' },
-              { num: '680+', label: '授课教师' },
-              { num: '98%', label: '用户满意度' },
-            ].map((stat, i) => (
-              <div key={i} className="text-center">
-                <div className="text-xl font-bold text-white">{stat.num}</div>
-                <div className="text-xs text-white/60 mt-0.5">{stat.label}</div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -278,25 +266,6 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* 分割线 */}
-          <div className="flex items-center gap-3 my-5">
-            <div className="flex-1 h-px bg-gray-200"></div>
-            <span className="text-xs text-gray-400">或</span>
-            <div className="flex-1 h-px bg-gray-200"></div>
-          </div>
-
-          {/* 快捷登录 */}
-          <div className="grid grid-cols-2 gap-3">
-            <button className="flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap">
-              <i className="ri-school-line text-base text-gray-500"></i>
-              校园统一认证
-            </button>
-            <button className="flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap">
-              <i className="ri-wechat-line text-base text-green-500"></i>
-              微信扫码登录
-            </button>
-          </div>
-
           {/* 注册提示 */}
           <p className="text-center text-xs text-gray-400 mt-6">
             还没有账号？
@@ -306,7 +275,7 @@ export default function LoginPage() {
           </p>
 
           <p className="text-center text-xs text-gray-300 mt-4">
-            © 2025 珞樱学堂 · 武汉大学智能教育实验室
+            © 2026 武汉大学网络空间安全学院
           </p>
         </div>
       </div>

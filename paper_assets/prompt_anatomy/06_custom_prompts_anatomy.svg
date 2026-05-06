@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.sys{fill:#edf5ff;stroke:#6aa3dc}.repair{fill:#eef9f1;stroke:#6fb879}.direct{fill:#fff7e6;stroke:#d6a03c}.out{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="860" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">本系统自定义 Prompt 拆解</text>
+  <text x="60" y="94" class="sub">这些 prompt 由后端单独构造，用于当前轮图片理解、答案修复和非检索直接回答，不属于官方模板。</text>
+
+  <rect x="70" y="145" width="340" height="210" class="box sys"/>
+  <text x="95" y="185" class="head">当前轮图片附件理解</text>
+  <text x="95" y="221" class="body">角色：课程 AI 助教辅助理解图片</text>
+  <text x="95" y="249" class="body">输入：图片数据 + 用户问题</text>
+  <text x="95" y="277" class="body">任务：提取题目内容、文字、图示</text>
+  <text x="95" y="305" class="body">输出：当前轮查询辅助描述</text>
+  <text x="95" y="333" class="body">限制：默认不写入课程知识库</text>
+
+  <rect x="470" y="145" width="340" height="210" class="box repair"/>
+  <text x="495" y="185" class="head">答案修复</text>
+  <text x="495" y="221" class="body">角色：中国高校课程 AI 助教</text>
+  <text x="495" y="249" class="body">输入：问题、已检索资料、异常回答</text>
+  <text x="495" y="277" class="body">任务：重新生成自然中文回答</text>
+  <text x="495" y="305" class="body">限制：只依据已检索资料</text>
+  <text x="495" y="333" class="body">格式：结论 + 2 至 4 个要点</text>
+
+  <rect x="870" y="145" width="340" height="210" class="box direct"/>
+  <text x="895" y="185" class="head">快速回答 / 教师工具</text>
+  <text x="895" y="221" class="body">角色：珞樱学堂 AI 助教或教师助教</text>
+  <text x="895" y="249" class="body">输入：用户消息与可选附件</text>
+  <text x="895" y="277" class="body">任务：轻量回答或生成教学内容</text>
+  <text x="895" y="305" class="body">限制：不得声称来自课程知识库</text>
+  <text x="895" y="333" class="body">上下文不足时提示教师补充</text>
+
+  <rect x="220" y="465" width="840" height="150" class="box out"/>
+  <text x="250" y="505" class="head">论文放置建议</text>
+  <text x="250" y="541" class="body">将官方 prompt 拆解图放在知识图谱构建、多模态索引、检索增强问答模块中。</text>
+  <text x="250" y="571" class="body">将本图放在“问答质量控制与辅助问答链路”说明中，避免与官方模板混淆。</text>
+</svg>

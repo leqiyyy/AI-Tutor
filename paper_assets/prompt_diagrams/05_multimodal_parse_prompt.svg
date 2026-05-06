@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.subtitle{font-size:17px;fill:#536179}
+      .box{fill:#fff;stroke:#ccd5e4;stroke-width:2;rx:8}.blue{fill:#edf5ff;stroke:#74a7df}.green{fill:#eef9f1;stroke:#73b77d}.orange{fill:#fff6e8;stroke:#d8a13f}.gray{fill:#f3f4f6;stroke:#9aa5b1}
+      .head{font-size:19px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">多模态原子单元解析 Prompt</text>
+  <text x="60" y="96" class="subtitle">MinerU 完成版面切分后，RAG-Anything 根据内容类型调用多模态 prompt，并通过本系统注入的 VLM 生成文本描述。</text>
+
+  <rect x="65" y="140" width="275" height="190" class="box orange"/>
+  <text x="90" y="180" class="head">内容项输入</text>
+  <text x="90" y="216" class="body">图片区域 / 独立图片</text>
+  <text x="90" y="244" class="body">表格区域与行列内容</text>
+  <text x="90" y="272" class="body">公式区域与 LaTeX 文本</text>
+  <text x="90" y="300" class="body">上下文、页码、caption、路径</text>
+
+  <rect x="455" y="120" width="355" height="230" class="box blue"/>
+  <text x="480" y="160" class="head">RAG-Anything 官方模板</text>
+  <text x="480" y="196" class="body">vision_prompt / image_prompt</text>
+  <text x="480" y="224" class="body">table_prompt</text>
+  <text x="480" y="252" class="body">equation_prompt</text>
+  <text x="480" y="280" class="body">generic_prompt</text>
+  <text x="480" y="308" class="body">输出结构：detailed_description + entity_info</text>
+
+  <rect x="925" y="140" width="290" height="190" class="box green"/>
+  <text x="950" y="180" class="head">教育场景追加指导语</text>
+  <text x="950" y="216" class="body">识别文字、标题、坐标轴</text>
+  <text x="950" y="244" class="body">提取变量、单位、步骤</text>
+  <text x="950" y="272" class="body">关注概念、公式、例题</text>
+  <text x="950" y="300" class="body">保留官方 JSON 输出格式</text>
+
+  <path d="M340 235 H450" class="arrow"/><path d="M810 235 H920" class="arrow"/>
+  <path d="M632 350 V430" class="arrow"/><path d="M1070 330 V430" class="arrow"/>
+
+  <rect x="215" y="455" width="850" height="165" class="box gray"/>
+  <text x="250" y="495" class="head">VLM 输出与索引</text>
+  <text x="250" y="531" class="body">VLM 返回可见内容、结构关系、公式含义、表格规律和学习线索</text>
+  <text x="250" y="561" class="body">RAG-Anything 将描述写入模态 chunk，随后进入 LightRAG 文本索引和图谱抽取</text>
+  <text x="250" y="591" class="body">原始图片/表格/公式文件保留在文件存储或解析输出目录，用于引用溯源和前端查看</text>
+</svg>

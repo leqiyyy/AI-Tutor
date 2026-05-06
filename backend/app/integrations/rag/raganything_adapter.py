@@ -39,6 +39,10 @@ _QUERY_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvar
     "raganything_query_trace",
     default=None,
 )
+_INGEST_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "raganything_ingest_trace",
+    default=None,
+)
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 PROJECTION_FILE_LABEL_RE = re.compile(
@@ -108,6 +112,34 @@ PROJECTION_COURSE_ARTIFACT_TERMS = {
     "file",
     "material",
 }
+KG_CONTEXT_FILTER_CACHE_TAG = "AI_TUTOR_KG_CONTEXT_FILTER_V1"
+KG_CONTEXT_NOISE_ENTITY_NAMES = {
+    "unknown_entity",
+    "unknown_entity (unknown)",
+    "背景内容",
+    "总体描述",
+    "表格内容",
+    "表内容",
+    "表组织",
+    "表结构",
+    "行意义",
+    "列意义",
+    "若干行",
+    "若干列",
+    "若干行的行意义",
+    "表的具体内容",
+}
+KG_CONTEXT_NOISE_TYPE_VALUES = {"", "none", "null", "unknown", "unknown_entity", "UNKNOWN"}
+KG_CONTEXT_NOISE_RE = re.compile(
+    r"(?:"
+    r"unknown[_ ]?entity|"
+    r"(?:若干|某些|清晰|明确|具体|总体|背景).{0,10}(?:行|列|表|表格|结构|组织|意义|描述|方式)|"
+    r"(?:行|列|表|表格).{0,8}(?:意义|组织|描述|方式)|"
+    r"(?:表的|表格的).{0,12}(?:具体|组织|意义|描述|方式|内容)|"
+    r"^(?:行意义|列意义|总体描述|背景内容|问题分布)$"
+    r")",
+    re.IGNORECASE,
+)
 
 
 class RAGAnythingAdapter:
@@ -116,6 +148,93 @@ class RAGAnythingAdapter:
     def __init__(self) -> None:
         self._instances: dict[str, object] = {}
         self._instance_route_signatures: dict[str, str] = {}
+
+    def _start_parse_stage(
+        self,
+        db: Any,
+        task: FileParseTask,
+        stage: str,
+        *,
+        label: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> float:
+        started = perf_counter()
+        extra = dict(task.extra_data or {})
+        trace = dict(extra.get("stage_trace") or {})
+        stages = dict(trace.get("stages") or {})
+        previous = dict(stages.get(stage) or {})
+        stages[stage] = {
+            **previous,
+            "stage": stage,
+            "label": label or stage,
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "finished_at": None,
+            "elapsed_ms": None,
+            "error": None,
+            "details": details or previous.get("details") or {},
+        }
+        trace.update({
+            "version": 1,
+            "updated_at": _utc_now_iso(),
+            "stages": stages,
+        })
+        extra["stage_trace"] = trace
+        task.extra_data = extra
+        db.add(task)
+        db.commit()
+        return started
+
+    def _finish_parse_stage(
+        self,
+        db: Any,
+        task: FileParseTask,
+        stage: str,
+        *,
+        started: float | None = None,
+        status: str = "completed",
+        details: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        extra = dict(task.extra_data or {})
+        trace = dict(extra.get("stage_trace") or {})
+        stages = dict(trace.get("stages") or {})
+        current = dict(stages.get(stage) or {"stage": stage, "label": stage})
+        merged_details = dict(current.get("details") or {})
+        if details:
+            merged_details.update(details)
+        current.update({
+            "status": status,
+            "finished_at": _utc_now_iso(),
+            "elapsed_ms": round((perf_counter() - started) * 1000, 2) if started is not None else current.get("elapsed_ms"),
+            "error": self._trace_preview(error, limit=800) if error else None,
+            "details": merged_details,
+        })
+        stages[stage] = current
+        trace.update({
+            "version": 1,
+            "updated_at": _utc_now_iso(),
+            "stages": stages,
+        })
+        extra["stage_trace"] = trace
+        task.extra_data = extra
+        db.add(task)
+        db.commit()
+
+    def _attach_ingest_trace_summary(self, task: FileParseTask, trace: dict[str, Any] | None) -> None:
+        if not isinstance(trace, dict):
+            return
+        extra = dict(task.extra_data or {})
+        extra["model_call_trace"] = {
+            "llm_call_count": int(trace.get("llm_call_count") or 0),
+            "vision_call_count": int(trace.get("vision_call_count") or 0),
+            "llm_timing_summary_ms": trace.get("llm_timing_summary_ms") or {},
+            "vision_timing_summary_ms": trace.get("vision_timing_summary_ms") or {},
+            "keyword_extraction_latency_ms": trace.get("keyword_extraction_latency_ms"),
+            "knowledge_extraction_latency_ms": trace.get("knowledge_extraction_latency_ms"),
+            "vlm_describe_latency_ms": trace.get("vlm_describe_latency_ms"),
+        }
+        task.extra_data = extra
 
     async def _emit_progress(
         self,
@@ -356,7 +475,7 @@ class RAGAnythingAdapter:
             base_url = generation_base if use_generation_model else extract_base
             api_key = generation_api_key if use_generation_model else extract_api_key
             wire_api = settings.LLM_WIRE_API if use_generation_model else settings.EXTRACT_WIRE_API
-            self._record_llm_trace(
+            call_trace = self._record_llm_trace(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 history_messages=history_messages,
@@ -365,15 +484,32 @@ class RAGAnythingAdapter:
                 model=model,
                 wire_api=wire_api,
             )
-            return await self._call_llm_api(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                history_messages=history_messages,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                wire_api=wire_api,
+            started_at = perf_counter()
+            try:
+                response_text = await self._call_llm_api(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    history_messages=history_messages,
+                    model=model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    wire_api=wire_api,
+                )
+            except Exception as exc:
+                self._finish_llm_trace(
+                    call_trace,
+                    started_at=started_at,
+                    success=False,
+                    error=str(exc),
+                )
+                raise
+            self._finish_llm_trace(
+                call_trace,
+                started_at=started_at,
+                success=True,
+                response_text=response_text,
             )
+            return response_text
 
         return _llm
 
@@ -387,30 +523,34 @@ class RAGAnythingAdapter:
         use_generation_model: bool,
         model: str,
         wire_api: str,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
-            return
-        trace = _QUERY_TRACE_CONTEXT.get()
+            return None
+        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
         if not isinstance(trace, dict):
-            return
+            return None
 
         calls = trace.setdefault("llm_calls", [])
         if not isinstance(calls, list):
-            return
-
-        purpose = "answer_generation" if use_generation_model else "knowledge_extraction"
-        if keyword_extraction:
-            purpose = "keyword_extraction"
+            return None
 
         prompt_text = str(prompt or "")
         system_text = str(system_prompt or "")
+        purpose = self._classify_llm_trace_purpose(
+            prompt_text=prompt_text,
+            system_text=system_text,
+            keyword_extraction=keyword_extraction,
+            use_generation_model=use_generation_model,
+        )
         normalized_history = self._normalize_llm_history_messages(history_messages)
         call_trace = {
             "index": len(calls) + 1,
             "purpose": purpose,
             "keyword_extraction": bool(keyword_extraction),
+            "uses_generation_model": bool(use_generation_model),
             "model": model,
             "wire_api": wire_api,
+            "started_at": _utc_now_iso(),
             "prompt_chars": len(prompt_text),
             "system_prompt_chars": len(system_text),
             "history_message_count": len(normalized_history),
@@ -421,6 +561,156 @@ class RAGAnythingAdapter:
         trace["llm_call_count"] = len(calls)
         if purpose == "answer_generation":
             trace["final_generation_input"] = call_trace
+        return call_trace
+
+    def _classify_llm_trace_purpose(
+        self,
+        *,
+        prompt_text: str,
+        system_text: str,
+        keyword_extraction: bool,
+        use_generation_model: bool,
+    ) -> str:
+        if keyword_extraction:
+            return "keyword_extraction"
+        text = f"{system_text}\n{prompt_text}".lower()
+        answer_markers = (
+            "generate a comprehensive",
+            "provided **context**",
+            "provided context",
+            "document chunks",
+            "knowledge graph data",
+            "answer user queries",
+            "answer the user query",
+            "references section",
+            "reference document list",
+            "strictly adhere to the provided context",
+            "only using the information within the provided",
+        )
+        if use_generation_model or any(marker in text for marker in answer_markers):
+            return "answer_generation"
+        return "knowledge_extraction"
+
+    def _finish_llm_trace(
+        self,
+        call_trace: dict[str, Any] | None,
+        *,
+        started_at: float,
+        success: bool,
+        response_text: Any = None,
+        error: str | None = None,
+    ) -> None:
+        if not isinstance(call_trace, dict):
+            return
+        elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
+        call_trace["elapsed_ms"] = elapsed_ms
+        call_trace["success"] = bool(success)
+        call_trace["finished_at"] = _utc_now_iso()
+        if success:
+            call_trace["response_chars"] = len(str(response_text or ""))
+        elif error:
+            call_trace["error"] = self._trace_preview(error, limit=500)
+
+        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        if not isinstance(trace, dict):
+            return
+        purpose = str(call_trace.get("purpose") or "unknown")
+        summary = trace.setdefault("llm_timing_summary_ms", {})
+        if isinstance(summary, dict):
+            bucket = summary.setdefault(
+                purpose,
+                {"count": 0, "total": 0.0, "max": 0.0, "success": 0, "failed": 0},
+            )
+            if isinstance(bucket, dict):
+                bucket["count"] = int(bucket.get("count") or 0) + 1
+                bucket["total"] = round(float(bucket.get("total") or 0.0) + elapsed_ms, 2)
+                bucket["max"] = round(max(float(bucket.get("max") or 0.0), elapsed_ms), 2)
+                if success:
+                    bucket["success"] = int(bucket.get("success") or 0) + 1
+                else:
+                    bucket["failed"] = int(bucket.get("failed") or 0) + 1
+        trace["llm_total_latency_ms"] = round(
+            sum(
+                float(call.get("elapsed_ms") or 0.0)
+                for call in (trace.get("llm_calls") or [])
+                if isinstance(call, dict)
+            ),
+            2,
+        )
+        for key in ("keyword_extraction", "answer_generation", "knowledge_extraction"):
+            bucket = summary.get(key) if isinstance(summary, dict) else None
+            if isinstance(bucket, dict):
+                trace[f"{key}_latency_ms"] = round(float(bucket.get("total") or 0.0), 2)
+
+    def _record_vision_trace(
+        self,
+        *,
+        prompt: Any,
+        system_prompt: Any,
+        model: str,
+        has_image: bool,
+    ) -> dict[str, Any] | None:
+        if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
+            return None
+        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        if not isinstance(trace, dict):
+            return None
+        calls = trace.setdefault("vision_calls", [])
+        if not isinstance(calls, list):
+            return None
+        prompt_text = str(prompt or "")
+        system_text = str(system_prompt or "")
+        call_trace = {
+            "index": len(calls) + 1,
+            "purpose": "vlm_describe",
+            "model": model,
+            "has_image": bool(has_image),
+            "started_at": _utc_now_iso(),
+            "prompt_chars": len(prompt_text),
+            "system_prompt_chars": len(system_text),
+            "prompt_preview": self._trace_preview(prompt_text),
+            "system_prompt_preview": self._trace_preview(system_text, limit=500),
+        }
+        calls.append(call_trace)
+        trace["vision_call_count"] = len(calls)
+        return call_trace
+
+    def _finish_vision_trace(
+        self,
+        call_trace: dict[str, Any] | None,
+        *,
+        started_at: float,
+        success: bool,
+        response_text: Any = None,
+        error: str | None = None,
+    ) -> None:
+        if not isinstance(call_trace, dict):
+            return
+        elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
+        call_trace["elapsed_ms"] = elapsed_ms
+        call_trace["success"] = bool(success)
+        call_trace["finished_at"] = _utc_now_iso()
+        if success:
+            call_trace["response_chars"] = len(str(response_text or ""))
+        elif error:
+            call_trace["error"] = self._trace_preview(error, limit=500)
+
+        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        if not isinstance(trace, dict):
+            return
+        summary = trace.setdefault(
+            "vision_timing_summary_ms",
+            {"count": 0, "total": 0.0, "max": 0.0, "success": 0, "failed": 0},
+        )
+        if isinstance(summary, dict):
+            summary["count"] = int(summary.get("count") or 0) + 1
+            summary["total"] = round(float(summary.get("total") or 0.0) + elapsed_ms, 2)
+            summary["max"] = round(max(float(summary.get("max") or 0.0), elapsed_ms), 2)
+            if success:
+                summary["success"] = int(summary.get("success") or 0) + 1
+            else:
+                summary["failed"] = int(summary.get("failed") or 0) + 1
+            trace["vlm_describe_latency_ms"] = round(float(summary.get("total") or 0.0), 2)
 
     def _normalize_llm_history_messages(self, history_messages: list[dict] | None) -> list[dict[str, str]]:
         normalized: list[dict[str, str]] = []
@@ -639,6 +929,13 @@ class RAGAnythingAdapter:
         vlm_api_key = settings.EFFECTIVE_VLM_API_KEY
 
         async def _vision(prompt, image_data=None, system_prompt=None, messages=None, **kwargs):
+            call_trace = self._record_vision_trace(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=vlm_model,
+                has_image=bool(image_data),
+            )
+            started_at = perf_counter()
             openai_module = importlib.import_module("openai")
             AsyncOpenAI = getattr(openai_module, "AsyncOpenAI")
             client = AsyncOpenAI(
@@ -669,7 +966,22 @@ class RAGAnythingAdapter:
                     messages=built_messages,
                     temperature=0.1,
                 )
-                return response.choices[0].message.content or ""
+                response_text = response.choices[0].message.content or ""
+                self._finish_vision_trace(
+                    call_trace,
+                    started_at=started_at,
+                    success=True,
+                    response_text=response_text,
+                )
+                return response_text
+            except Exception as exc:
+                self._finish_vision_trace(
+                    call_trace,
+                    started_at=started_at,
+                    success=False,
+                    error=str(exc),
+                )
+                raise
             finally:
                 await client.close()
 
@@ -698,6 +1010,410 @@ class RAGAnythingAdapter:
         )
         return description.strip() if description else None
 
+    def _install_lightrag_context_filter(self) -> None:
+        if not bool(getattr(settings, "RAG_KG_CONTEXT_FILTER_ENABLED", True)):
+            return
+        try:
+            operate_module = importlib.import_module("lightrag.operate")
+        except Exception as exc:
+            logger.warning("lightrag_context_filter_install_failed", error=str(exc))
+            return
+
+        existing = getattr(operate_module, "_build_query_context", None)
+        if existing is None or getattr(existing, "_ai_tutor_kg_filter_installed", False):
+            return
+
+        adapter = self
+
+        async def _filtered_build_query_context(
+            query: str,
+            ll_keywords: str,
+            hl_keywords: str,
+            knowledge_graph_inst: Any,
+            entities_vdb: Any,
+            relationships_vdb: Any,
+            text_chunks_db: Any,
+            query_param: Any,
+            chunks_vdb: Any = None,
+        ) -> Any:
+            if not query:
+                operate_module.logger.warning("Query is empty, skipping context building")
+                return None
+
+            search_result = await operate_module._perform_kg_search(
+                query,
+                ll_keywords,
+                hl_keywords,
+                knowledge_graph_inst,
+                entities_vdb,
+                relationships_vdb,
+                text_chunks_db,
+                query_param,
+                chunks_vdb,
+            )
+            filter_report = adapter._filter_lightrag_search_result(
+                search_result=search_result,
+                query=query,
+                ll_keywords=ll_keywords,
+                hl_keywords=hl_keywords,
+                query_param=query_param,
+            )
+
+            if not search_result["final_entities"] and not search_result["final_relations"]:
+                if query_param.mode != "mix":
+                    return None
+                if not search_result["chunk_tracking"]:
+                    return None
+
+            truncation_result = await operate_module._apply_token_truncation(
+                search_result,
+                query_param,
+                text_chunks_db.global_config,
+            )
+
+            merged_chunks = await operate_module._merge_all_chunks(
+                filtered_entities=truncation_result["filtered_entities"],
+                filtered_relations=truncation_result["filtered_relations"],
+                vector_chunks=search_result["vector_chunks"],
+                query=query,
+                knowledge_graph_inst=knowledge_graph_inst,
+                text_chunks_db=text_chunks_db,
+                query_param=query_param,
+                chunks_vdb=chunks_vdb,
+                chunk_tracking=search_result["chunk_tracking"],
+                query_embedding=search_result["query_embedding"],
+            )
+
+            if (
+                not merged_chunks
+                and not truncation_result["entities_context"]
+                and not truncation_result["relations_context"]
+            ):
+                return None
+
+            context, raw_data = await operate_module._build_context_str(
+                entities_context=truncation_result["entities_context"],
+                relations_context=truncation_result["relations_context"],
+                merged_chunks=merged_chunks,
+                query=query,
+                query_param=query_param,
+                global_config=text_chunks_db.global_config,
+                chunk_tracking=search_result["chunk_tracking"],
+                entity_id_to_original=truncation_result["entity_id_to_original"],
+                relation_id_to_original=truncation_result["relation_id_to_original"],
+            )
+
+            metadata = raw_data.setdefault("metadata", {})
+            metadata["keywords"] = {
+                "high_level": hl_keywords.split(", ") if hl_keywords else [],
+                "low_level": ll_keywords.split(", ") if ll_keywords else [],
+            }
+            metadata["processing_info"] = {
+                "total_entities_found": filter_report["entities_before"],
+                "total_relations_found": filter_report["relations_before"],
+                "entities_after_filter": filter_report["entities_after"],
+                "relations_after_filter": filter_report["relations_after"],
+                "entities_after_truncation": len(truncation_result.get("filtered_entities", [])),
+                "relations_after_truncation": len(truncation_result.get("filtered_relations", [])),
+                "merged_chunks_count": len(merged_chunks),
+                "final_chunks_count": len(raw_data.get("data", {}).get("chunks", [])),
+            }
+            metadata["ai_tutor_kg_context_filter"] = filter_report
+            return operate_module.QueryContextResult(context=context, raw_data=raw_data)
+
+        _filtered_build_query_context._ai_tutor_kg_filter_installed = True  # type: ignore[attr-defined]
+        _filtered_build_query_context._ai_tutor_original = existing  # type: ignore[attr-defined]
+        operate_module._build_query_context = _filtered_build_query_context
+        logger.info("lightrag_context_filter_installed")
+
+    def _filter_lightrag_search_result(
+        self,
+        *,
+        search_result: dict[str, Any],
+        query: str,
+        ll_keywords: str,
+        hl_keywords: str,
+        query_param: Any,
+    ) -> dict[str, Any]:
+        entities = list(search_result.get("final_entities") or [])
+        relations = list(search_result.get("final_relations") or [])
+        vector_chunks = list(search_result.get("vector_chunks") or [])
+        mode = str(getattr(query_param, "mode", "") or "")
+        terms = self._kg_filter_terms(query=query, ll_keywords=ll_keywords, hl_keywords=hl_keywords)
+        preferred_files = self._preferred_vector_files(vector_chunks, terms=terms)
+        kept_vector_chunks = self._filter_vector_chunks_by_preferred_files(
+            vector_chunks,
+            preferred_files=preferred_files if mode == "mix" else set(),
+        )
+        if len(kept_vector_chunks) != len(vector_chunks):
+            kept_chunk_ids = {
+                str(chunk.get("chunk_id") or chunk.get("id") or "")
+                for chunk in kept_vector_chunks
+                if isinstance(chunk, dict)
+            }
+            chunk_tracking = dict(search_result.get("chunk_tracking") or {})
+            search_result["chunk_tracking"] = {
+                chunk_id: value
+                for chunk_id, value in chunk_tracking.items()
+                if chunk_id in kept_chunk_ids
+            }
+            search_result["vector_chunks"] = kept_vector_chunks
+
+        kept_entities = []
+        dropped_entity_reasons: dict[str, int] = {}
+        kept_entity_names: set[str] = set()
+        for entity in entities:
+            keep, reason = self._should_keep_kg_entity(
+                entity,
+                terms=terms,
+                preferred_files=preferred_files if mode == "mix" else set(),
+            )
+            if keep:
+                kept_entities.append(entity)
+                name = self._kg_entity_name(entity)
+                if name:
+                    kept_entity_names.add(name)
+            else:
+                dropped_entity_reasons[reason] = dropped_entity_reasons.get(reason, 0) + 1
+
+        kept_relations = []
+        dropped_relation_reasons: dict[str, int] = {}
+        for relation in relations:
+            keep, reason = self._should_keep_kg_relation(
+                relation,
+                terms=terms,
+                preferred_files=preferred_files if mode == "mix" else set(),
+                kept_entity_names=kept_entity_names,
+            )
+            if keep:
+                kept_relations.append(relation)
+            else:
+                dropped_relation_reasons[reason] = dropped_relation_reasons.get(reason, 0) + 1
+
+        search_result["final_entities"] = kept_entities
+        search_result["final_relations"] = kept_relations
+        report = {
+            "enabled": True,
+            "mode": mode,
+            "cache_tag": KG_CONTEXT_FILTER_CACHE_TAG,
+            "preferred_vector_file_limit": max(
+                0,
+                int(getattr(settings, "RAG_KG_CONTEXT_FILTER_VECTOR_FILE_LIMIT", 3) or 0),
+            ),
+            "preferred_vector_files": sorted(preferred_files),
+            "terms": sorted(terms)[:24],
+            "entities_before": len(entities),
+            "entities_after": len(kept_entities),
+            "entities_dropped": len(entities) - len(kept_entities),
+            "entity_drop_reasons": dropped_entity_reasons,
+            "relations_before": len(relations),
+            "relations_after": len(kept_relations),
+            "relations_dropped": len(relations) - len(kept_relations),
+            "relation_drop_reasons": dropped_relation_reasons,
+            "vector_chunks_before": len(vector_chunks),
+            "vector_chunks_after": len(kept_vector_chunks),
+            "vector_chunks_dropped": len(vector_chunks) - len(kept_vector_chunks),
+        }
+        logger.info(
+            "lightrag_context_filter_applied",
+            mode=mode,
+            entities_before=len(entities),
+            entities_after=len(kept_entities),
+            relations_before=len(relations),
+            relations_after=len(kept_relations),
+            vector_chunks_before=len(vector_chunks),
+            vector_chunks_after=len(kept_vector_chunks),
+            preferred_files=len(preferred_files),
+        )
+        return report
+
+    def _preferred_vector_files(self, vector_chunks: list[dict], *, terms: set[str]) -> set[str]:
+        limit = max(0, int(getattr(settings, "RAG_KG_CONTEXT_FILTER_VECTOR_FILE_LIMIT", 3) or 0))
+        if limit <= 0:
+            return set()
+        preferred: list[str] = []
+        fallback: list[str] = []
+        for chunk in vector_chunks:
+            path = self._kg_item_file(chunk)
+            if path and path not in fallback:
+                fallback.append(path)
+            chunk_text = self._kg_item_text(chunk)
+            if path and path not in preferred and self._kg_text_matches_terms(chunk_text, terms):
+                preferred.append(path)
+            if len(preferred) >= limit:
+                break
+        if not preferred:
+            preferred = fallback[:1]
+        return set(preferred)
+
+    def _filter_vector_chunks_by_preferred_files(
+        self,
+        vector_chunks: list[dict],
+        *,
+        preferred_files: set[str],
+    ) -> list[dict]:
+        if not preferred_files:
+            return vector_chunks
+        return [
+            chunk
+            for chunk in vector_chunks
+            if self._kg_item_file(chunk) in preferred_files
+        ]
+
+    def _kg_filter_terms(self, *, query: str, ll_keywords: str, hl_keywords: str) -> set[str]:
+        text = f"{query or ''},{ll_keywords or ''},{hl_keywords or ''}"
+        pieces = [
+            item.strip()
+            for item in re.split(r"[,，;；、\s:：?？!！()（）\[\]【】\"'“”‘’]+", text)
+            if len(item.strip()) >= 2
+        ]
+        terms: set[str] = set(pieces)
+        for cjk in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            if len(cjk) <= 12:
+                terms.add(cjk)
+            max_n = min(6, len(cjk))
+            for size in range(2, max_n + 1):
+                for index in range(0, len(cjk) - size + 1):
+                    terms.add(cjk[index:index + size])
+        return {term for term in terms if not self._is_generic_kg_filter_term(term)}
+
+    def _is_generic_kg_filter_term(self, term: str) -> bool:
+        normalized = str(term or "").strip().lower()
+        return normalized in {
+            "什么",
+            "是谁",
+            "做了",
+            "事情",
+            "是什么",
+            "为什么",
+            "如何",
+            "怎么",
+            "哪些",
+            "the",
+            "and",
+            "what",
+            "how",
+            "why",
+        }
+
+    def _should_keep_kg_entity(
+        self,
+        entity: Any,
+        *,
+        terms: set[str],
+        preferred_files: set[str],
+    ) -> tuple[bool, str]:
+        name = self._kg_entity_name(entity)
+        text = self._kg_item_text(entity)
+        item_file = self._kg_item_file(entity)
+        term_match = self._kg_text_matches_terms(text, terms)
+        preferred_source = bool(item_file and item_file in preferred_files)
+        noisy = self._is_noisy_kg_entity(entity)
+
+        if noisy and not term_match:
+            return False, "noisy_entity"
+        if preferred_files and not preferred_source and not term_match:
+            return False, "outside_preferred_vector_files"
+        if not name:
+            return False, "missing_entity_name"
+        return True, "kept"
+
+    def _should_keep_kg_relation(
+        self,
+        relation: Any,
+        *,
+        terms: set[str],
+        preferred_files: set[str],
+        kept_entity_names: set[str],
+    ) -> tuple[bool, str]:
+        src, tgt = self._kg_relation_endpoints(relation)
+        text = self._kg_item_text(relation)
+        item_file = self._kg_item_file(relation)
+        term_match = self._kg_text_matches_terms(text, terms)
+        preferred_source = bool(item_file and item_file in preferred_files)
+
+        if self._is_noisy_kg_relation(relation):
+            return False, "noisy_relation"
+        if kept_entity_names and src not in kept_entity_names and tgt not in kept_entity_names:
+            return False, "endpoint_not_kept"
+        if preferred_files and not preferred_source and not term_match:
+            return False, "outside_preferred_vector_files"
+        if not src or not tgt:
+            return False, "missing_relation_endpoint"
+        return True, "kept"
+
+    def _is_noisy_kg_entity(self, entity: Any) -> bool:
+        if not isinstance(entity, dict):
+            return True
+        name = self._kg_entity_name(entity)
+        entity_type = str(entity.get("entity_type") or entity.get("type") or "").strip()
+        text = self._kg_item_text(entity)
+        normalized_name = name.strip().lower()
+        if normalized_name in KG_CONTEXT_NOISE_ENTITY_NAMES:
+            return True
+        if "unknown_entity" in normalized_name:
+            return True
+        if entity_type in KG_CONTEXT_NOISE_TYPE_VALUES and KG_CONTEXT_NOISE_RE.search(text):
+            return True
+        return bool(KG_CONTEXT_NOISE_RE.search(name))
+
+    def _is_noisy_kg_relation(self, relation: Any) -> bool:
+        if not isinstance(relation, dict):
+            return True
+        src, tgt = self._kg_relation_endpoints(relation)
+        text = self._kg_item_text(relation)
+        if KG_CONTEXT_NOISE_RE.search(src) or KG_CONTEXT_NOISE_RE.search(tgt):
+            return True
+        if "unknown_entity" in src.lower() or "unknown_entity" in tgt.lower():
+            return True
+        return bool(KG_CONTEXT_NOISE_RE.search(text))
+
+    def _kg_entity_name(self, entity: Any) -> str:
+        if not isinstance(entity, dict):
+            return ""
+        return str(entity.get("entity_name") or entity.get("entity") or entity.get("name") or "").strip()
+
+    def _kg_relation_endpoints(self, relation: Any) -> tuple[str, str]:
+        if not isinstance(relation, dict):
+            return "", ""
+        if isinstance(relation.get("src_tgt"), (list, tuple)) and len(relation["src_tgt"]) >= 2:
+            return str(relation["src_tgt"][0] or "").strip(), str(relation["src_tgt"][1] or "").strip()
+        return str(relation.get("src_id") or relation.get("entity1") or "").strip(), str(
+            relation.get("tgt_id") or relation.get("entity2") or ""
+        ).strip()
+
+    def _kg_item_file(self, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        path = str(item.get("file_path") or item.get("source_path") or item.get("path") or "").strip()
+        return path
+
+    def _kg_item_text(self, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        values = [
+            item.get("entity_name"),
+            item.get("entity"),
+            item.get("name"),
+            item.get("entity_type"),
+            item.get("type"),
+            item.get("src_id"),
+            item.get("tgt_id"),
+            item.get("entity1"),
+            item.get("entity2"),
+            item.get("description"),
+            item.get("keywords"),
+            item.get("content"),
+            item.get("text"),
+            item.get("snippet"),
+        ]
+        return " ".join(str(value or "") for value in values)
+
+    def _kg_text_matches_terms(self, text: str, terms: set[str]) -> bool:
+        if not text or not terms:
+            return False
+        return any(term in text for term in terms if len(term) >= 2)
+
     def _get_instance(self, class_id: str):
         routing_snapshot = self._load_runtime_routing_snapshot()
         storage_plan = build_lightrag_storage_plan(class_id)
@@ -712,6 +1428,7 @@ class RAGAnythingAdapter:
 
         raganything_module = importlib.import_module("raganything")
         config_module = importlib.import_module("raganything.config")
+        self._install_lightrag_context_filter()
         RAGAnything = getattr(raganything_module, "RAGAnything")
         RAGAnythingConfig = getattr(config_module, "RAGAnythingConfig")
         prompt_override_status = apply_framework_prompt_overrides(settings)
@@ -2513,15 +3230,44 @@ class RAGAnythingAdapter:
                 db.add(task)
                 db.flush()
 
-            preprocess_result = preprocess_for_raganything(
-                file_path=file_path,
-                mime_type=mime_type,
-                file_name=material.file_name,
+            preprocess_started = self._start_parse_stage(
+                db,
+                task,
+                "preprocess",
+                label="文件预处理",
+                details={"mime_type": mime_type, "file_name": material.file_name},
             )
-            preprocess_result.content_list = self._annotate_content_items(
-                preprocess_result.content_list,
-                material_id=material_id,
-                file_name=material.file_name,
+            try:
+                preprocess_result = preprocess_for_raganything(
+                    file_path=file_path,
+                    mime_type=mime_type,
+                    file_name=material.file_name,
+                )
+                preprocess_result.content_list = self._annotate_content_items(
+                    preprocess_result.content_list,
+                    material_id=material_id,
+                    file_name=material.file_name,
+                )
+            except Exception as exc:
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "preprocess",
+                    started=preprocess_started,
+                    status="failed",
+                    error=str(exc),
+                )
+                raise
+            self._finish_parse_stage(
+                db,
+                task,
+                "preprocess",
+                started=preprocess_started,
+                details={
+                    "mode": preprocess_result.mode,
+                    "modality": preprocess_result.modality,
+                    "content_item_count": len(preprocess_result.content_list or []),
+                },
             )
             if (
                 preprocess_result.metadata.get("preprocess_quality") == "metadata_only"
@@ -2542,11 +3288,45 @@ class RAGAnythingAdapter:
             db.commit()
 
             rag = self._get_instance(class_id)
+            ingest_trace: dict[str, Any] = {
+                "trace_version": 1,
+                "class_id": class_id,
+                "material_id": material_id,
+                "file_name": material.file_name,
+                "llm_calls": [],
+                "vision_calls": [],
+            }
+            trace_token = _INGEST_TRACE_CONTEXT.set(ingest_trace)
             if preprocess_result.use_content_list:
-                await self._insert_preprocessed_content_list(
-                    rag=rag,
-                    preprocess_result=preprocess_result,
-                    material_id=material_id,
+                insert_started = self._start_parse_stage(
+                    db,
+                    task,
+                    "lightrag_insert",
+                    label="预处理内容写入索引",
+                    details={"mode": preprocess_result.mode},
+                )
+                try:
+                    await self._insert_preprocessed_content_list(
+                        rag=rag,
+                        preprocess_result=preprocess_result,
+                        material_id=material_id,
+                    )
+                except Exception as exc:
+                    self._finish_parse_stage(
+                        db,
+                        task,
+                        "lightrag_insert",
+                        started=insert_started,
+                        status="failed",
+                        error=str(exc),
+                    )
+                    raise
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "lightrag_insert",
+                    started=insert_started,
+                    details={"content_item_count": len(preprocess_result.content_list or [])},
                 )
                 content_list_status = self._build_content_list_processing_status(preprocess_result)
                 document_status = await self._get_document_processing_status(
@@ -2573,18 +3353,110 @@ class RAGAnythingAdapter:
                             or document_status.get("multimodal_processed")
                         )
             else:
-                await rag.process_document_complete(
-                    file_path=file_path,
-                    output_dir=str((Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()),
-                    parse_method=settings.RAGANYTHING_PARSE_METHOD,
-                    doc_id=material_id,
-                    file_name=material.file_name,
+                document_started = self._start_parse_stage(
+                    db,
+                    task,
+                    "mineru_parse",
+                    label="MinerU版面解析与官方文档处理",
+                    details={
+                        "entrypoint": "process_document_complete",
+                        "parse_method": settings.RAGANYTHING_PARSE_METHOD,
+                        "timing_granularity": "raganything_document_pipeline",
+                    },
+                )
+                try:
+                    await rag.process_document_complete(
+                        file_path=file_path,
+                        output_dir=str((Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()),
+                        parse_method=settings.RAGANYTHING_PARSE_METHOD,
+                        doc_id=material_id,
+                        file_name=material.file_name,
+                    )
+                except Exception as exc:
+                    self._finish_parse_stage(
+                        db,
+                        task,
+                        "mineru_parse",
+                        started=document_started,
+                        status="failed",
+                        error=str(exc),
+                    )
+                    raise
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "mineru_parse",
+                    started=document_started,
+                    details={
+                        "entrypoint": "process_document_complete",
+                        "includes_downstream_indexing": True,
+                    },
                 )
 
                 status = rag.get_document_processing_status(material_id)
                 if inspect.isawaitable(status):
                     status = await status
                 status = self._normalize_processing_status(status, preprocess_result)
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "vlm_describe",
+                    status="completed" if status.get("multimodal_processed") else "skipped",
+                    details={
+                        "observed_by": "model_call_trace",
+                        "vision_call_count": int(ingest_trace.get("vision_call_count") or 0),
+                        "latency_ms": ingest_trace.get("vlm_describe_latency_ms"),
+                        "multimodal_processed": bool(status.get("multimodal_processed")),
+                    },
+                )
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "lightrag_insert",
+                    status="completed" if status.get("text_processed") else "failed",
+                    details={
+                        "observed_by": "raganything_status",
+                        "chunks_count": status.get("chunks_count"),
+                        "text_processed": bool(status.get("text_processed")),
+                    },
+                    error=None if status.get("text_processed") else self._extract_processing_error(status).get("message"),
+                )
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "entity_relation_extract",
+                    status="completed" if ingest_trace.get("knowledge_extraction_latency_ms") else "unknown",
+                    details={
+                        "observed_by": "llm_call_trace",
+                        "llm_call_count": int(ingest_trace.get("llm_call_count") or 0),
+                        "knowledge_extraction_latency_ms": ingest_trace.get("knowledge_extraction_latency_ms"),
+                    },
+                )
+
+            self._finish_parse_stage(
+                db,
+                task,
+                "vlm_describe",
+                status="completed" if status.get("multimodal_processed") else "skipped",
+                details={
+                    "observed_by": "model_call_trace",
+                    "vision_call_count": int(ingest_trace.get("vision_call_count") or 0),
+                    "latency_ms": ingest_trace.get("vlm_describe_latency_ms"),
+                    "multimodal_processed": bool(status.get("multimodal_processed")),
+                },
+            )
+            self._finish_parse_stage(
+                db,
+                task,
+                "entity_relation_extract",
+                status="completed" if ingest_trace.get("knowledge_extraction_latency_ms") else "unknown",
+                details={
+                    "observed_by": "llm_call_trace",
+                    "llm_call_count": int(ingest_trace.get("llm_call_count") or 0),
+                    "knowledge_extraction_latency_ms": ingest_trace.get("knowledge_extraction_latency_ms"),
+                },
+            )
+            _INGEST_TRACE_CONTEXT.reset(trace_token)
 
             parsed = self._build_metadata_payload(
                 class_id=class_id,
@@ -2642,6 +3514,7 @@ class RAGAnythingAdapter:
                     "class_output_dir": str((Path(settings.RAGANYTHING_OUTPUT_DIR) / class_id).resolve()),
                 },
             }
+            self._attach_ingest_trace_summary(task, ingest_trace)
             material.kb_status = "indexed" if task.status == "completed" else "failed"
             if task.status == "completed" and not fully_processed:
                 if text_processed and not multimodal_processed:
@@ -2660,13 +3533,42 @@ class RAGAnythingAdapter:
                     processing_error["message"] or "RAG-Anything processing incomplete"
                 )
 
-            graph_projection = self._sync_raganything_graph_projection(
+            graph_started = self._start_parse_stage(
                 db,
-                class_id=class_id,
-                material_id=material_id,
-                file_name=material.file_name,
-                parsed=parsed,
-                status=status,
+                task,
+                "graph_projection",
+                label="知识图谱投影同步",
+                details={"source": "raganything_projection"},
+            )
+            try:
+                graph_projection = self._sync_raganything_graph_projection(
+                    db,
+                    class_id=class_id,
+                    material_id=material_id,
+                    file_name=material.file_name,
+                    parsed=parsed,
+                    status=status,
+                )
+            except Exception as exc:
+                self._finish_parse_stage(
+                    db,
+                    task,
+                    "graph_projection",
+                    started=graph_started,
+                    status="failed",
+                    error=str(exc),
+                )
+                raise
+            self._finish_parse_stage(
+                db,
+                task,
+                "graph_projection",
+                started=graph_started,
+                details={
+                    "entity_count": graph_projection.get("entity_count"),
+                    "relation_count": graph_projection.get("relation_count"),
+                    "graph_source": graph_projection.get("graph_source"),
+                },
             )
             index_quality = self._build_index_quality_report(
                 preprocess_result=preprocess_result,
@@ -3299,6 +4201,17 @@ class RAGAnythingAdapter:
             query_trace["answer_preview"] = self._trace_preview(answer, limit=700)
             query_trace["stage_timings_ms"] = dict(stage_timings_ms)
             query_trace["total_latency_ms"] = round((perf_counter() - query_started) * 1000, 2)
+            invoke_ms = float(stage_timings_ms.get("invoke_rag_query") or 0.0)
+            llm_total_ms = float(query_trace.get("llm_total_latency_ms") or 0.0)
+            if invoke_ms > 0 and llm_total_ms >= 0:
+                query_trace["retrieval_context_latency_estimated_ms"] = round(
+                    max(0.0, invoke_ms - llm_total_ms),
+                    2,
+                )
+                query_trace["retrieval_context_latency_estimation_note"] = (
+                    "invoke_rag_query minus traced LightRAG/RAG-Anything LLM calls; "
+                    "covers graph retrieval, vector retrieval, context assembly, and framework overhead."
+                )
 
             return (
                 RAGResult(
@@ -5248,10 +6161,9 @@ class RAGAnythingAdapter:
 
     def _lightrag_reference_query_modes(self, query_mode: str) -> list[str]:
         requested = (query_mode or "hybrid").strip().lower()
-        stable_primary = "hybrid" if requested == "mix" else requested
-        attempted_modes = [stable_primary]
+        attempted_modes = [requested]
         attempted_modes.extend(
-            mode for mode in ("hybrid", "global", "local", "naive")
+            mode for mode in ("mix", "hybrid", "global", "local", "naive")
             if mode not in attempted_modes
         )
         return attempted_modes
@@ -5278,6 +6190,12 @@ class RAGAnythingAdapter:
             supports_user_prompt = False
             supports_enable_rerank = False
         if user_prompt and supports_user_prompt:
+            if bool(getattr(settings, "RAG_KG_CONTEXT_FILTER_ENABLED", True)):
+                user_prompt = (
+                    f"{user_prompt}\n\n"
+                    f"Retrieval policy: {KG_CONTEXT_FILTER_CACHE_TAG}. "
+                    "Ignore generic table-structure artifact nodes unless they directly answer the question."
+                )
             kwargs["user_prompt"] = user_prompt
         if supports_enable_rerank:
             kwargs["enable_rerank"] = self._lightrag_internal_rerank_enabled()

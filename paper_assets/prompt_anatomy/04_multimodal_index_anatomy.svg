@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="880" viewBox="0 0 1280 880">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.official{fill:#edf5ff;stroke:#6aa3dc}.addon{fill:#eef9f1;stroke:#6fb879}.input{fill:#fff7e6;stroke:#d6a03c}.rule{fill:#f8f0ff;stroke:#a37bd1}.out{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}.mono{font-family:Consolas,"Courier New",monospace;font-size:14px;fill:#0f172a}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="880" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">RAG-Anything 多模态索引 Prompt 拆解</text>
+  <text x="60" y="94" class="sub">对应官方 vision_prompt、table_prompt、equation_prompt、generic_prompt；用于把多模态原子单元转换为可检索文本描述。</text>
+
+  <rect x="60" y="140" width="290" height="180" class="box input"/>
+  <text x="85" y="180" class="head">输入变量</text>
+  <text x="85" y="216" class="body">图片路径、caption、footnotes</text>
+  <text x="85" y="244" class="body">表格图像、表体、表注</text>
+  <text x="85" y="272" class="body">公式文本、公式格式</text>
+  <text x="85" y="300" class="body">通用内容及 content_type</text>
+
+  <rect x="385" y="140" width="290" height="180" class="box official"/>
+  <text x="410" y="180" class="head">任务目标</text>
+  <text x="410" y="216" class="body">详细分析多模态内容</text>
+  <text x="410" y="244" class="body">提取结构、对象、文字和关系</text>
+  <text x="410" y="272" class="body">形成可用于知识检索的描述</text>
+
+  <rect x="710" y="140" width="290" height="180" class="box rule"/>
+  <text x="735" y="180" class="head">分析规则</text>
+  <text x="735" y="216" class="body">图片：布局、对象、文字、关系</text>
+  <text x="735" y="244" class="body">表格：表头、数据点、模式和趋势</text>
+  <text x="735" y="272" class="body">公式：变量、含义、应用场景</text>
+  <text x="735" y="300" class="body">通用内容：结构和关键信息</text>
+
+  <rect x="230" y="405" width="360" height="175" class="box out"/>
+  <text x="255" y="445" class="head">输出格式限制</text>
+  <text x="255" y="476" class="body">输出 JSON 对象</text>
+  <rect x="260" y="492" width="285" height="70" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="278" y="518" class="mono">{ "detailed_description": ...,</text>
+  <text x="278" y="542" class="mono">  "entity_info": { ... } }</text>
+
+  <rect x="690" y="405" width="360" height="175" class="box addon"/>
+  <text x="715" y="445" class="head">本系统追加指导语位置</text>
+  <text x="715" y="481" class="body">模板末尾追加多模态教育指导语</text>
+  <text x="715" y="509" class="body">强调标题、坐标轴、图例、变量、单位</text>
+  <text x="715" y="537" class="body">关注课程概念、公式、例题和实验步骤</text>
+  <text x="715" y="565" class="body">保留官方 JSON 输出格式</text>
+
+  <rect x="180" y="665" width="920" height="95" class="box out"/>
+  <text x="210" y="705" class="head">索引结果</text>
+  <text x="210" y="739" class="body">VLM 返回文本化描述，进入模态 chunk；后续由 LightRAG 完成向量索引和实体关系抽取。</text>
+
+  <path d="M350 230 H380" class="arrow"/><path d="M675 230 H705" class="arrow"/>
+  <path d="M855 320 V375 H410 V400" class="arrow"/><path d="M855 320 V400" class="arrow"/>
+  <path d="M640 580 V660" class="arrow"/>
+</svg>

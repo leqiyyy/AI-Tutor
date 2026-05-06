@@ -28,14 +28,16 @@ from app.services import course_service, kb_service, personalized_recommendation
 router = APIRouter(tags=["frontend-compat"])
 
 COLORS = ["blue", "green", "purple", "orange", "teal", "pink", "amber"]
-GRAPH_ENTITY_LIMIT = 80
-GRAPH_ENTITY_FETCH_LIMIT = 300
+GRAPH_ENTITY_LIMIT = 1000
+GRAPH_ENTITY_FETCH_LIMIT = 2000
+GRAPH_RELATION_LIMIT = 2000
 GRAPH_ROOT_EDGE_LIMIT = 24
 GRAPH_ROOT_EDGE_PER_MATERIAL_LIMIT = 10
 GRAPH_HIDDEN_ENTITY_KINDS = {
     "material",
     "content_item",
     "candidate_concept_identifier",
+    "relation_endpoint",
 }
 GRAPH_ARTIFACT_LABELS = {
     "表",
@@ -1922,8 +1924,11 @@ def _looks_like_graph_noise_label(label: str | None) -> bool:
 def _is_default_graph_entity(entity: KnowledgeEntity) -> bool:
     kind = _graph_source_kind(entity.source_span)
     entity_type = str(entity.entity_type or "").strip().lower()
+    description = str(entity.description or "").strip()
 
     if kind in GRAPH_HIDDEN_ENTITY_KINDS or entity_type in {"material", "document", "file", "page", "chunk"}:
+        return False
+    if description.startswith("RAG-Anything relation endpoint from "):
         return False
     if _looks_like_graph_noise_label(entity.name):
         return False
@@ -2048,10 +2053,25 @@ def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = Non
         .limit(GRAPH_ENTITY_FETCH_LIMIT)
         .all()
     )
+    raw_entity_total = (
+        db.query(KnowledgeEntity)
+        .filter(KnowledgeEntity.class_id == cls.id)
+        .filter(KnowledgeEntity.status != "rejected")
+        .count()
+    )
     active_raw_entities = [
         entity for entity in raw_entities
         if _graph_record_has_active_material(entity, active_material_ids)
     ]
+    active_raw_entity_total = (
+        db.query(KnowledgeEntity)
+        .filter(KnowledgeEntity.class_id == cls.id)
+        .filter(KnowledgeEntity.status != "rejected")
+        .filter(KnowledgeEntity.source_material_id.in_(list(active_material_ids)))
+        .count()
+        if active_material_ids
+        else 0
+    )
     entities = [
         entity for entity in active_raw_entities
         if _is_default_graph_entity(entity)
@@ -2064,7 +2084,7 @@ def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = Non
         .filter(KnowledgeRelation.source_id.in_(entity_ids))
         .filter(KnowledgeRelation.target_id.in_(entity_ids))
         .order_by(KnowledgeRelation.confidence.desc(), KnowledgeRelation.created_at.desc())
-        .limit(160)
+        .limit(GRAPH_RELATION_LIMIT)
         .all()
         if entity_ids
         else []
@@ -2180,9 +2200,13 @@ def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = Non
             "layout": "force",
             "entityCount": len(entities),
             "relationCount": len(relations),
-            "rawEntityCount": len(raw_entities),
-            "activeRawEntityCount": len(active_raw_entities),
-            "filteredEntityCount": max(0, len(raw_entities) - len(entities)),
+            "rawEntityCount": raw_entity_total,
+            "fetchedRawEntityCount": len(raw_entities),
+            "activeRawEntityCount": active_raw_entity_total,
+            "fetchedActiveRawEntityCount": len(active_raw_entities),
+            "filteredEntityCount": max(0, len(active_raw_entities) - len(entities)),
+            "entityDisplayLimit": GRAPH_ENTITY_LIMIT,
+            "relationDisplayLimit": GRAPH_RELATION_LIMIT,
             "source": "knowledge_entities",
             "defaultView": "concept_graph",
         },

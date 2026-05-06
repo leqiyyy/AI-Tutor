@@ -309,7 +309,7 @@ export default function RegisterPage() {
   return (
     <div className="auth-soft min-h-screen flex" style={{ fontFamily: "'Noto Sans SC', sans-serif" }}>
       {/* 左侧品牌区 */}
-      <div className="hidden lg:flex lg:w-[52%] relative flex-col justify-between overflow-hidden">
+      <div className="hidden lg:flex lg:w-[52%] relative flex-col overflow-hidden">
         <img
           src="https://readdy.ai/api/search-image?query=Beautiful%20Chinese%20university%20campus%20cherry%20blossom%20trees%20in%20full%20bloom%20along%20a%20serene%20pathway%20with%20modern%20academic%20buildings%20in%20the%20background%2C%20soft%20warm%20spring%20light%20filtering%20through%20pink%20petals%2C%20elegant%20and%20peaceful%20atmosphere%2C%20high%20quality%20photography%20style%20with%20shallow%20depth%20of%20field%2C%20pastel%20pink%20and%20white%20tones%2C%20professional%20educational%20institution%20aesthetic&width=900&height=1080&seq=login-bg-1&orientation=portrait"
           alt="珞樱学堂"
@@ -324,42 +324,30 @@ export default function RegisterPage() {
             <span className="text-2xl font-bold text-white tracking-wide">珞樱学堂</span>
           </div>
         </div>
-        <div className="relative z-10 px-10 pb-4">
-          <h1 className="text-4xl font-bold text-white leading-tight mb-4">
-            加入珞樱学堂<br />开启智能学习
-          </h1>
-          <p className="text-white/80 text-base leading-relaxed mb-8">
-            填写注册信息并完成验证码校验<br />即可立即开通账号并使用平台服务
-          </p>
-          <div className="flex flex-col gap-4">
-            {[
-              { icon: 'ri-graduation-cap-line', title: '学生注册', desc: '填写学籍信息，加入课程班级，享受AI答疑' },
-              { icon: 'ri-user-star-line', title: '教师注册', desc: '提交工号及资质，创建课程，管理学生学习' },
-            ].map((item, i) => (
-              <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-white/10 backdrop-blur-sm">
-                <div className="w-9 h-9 flex items-center justify-center rounded-lg bg-white/20 shrink-0">
-                  <i className={`${item.icon} text-white text-base`}></i>
-                </div>
-                <div>
+        <div className="relative z-10 flex-1 flex items-center px-10 pb-16">
+          <div className="max-w-xl">
+            <h1 className="text-4xl font-bold text-white leading-tight mb-5">
+              基于大语言模型和检索增强生成的AI助教平台
+            </h1>
+            <p className="text-white text-base leading-relaxed mb-8">
+              完成账号注册后，可进入课程空间使用课程资料管理、智能问答与教学辅助功能。
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { icon: 'ri-team-line', title: '班级空间', desc: '支持教师建课与学生加入班级' },
+                { icon: 'ri-file-upload-line', title: '资料管理', desc: '上传课程资料并构建知识库' },
+                { icon: 'ri-chat-check-line', title: 'AI 答疑', desc: '围绕课程内容进行检索增强问答' },
+                { icon: 'ri-task-line', title: '教学任务', desc: '支持通知、作业与学习任务管理' },
+              ].map((item) => (
+                <div key={item.title} className="rounded-xl bg-white/18 backdrop-blur-sm border border-white/25 p-4">
+                  <div className="w-9 h-9 flex items-center justify-center rounded-lg bg-white/25 mb-3">
+                    <i className={`${item.icon} text-white text-lg`}></i>
+                  </div>
                   <div className="text-white text-sm font-semibold">{item.title}</div>
-                  <div className="text-white/70 text-xs mt-0.5 leading-relaxed">{item.desc}</div>
+                  <div className="text-white text-xs leading-relaxed mt-1">{item.desc}</div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="relative z-10 px-10 pb-10">
-          <div className="flex items-center gap-6 pt-6 border-t border-white/20">
-            {[
-              { num: '12,000+', label: '在校学生' },
-              { num: '680+', label: '授课教师' },
-              { num: '98%', label: '用户满意度' },
-            ].map((stat, i) => (
-              <div key={i} className="text-center">
-                <div className="text-xl font-bold text-white">{stat.num}</div>
-                <div className="text-xs text-white/60 mt-0.5">{stat.label}</div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -992,7 +980,7 @@ export default function RegisterPage() {
             <button type="button" onClick={() => navigate('/login')} className={`${textAccent} font-medium ml-1 cursor-pointer whitespace-nowrap hover:underline`}>立即登录</button>
           </p>
           <p className="text-center text-xs text-gray-300 mt-3">
-            © 2025 珞樱学堂 · 武汉大学智能教育实验室
+            © 2026 武汉大学网络空间安全学院
           </p>
         </div>
       </div>

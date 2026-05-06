@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.official{fill:#edf5ff;stroke:#6aa3dc}.addon{fill:#eef9f1;stroke:#6fb879}.input{fill:#fff7e6;stroke:#d6a03c}.rule{fill:#f8f0ff;stroke:#a37bd1}.out{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}.mono{font-family:Consolas,"Courier New",monospace;font-size:14px;fill:#0f172a}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="820" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">RAG-Anything 查询多模态增强 Prompt 拆解</text>
+  <text x="60" y="94" class="sub">对应 QUERY_IMAGE_DESCRIPTION、QUERY_TABLE_ANALYSIS、QUERY_EQUATION_ANALYSIS、QUERY_GENERIC_ANALYSIS 与 QUERY_ENHANCEMENT_SUFFIX。</text>
+
+  <rect x="70" y="145" width="310" height="165" class="box input"/>
+  <text x="95" y="185" class="head">输入变量</text>
+  <text x="95" y="221" class="body">用户原始问题</text>
+  <text x="95" y="249" class="body">当前轮图片、表格、公式或通用内容</text>
+  <text x="95" y="277" class="body">{table_data}、{table_caption}、{latex}</text>
+  <text x="95" y="305" class="body">{equation_caption}、{content_type}、{content_str}</text>
+
+  <rect x="485" y="145" width="310" height="165" class="box official"/>
+  <text x="510" y="185" class="head">内容理解 Prompt</text>
+  <text x="510" y="221" class="body">图片：简要描述主要内容</text>
+  <text x="510" y="249" class="body">表格：概括结构、数据特征和发现</text>
+  <text x="510" y="277" class="body">公式：解释含义、场景和重要性</text>
+
+  <rect x="900" y="145" width="310" height="165" class="box rule"/>
+  <text x="925" y="185" class="head">增强规则</text>
+  <text x="925" y="221" class="body">把多模态描述追加到查询上下文</text>
+  <text x="925" y="249" class="body">保留用户原问题</text>
+  <text x="925" y="277" class="body">追加 QUERY_ENHANCEMENT_SUFFIX</text>
+
+  <rect x="245" y="405" width="360" height="165" class="box out"/>
+  <text x="270" y="445" class="head">输出结果</text>
+  <text x="270" y="476" class="body">增强后的 query text</text>
+  <rect x="275" y="492" width="285" height="62" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="292" y="517" class="mono">User query</text>
+  <text x="292" y="541" class="mono">+ Related multimodal content</text>
+
+  <rect x="675" y="405" width="360" height="165" class="box addon"/>
+  <text x="700" y="445" class="head">本项目补充情况</text>
+  <text x="700" y="481" class="body">聊天图片附件另有系统自定义 VLM prompt</text>
+  <text x="700" y="509" class="body">用于提取题目内容、图示和解题线索</text>
+  <text x="700" y="537" class="body">默认只服务当前轮问答，不写入知识库</text>
+
+  <path d="M380 227 H480" class="arrow"/><path d="M795 227 H895" class="arrow"/>
+  <path d="M1055 310 V365 H425 V400" class="arrow"/>
+  <path d="M1055 310 V365 H855 V400" class="arrow"/>
+</svg>

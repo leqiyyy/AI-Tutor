@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900" viewBox="0 0 1280 900">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.official{fill:#edf5ff;stroke:#6aa3dc}.addon{fill:#eef9f1;stroke:#6fb879}.input{fill:#fff7e6;stroke:#d6a03c}.rule{fill:#f8f0ff;stroke:#a37bd1}.out{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}.mono{font-family:Consolas,"Courier New",monospace;font-size:14px;fill:#0f172a}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="900" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">LightRAG 实体关系抽取 Prompt 拆解</text>
+  <text x="60" y="94" class="sub">文本 chunk 与多模态描述进入同一套图谱抽取模板；本系统追加课程知识图谱约束。</text>
+
+  <rect x="60" y="140" width="290" height="165" class="box official"/>
+  <text x="85" y="180" class="head">角色约束</text>
+  <text x="85" y="216" class="body">Knowledge Graph Specialist</text>
+  <text x="85" y="244" class="body">负责从文本中抽取实体和关系</text>
+  <text x="85" y="272" class="body">描述必须基于输入文本</text>
+
+  <rect x="380" y="140" width="290" height="165" class="box input"/>
+  <text x="405" y="180" class="head">输入变量</text>
+  <text x="405" y="216" class="body">{input_text}</text>
+  <text x="405" y="244" class="body">{entity_types}</text>
+  <text x="405" y="272" class="body">{tuple_delimiter}、{completion_delimiter}</text>
+
+  <rect x="700" y="140" width="290" height="165" class="box rule"/>
+  <text x="725" y="180" class="head">实体抽取规则</text>
+  <text x="725" y="216" class="body">识别明确且有意义的实体</text>
+  <text x="725" y="244" class="body">输出 entity_name、entity_type、entity_description</text>
+  <text x="725" y="272" class="body">命名保持一致</text>
+
+  <rect x="220" y="390" width="350" height="180" class="box rule"/>
+  <text x="245" y="430" class="head">关系抽取规则</text>
+  <text x="245" y="466" class="body">识别实体之间的显式关系</text>
+  <text x="245" y="494" class="body">输出源实体、目标实体、关系关键词</text>
+  <text x="245" y="522" class="body">输出 relationship_keywords 与 relationship_description</text>
+  <text x="245" y="550" class="body">只依据文本证据</text>
+
+  <rect x="710" y="390" width="350" height="180" class="box out"/>
+  <text x="735" y="430" class="head">输出格式限制</text>
+  <text x="735" y="462" class="body">仅输出实体与关系列表，严格使用字段顺序</text>
+  <rect x="735" y="480" width="300" height="64" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="750" y="506" class="mono">entity | name | type | desc</text>
+  <text x="750" y="530" class="mono">relation | source | target | keywords | desc</text>
+  <text x="735" y="562" class="body">最后输出 {completion_delimiter}</text>
+
+  <rect x="165" y="650" width="950" height="135" class="box addon"/>
+  <text x="195" y="690" class="head">本系统追加指导语位置</text>
+  <text x="195" y="724" class="body">模板末尾追加：优先 course_concept、prerequisite、learning_objective、formula、theorem、algorithm、example、exercise、misconception。</text>
+  <text x="195" y="752" class="body">同时优先 experiment_step、tool、dataset、assessment_point；过滤文件名、路径、页码、UUID、哈希和 chunk 编号。</text>
+
+  <path d="M350 223 H375" class="arrow"/><path d="M670 223 H695" class="arrow"/>
+  <path d="M845 305 V360 H395 V385" class="arrow"/><path d="M845 305 V385" class="arrow"/>
+  <path d="M640 570 V645" class="arrow"/>
+</svg>

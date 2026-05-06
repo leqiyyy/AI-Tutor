@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .node text{font-size:15px;font-weight:700}.desc{font-size:13px;fill:#64748b}
+      .edge{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+      .label{font-size:13px;fill:#334155}
+      .modal{fill:#ede9fe;stroke:#7c3aed;stroke-width:2}.concept{fill:#e0f2fe;stroke:#0284c7;stroke-width:2}.formula{fill:#fef3c7;stroke:#d97706;stroke-width:2}.table{fill:#dcfce7;stroke:#16a34a;stroke-width:2}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="760" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">跨模态知识图谱示例</text>
+  <text x="60" y="94" class="sub">来源：图片、表格、公式区域经 VLM 生成的 detailed_description 与 summary。描述文本进入 LightRAG 后，与普通文本采用同一实体关系抽取流程。</text>
+
+  <path d="M235 270 C340 210 465 210 570 270" class="edge"/>
+  <text x="358" y="218" class="label">explains</text>
+  <path d="M570 305 C660 260 750 260 840 305" class="edge"/>
+  <text x="670" y="257" class="label">uses_formula</text>
+  <path d="M570 360 C675 455 765 455 880 390" class="edge"/>
+  <text x="681" y="455" class="label">example_of</text>
+  <path d="M235 335 C340 450 455 515 570 560" class="edge"/>
+  <text x="334" y="470" class="label">part_of</text>
+  <path d="M570 560 C690 615 830 600 950 520" class="edge"/>
+  <text x="710" y="633" class="label">related_to</text>
+
+  <g class="node">
+    <rect x="145" y="225" width="180" height="105" rx="14" class="modal"/>
+    <text x="188" y="266">图片原子单元</text><text x="171" y="294">拥塞窗口变化图</text>
+  </g>
+  <g class="node">
+    <circle cx="570" cy="310" r="66" class="concept"/>
+    <text x="536" y="306">课程概念</text><text x="535" y="332">拥塞窗口</text>
+  </g>
+  <g class="node">
+    <circle cx="900" cy="320" r="62" class="formula"/>
+    <text x="875" y="316">公式</text><text x="846" y="342">窗口增长规则</text>
+  </g>
+  <g class="node">
+    <rect x="790" y="385" width="190" height="100" rx="14" class="table"/>
+    <text x="846" y="425">表格原子单元</text><text x="820" y="453">不同阶段窗口取值</text>
+  </g>
+  <g class="node">
+    <rect x="480" y="540" width="180" height="100" rx="14" class="modal"/>
+    <text x="523" y="580">公式原子单元</text><text x="505" y="608">阈值更新表达式</text>
+  </g>
+  <g class="node">
+    <circle cx="1010" cy="515" r="58" class="concept"/>
+    <text x="982" y="511">课程概念</text><text x="969" y="536">慢启动阈值</text>
+  </g>
+
+  <rect x="75" y="625" width="430" height="85" class="box"/>
+  <text x="100" y="660" class="label">图例：紫色=多模态原子单元，蓝色=概念，黄色=公式，绿色=表格内容项</text>
+  <text x="100" y="687" class="desc">跨模态图谱中的实体关系来自 VLM 描述文本，而不是直接由像素或表格文件生成。</text>
+</svg>

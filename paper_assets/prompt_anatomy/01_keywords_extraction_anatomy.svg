@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820">
+  <defs>
+    <style>
+      text{font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;fill:#172033}
+      .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#5f6f89}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:2;rx:8}.role{fill:#edf5ff;stroke:#6aa3dc}.goal{fill:#eef9f1;stroke:#6fb879}.input{fill:#fff7e6;stroke:#d6a03c}.rule{fill:#f8f0ff;stroke:#a37bd1}.out{fill:#f3f4f6;stroke:#94a3b8}
+      .head{font-size:18px;font-weight:700}.body{font-size:15px;fill:#334155}.small{font-size:13px;fill:#64748b}.mono{font-family:Consolas,"Courier New",monospace;font-size:15px;fill:#0f172a}
+      .arrow{stroke:#64748b;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="1280" height="820" fill="#f8fafc"/>
+  <text x="60" y="64" class="title">LightRAG 关键词抽取 Prompt 拆解</text>
+  <text x="60" y="94" class="sub">对应官方 keywords_extraction 模板；本系统未替换该模板，查询后续阶段传入课程角色指导语。</text>
+
+  <rect x="70" y="145" width="340" height="145" class="box role"/>
+  <text x="95" y="184" class="head">角色约束</text>
+  <text x="95" y="220" class="body">模型被设定为 RAG 系统的关键词抽取器</text>
+  <text x="95" y="248" class="body">职责是理解用户查询并服务后续检索</text>
+
+  <rect x="470" y="145" width="340" height="145" class="box goal"/>
+  <text x="495" y="184" class="head">任务目标</text>
+  <text x="495" y="220" class="body">抽取 high_level_keywords</text>
+  <text x="495" y="248" class="body">抽取 low_level_keywords</text>
+
+  <rect x="870" y="145" width="340" height="145" class="box input"/>
+  <text x="895" y="184" class="head">输入变量</text>
+  <text x="895" y="220" class="body">{query}</text>
+  <text x="895" y="248" class="body">{language}、{examples}</text>
+
+  <rect x="170" y="385" width="410" height="190" class="box rule"/>
+  <text x="195" y="425" class="head">抽取规则</text>
+  <text x="195" y="461" class="body">高层关键词表达问题意图、主题和概念范围</text>
+  <text x="195" y="489" class="body">低层关键词表达具体实体、术语和细节对象</text>
+  <text x="195" y="517" class="body">关键词必须来自用户查询，不引入外部信息</text>
+  <text x="195" y="545" class="body">要求简洁、可用于检索</text>
+
+  <rect x="700" y="385" width="410" height="190" class="box out"/>
+  <text x="725" y="425" class="head">输出限制</text>
+  <text x="725" y="456" class="body">只输出可解析 JSON，不输出解释或 Markdown</text>
+  <rect x="735" y="474" width="310" height="78" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="755" y="500" class="mono">{</text>
+  <text x="775" y="524" class="mono">"high_level_keywords": [...],</text>
+  <text x="775" y="548" class="mono">"low_level_keywords": [...]</text>
+  <text x="755" y="572" class="mono">}</text>
+
+  <path d="M410 218 H465" class="arrow"/><path d="M810 218 H865" class="arrow"/>
+  <path d="M640 290 V350 H375 V380" class="arrow"/>
+  <path d="M1040 290 V350 H905 V380" class="arrow"/>
+  <text x="75" y="710" class="small">论文图题建议：图 4-x LightRAG 关键词抽取提示词结构。说明其输出为高层关键词和低层关键词，分别支撑图谱语义检索和实体细节检索。</text>
+</svg>
