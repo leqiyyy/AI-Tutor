@@ -92,7 +92,7 @@ services:
       - backend_runtime_tmp:/app/runtime_tmp
       - modelscope_cache:/root/.cache/modelscope
       - huggingface_cache:/root/.cache/huggingface
-    command: celery -A app.core.celery_app:celery_app worker --loglevel=info
+    command: celery -A app.core.celery_app:celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=1
 
   db:
     image: postgres:16-alpine

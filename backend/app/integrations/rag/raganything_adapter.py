@@ -45,6 +45,10 @@ _INGEST_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextva
 )
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 PROJECTION_FILE_LABEL_RE = re.compile(
     r"\.(?:txt|pdf|docx?|pptx?|xlsx?|csv|md|png|jpe?g|gif|webp|mp4|mov|avi|zip)$",
     re.IGNORECASE,
@@ -228,13 +232,184 @@ class RAGAnythingAdapter:
         extra["model_call_trace"] = {
             "llm_call_count": int(trace.get("llm_call_count") or 0),
             "vision_call_count": int(trace.get("vision_call_count") or 0),
+            "embedding_call_count": int(trace.get("embedding_call_count") or 0),
             "llm_timing_summary_ms": trace.get("llm_timing_summary_ms") or {},
             "vision_timing_summary_ms": trace.get("vision_timing_summary_ms") or {},
+            "embedding_timing_summary_ms": trace.get("embedding_timing_summary_ms") or {},
+            "llm_token_usage_summary": trace.get("llm_token_usage_summary") or {},
+            "vision_token_usage_summary": trace.get("vision_token_usage_summary") or {},
+            "embedding_token_estimate_summary": trace.get("embedding_token_estimate_summary") or {},
             "keyword_extraction_latency_ms": trace.get("keyword_extraction_latency_ms"),
             "knowledge_extraction_latency_ms": trace.get("knowledge_extraction_latency_ms"),
             "vlm_describe_latency_ms": trace.get("vlm_describe_latency_ms"),
         }
+        extra["model_token_usage"] = {
+            "llm": trace.get("llm_token_usage_summary") or {},
+            "vision": trace.get("vision_token_usage_summary") or {},
+            "embedding_estimate": trace.get("embedding_token_estimate_summary") or {},
+            "note": (
+                "LLM/VLM token usage is populated only when the provider returns usage. "
+                "Embedding usage is estimated from indexed text because the LightRAG embedding wrapper does not expose provider usage."
+            ),
+        }
         task.extra_data = extra
+
+    def _normalize_model_usage(self, usage: Any) -> dict[str, Any]:
+        if usage is None:
+            return {}
+        if hasattr(usage, "model_dump"):
+            raw = usage.model_dump()
+        elif isinstance(usage, dict):
+            raw = dict(usage)
+        else:
+            raw = {}
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "input_tokens",
+                "output_tokens",
+                "prompt_tokens_details",
+                "completion_tokens_details",
+            ):
+                value = getattr(usage, key, None)
+                if value is not None:
+                    raw[key] = value
+        prompt_tokens = self._safe_int(raw.get("prompt_tokens", raw.get("input_tokens")))
+        completion_tokens = self._safe_int(raw.get("completion_tokens", raw.get("output_tokens")))
+        total_tokens = self._safe_int(raw.get("total_tokens"))
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        normalized = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+        for key in ("input_tokens", "output_tokens", "prompt_tokens_details", "completion_tokens_details"):
+            if raw.get(key) is not None:
+                normalized[key] = raw.get(key)
+        return {key: value for key, value in normalized.items() if value is not None}
+
+    def _safe_int(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _accumulate_token_usage(
+        self,
+        trace: dict[str, Any],
+        *,
+        summary_key: str,
+        usage: dict[str, Any],
+        purpose: str,
+        model: str | None,
+    ) -> None:
+        if not usage:
+            return
+        summary = trace.setdefault(summary_key, {})
+        if not isinstance(summary, dict):
+            return
+
+        def add_to(bucket: dict[str, Any]) -> None:
+            bucket["count"] = int(bucket.get("count") or 0) + 1
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
+                value = self._safe_int(usage.get(key))
+                if value is not None:
+                    bucket[key] = int(bucket.get(key) or 0) + value
+
+        total = summary.setdefault("total", {})
+        if isinstance(total, dict):
+            add_to(total)
+        by_purpose = summary.setdefault("by_purpose", {})
+        if isinstance(by_purpose, dict):
+            bucket = by_purpose.setdefault(purpose or "unknown", {})
+            if isinstance(bucket, dict):
+                add_to(bucket)
+        by_model = summary.setdefault("by_model", {})
+        if isinstance(by_model, dict):
+            bucket = by_model.setdefault(model or "unknown", {})
+            if isinstance(bucket, dict):
+                add_to(bucket)
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        non_cjk_chars = max(0, len(text) - cjk_chars)
+        return int(cjk_chars + max(1, round(non_cjk_chars / 4))) if text else 0
+
+    def _record_embedding_trace(self, *, texts: list[str], model: str) -> dict[str, Any] | None:
+        if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
+            return None
+        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        if not isinstance(trace, dict):
+            return None
+        calls = trace.setdefault("embedding_calls", [])
+        if not isinstance(calls, list):
+            return None
+        normalized_texts = [str(text or "") for text in (texts or [])]
+        char_count = sum(len(text) for text in normalized_texts)
+        estimated_tokens = sum(self._estimate_text_tokens(text) for text in normalized_texts)
+        call_trace = {
+            "index": len(calls) + 1,
+            "purpose": "embedding",
+            "model": model,
+            "started_at": _utc_now_iso(),
+            "text_count": len(normalized_texts),
+            "text_chars": char_count,
+            "estimated_tokens": estimated_tokens,
+        }
+        calls.append(call_trace)
+        trace["embedding_call_count"] = len(calls)
+        return call_trace
+
+    def _finish_embedding_trace(
+        self,
+        call_trace: dict[str, Any] | None,
+        *,
+        started_at: float,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        if not isinstance(call_trace, dict):
+            return
+        elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
+        call_trace["elapsed_ms"] = elapsed_ms
+        call_trace["success"] = bool(success)
+        call_trace["finished_at"] = _utc_now_iso()
+        if error:
+            call_trace["error"] = self._trace_preview(error, limit=500)
+
+        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        if not isinstance(trace, dict):
+            return
+        summary = trace.setdefault(
+            "embedding_timing_summary_ms",
+            {"count": 0, "total": 0.0, "max": 0.0, "success": 0, "failed": 0},
+        )
+        if isinstance(summary, dict):
+            summary["count"] = int(summary.get("count") or 0) + 1
+            summary["total"] = round(float(summary.get("total") or 0.0) + elapsed_ms, 2)
+            summary["max"] = round(max(float(summary.get("max") or 0.0), elapsed_ms), 2)
+            if success:
+                summary["success"] = int(summary.get("success") or 0) + 1
+            else:
+                summary["failed"] = int(summary.get("failed") or 0) + 1
+        estimate = trace.setdefault(
+            "embedding_token_estimate_summary",
+            {"count": 0, "text_count": 0, "text_chars": 0, "estimated_tokens": 0},
+        )
+        if isinstance(estimate, dict):
+            estimate["count"] = int(estimate.get("count") or 0) + 1
+            estimate["text_count"] = int(estimate.get("text_count") or 0) + int(call_trace.get("text_count") or 0)
+            estimate["text_chars"] = int(estimate.get("text_chars") or 0) + int(call_trace.get("text_chars") or 0)
+            estimate["estimated_tokens"] = int(estimate.get("estimated_tokens") or 0) + int(
+                call_trace.get("estimated_tokens") or 0
+            )
 
     async def _emit_progress(
         self,
@@ -379,7 +554,7 @@ class RAGAnythingAdapter:
         base_url: str,
         api_key: str,
         wire_api: str,
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         if wire_api == "responses":
             input_items = []
             if system_prompt:
@@ -429,8 +604,9 @@ class RAGAnythingAdapter:
                 else:  # pragma: no cover
                     raise last_error
 
+            usage = self._normalize_model_usage(data.get("usage"))
             if data.get("output_text"):
-                return data["output_text"]
+                return data["output_text"], usage
 
             texts = []
             for item in data.get("output", []) or []:
@@ -438,7 +614,7 @@ class RAGAnythingAdapter:
                     text = content.get("text")
                     if text:
                         texts.append(text)
-            return "\n".join(texts)
+            return "\n".join(texts), usage
 
         openai_module = importlib.import_module("openai")
         AsyncOpenAI = getattr(openai_module, "AsyncOpenAI")
@@ -456,7 +632,8 @@ class RAGAnythingAdapter:
                 model=model,
                 messages=chat_messages,
             )
-            return response.choices[0].message.content or ""
+            usage = self._normalize_model_usage(getattr(response, "usage", None))
+            return response.choices[0].message.content or "", usage
         finally:
             await client.close()
 
@@ -486,7 +663,7 @@ class RAGAnythingAdapter:
             )
             started_at = perf_counter()
             try:
-                response_text = await self._call_llm_api(
+                llm_result = await self._call_llm_api(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     history_messages=history_messages,
@@ -495,6 +672,10 @@ class RAGAnythingAdapter:
                     api_key=api_key,
                     wire_api=wire_api,
                 )
+                if isinstance(llm_result, tuple):
+                    response_text, usage = llm_result
+                else:
+                    response_text, usage = llm_result, {}
             except Exception as exc:
                 self._finish_llm_trace(
                     call_trace,
@@ -508,6 +689,7 @@ class RAGAnythingAdapter:
                 started_at=started_at,
                 success=True,
                 response_text=response_text,
+                usage=usage,
             )
             return response_text
 
@@ -598,6 +780,7 @@ class RAGAnythingAdapter:
         started_at: float,
         success: bool,
         response_text: Any = None,
+        usage: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
         if not isinstance(call_trace, dict):
@@ -608,12 +791,25 @@ class RAGAnythingAdapter:
         call_trace["finished_at"] = _utc_now_iso()
         if success:
             call_trace["response_chars"] = len(str(response_text or ""))
+            normalized_usage = self._normalize_model_usage(usage)
+            if normalized_usage:
+                call_trace["token_usage"] = normalized_usage
         elif error:
             call_trace["error"] = self._trace_preview(error, limit=500)
 
         trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
         if not isinstance(trace, dict):
             return
+        if success:
+            normalized_usage = call_trace.get("token_usage") if isinstance(call_trace, dict) else None
+            if isinstance(normalized_usage, dict) and normalized_usage:
+                self._accumulate_token_usage(
+                    trace,
+                    summary_key="llm_token_usage_summary",
+                    usage=normalized_usage,
+                    purpose=str(call_trace.get("purpose") or "unknown"),
+                    model=str(call_trace.get("model") or "unknown"),
+                )
         purpose = str(call_trace.get("purpose") or "unknown")
         summary = trace.setdefault("llm_timing_summary_ms", {})
         if isinstance(summary, dict):
@@ -682,6 +878,7 @@ class RAGAnythingAdapter:
         started_at: float,
         success: bool,
         response_text: Any = None,
+        usage: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
         if not isinstance(call_trace, dict):
@@ -692,12 +889,25 @@ class RAGAnythingAdapter:
         call_trace["finished_at"] = _utc_now_iso()
         if success:
             call_trace["response_chars"] = len(str(response_text or ""))
+            normalized_usage = self._normalize_model_usage(usage)
+            if normalized_usage:
+                call_trace["token_usage"] = normalized_usage
         elif error:
             call_trace["error"] = self._trace_preview(error, limit=500)
 
         trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
         if not isinstance(trace, dict):
             return
+        if success:
+            normalized_usage = call_trace.get("token_usage") if isinstance(call_trace, dict) else None
+            if isinstance(normalized_usage, dict) and normalized_usage:
+                self._accumulate_token_usage(
+                    trace,
+                    summary_key="vision_token_usage_summary",
+                    usage=normalized_usage,
+                    purpose=str(call_trace.get("purpose") or "vlm_describe"),
+                    model=str(call_trace.get("model") or "unknown"),
+                )
         summary = trace.setdefault(
             "vision_timing_summary_ms",
             {"count": 0, "total": 0.0, "max": 0.0, "success": 0, "failed": 0},
@@ -872,14 +1082,32 @@ class RAGAnythingAdapter:
             model_name=embedding_model,
         )
         async def _embedding(texts: list[str], **kwargs):
-            return await openai_embed.func(
-                texts,
-                model=embedding_model,
-                base_url=embedding_base or None,
-                api_key=embedding_api_key,
-                embedding_dim=settings.EMBEDDING_DIM,
-                **kwargs,
+            normalized_texts = [str(text or "") for text in (texts or [])]
+            call_trace = self._record_embedding_trace(texts=normalized_texts, model=embedding_model)
+            started_at = perf_counter()
+            try:
+                result = await openai_embed.func(
+                    texts,
+                    model=embedding_model,
+                    base_url=embedding_base or None,
+                    api_key=embedding_api_key,
+                    embedding_dim=settings.EMBEDDING_DIM,
+                    **kwargs,
+                )
+            except Exception as exc:
+                self._finish_embedding_trace(
+                    call_trace,
+                    started_at=started_at,
+                    success=False,
+                    error=str(exc),
+                )
+                raise
+            self._finish_embedding_trace(
+                call_trace,
+                started_at=started_at,
+                success=True,
             )
+            return result
 
         return _embedding
 
@@ -967,11 +1195,13 @@ class RAGAnythingAdapter:
                     temperature=0.1,
                 )
                 response_text = response.choices[0].message.content or ""
+                usage = self._normalize_model_usage(getattr(response, "usage", None))
                 self._finish_vision_trace(
                     call_trace,
                     started_at=started_at,
                     success=True,
                     response_text=response_text,
+                    usage=usage,
                 )
                 return response_text
             except Exception as exc:
@@ -3339,6 +3569,19 @@ class RAGAnythingAdapter:
                     **document_status,
                     "content_list_status": content_list_status,
                 }
+                if preprocess_result.modality == "image":
+                    status["text_processed"] = bool(
+                        status.get("text_processed")
+                        or document_status.get("chunks_count")
+                    )
+                    status["multimodal_processed"] = bool(
+                        status.get("multimodal_processed")
+                        or content_list_status.get("multimodal_processed")
+                    )
+                    status["fully_processed"] = bool(
+                        status.get("fully_processed")
+                        or status.get("multimodal_processed")
+                    )
                 if document_status:
                     raw_doc_status = str(document_status.get("status") or "").strip().lower()
                     if raw_doc_status in {"failed", "error"} or self._extract_processing_error(document_status).get("message"):
@@ -3479,12 +3722,15 @@ class RAGAnythingAdapter:
 
             text_processed = bool(status.get("text_processed"))
             multimodal_processed = bool(status.get("multimodal_processed"))
+            indexing_succeeded = text_processed or (
+                preprocess_result.modality == "image" and multimodal_processed
+            )
             fully_processed = bool(status.get("fully_processed"))
             quality = self._build_processing_quality(status)
             processing_error = self._extract_processing_error(status)
             active_storage_plan = build_lightrag_storage_plan(class_id)
 
-            task.status = "completed" if text_processed else "failed"
+            task.status = "completed" if indexing_succeeded else "failed"
             task.parser_name = "raganything"
             task.summary = parsed["summary"]
             task.extracted_text = parsed["text"]
@@ -5616,19 +5862,47 @@ class RAGAnythingAdapter:
             + "\n\n原始回答存在可读性问题，仅用于判断不要照抄：\n"
             + str(answer)[:1200]
         )
+        system_prompt = "你是面向中国高校课程的 AI 助教，请输出清晰、严谨、自然的简体中文。"
+        call_trace = self._record_llm_trace(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history_messages=[],
+            keyword_extraction=False,
+            use_generation_model=True,
+            model=generation_model,
+            wire_api=settings.LLM_WIRE_API,
+        )
+        started_at = perf_counter()
         try:
-            repaired = await self._call_llm_api(
+            llm_result = await self._call_llm_api(
                 prompt=prompt,
-                system_prompt="你是面向中国高校课程的 AI 助教，请输出清晰、严谨、自然的简体中文。",
+                system_prompt=system_prompt,
                 history_messages=[],
                 model=generation_model,
                 base_url=generation_base,
                 api_key=generation_api_key,
                 wire_api=settings.LLM_WIRE_API,
             )
+            if isinstance(llm_result, tuple):
+                repaired, usage = llm_result
+            else:
+                repaired, usage = llm_result, {}
         except Exception as exc:
+            self._finish_llm_trace(
+                call_trace,
+                started_at=started_at,
+                success=False,
+                error=str(exc),
+            )
             logger.warning("raganything_answer_repair_failed", error=str(exc))
             return ""
+        self._finish_llm_trace(
+            call_trace,
+            started_at=started_at,
+            success=True,
+            response_text=repaired,
+            usage=usage,
+        )
 
         repaired = self._sanitize_answer_text(repaired)
         if not repaired or self._answer_needs_repair(repaired):

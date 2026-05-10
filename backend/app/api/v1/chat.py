@@ -6,7 +6,7 @@ import tempfile
 from typing import Optional
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,7 @@ from app.models.course import Class, Material
 from app.models.knowledge import FileParseTask
 from app.models.user import User
 from app.schemas.chat import ChatQueryRequest, FeedbackRequest, PromoteChatAttachmentRequest, ResolveReviewRequest, SendMessageRequest
-from app.services import chat_service, kb_service
+from app.services import audit_service, chat_service, kb_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -302,16 +302,40 @@ async def query_chat(
     else:
         raise BadRequestException("course_id or class_id is required")
 
-    result = await chat_service.send_message(
-        db=db,
-        class_id=class_id,
-        user_id=current_user.id,
-        content=body.message,
-        session_id=body.session_id,
-        attachments=body.attachments,
-        role=current_user.role,
-        answer_mode=body.answer_mode,
-    )
+    try:
+        result = await asyncio.wait_for(
+            chat_service.send_message(
+                db=db,
+                class_id=class_id,
+                user_id=current_user.id,
+                content=body.message,
+                session_id=body.session_id,
+                attachments=body.attachments,
+                role=current_user.role,
+                answer_mode=body.answer_mode,
+            ),
+            timeout=max(30, int(settings.CHAT_QUERY_TIMEOUT_SECONDS)),
+        )
+    except asyncio.TimeoutError:
+        db.rollback()
+        audit_service.record_event(
+            event_type="chat.query_failed",
+            status="failed",
+            actor=current_user,
+            target_type="chat",
+            class_id=class_id,
+            summary="AI 助教问答超时，已中止本次请求",
+            extra_data={
+                "question_preview": body.message[:200],
+                "answer_mode": body.answer_mode,
+                "timeout_seconds": settings.CHAT_QUERY_TIMEOUT_SECONDS,
+                "route": "query_timeout",
+            },
+        )
+        raise HTTPException(
+            status_code=504,
+            detail="AI助教本次回答超时，已自动中止。你可以切换到“快速”模式，或稍后用更具体的问题重试。",
+        )
     return ok(data=_query_response_payload(result))
 
 
@@ -335,19 +359,43 @@ async def query_chat_stream(
 
     async def run_query() -> None:
         try:
-            result = await chat_service.send_message(
-                db=db,
-                class_id=class_id,
-                user_id=current_user.id,
-                content=body.message,
-                session_id=body.session_id,
-                attachments=body.attachments,
-                role=current_user.role,
-                answer_mode=body.answer_mode,
-                progress_callback=progress_callback,
+            result = await asyncio.wait_for(
+                chat_service.send_message(
+                    db=db,
+                    class_id=class_id,
+                    user_id=current_user.id,
+                    content=body.message,
+                    session_id=body.session_id,
+                    attachments=body.attachments,
+                    role=current_user.role,
+                    answer_mode=body.answer_mode,
+                    progress_callback=progress_callback,
+                ),
+                timeout=max(30, int(settings.CHAT_QUERY_TIMEOUT_SECONDS)),
             )
             await queue.put(("final", _query_response_payload(result)))
+        except asyncio.TimeoutError:
+            db.rollback()
+            audit_service.record_event(
+                event_type="chat.query_failed",
+                status="failed",
+                actor=current_user,
+                target_type="chat",
+                class_id=class_id,
+                summary="AI 助教问答超时，已中止本次请求",
+                extra_data={
+                    "question_preview": body.message[:200],
+                    "answer_mode": body.answer_mode,
+                    "timeout_seconds": settings.CHAT_QUERY_TIMEOUT_SECONDS,
+                    "route": "stream_timeout",
+                },
+            )
+            await queue.put(("error", {
+                "message": "AI助教本次回答超时，已自动中止。你可以切换到“快速”模式，或稍后用更具体的问题重试。",
+                "timeout_seconds": settings.CHAT_QUERY_TIMEOUT_SECONDS,
+            }))
         except Exception as exc:
+            db.rollback()
             await queue.put(("error", {"message": str(exc) or "AI助教暂时不可用，请稍后重试。"}))
         finally:
             await queue.put(("done", {}))

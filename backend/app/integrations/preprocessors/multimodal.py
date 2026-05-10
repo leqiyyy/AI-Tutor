@@ -112,28 +112,11 @@ def preprocess_for_raganything(file_path: str, mime_type: str, file_name: str) -
 
 
 def _preprocess_image(*, path: Path, mime_type: str, file_name: str) -> PreprocessResult:
-    caption = (
-        f"Image material: {file_name}. "
-        "The original image is attached as a multimodal content item for visual analysis."
-    )
     content_list = [
-        {
-            "type": "text",
-            "text": caption,
-            "page_idx": 0,
-            "metadata": {
-                "source_name": file_name,
-                "source_path": str(path),
-                "source_type": "image_anchor",
-                "mime_type": mime_type,
-                "preprocess_quality": "image_content_list",
-            },
-        },
         {
             "type": "image",
             "img_path": str(path),
             "image_path": str(path),
-            "caption": caption,
             "page_idx": 0,
             "metadata": {
                 "source_name": file_name,

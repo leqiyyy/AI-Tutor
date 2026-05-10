@@ -534,6 +534,9 @@ def run_offline_benchmark(
     benchmark_spec_path: Path | None = None,
     retrieval_k: int = 5,
     baseline_report_path: Path | None = None,
+    query_account: str = "student@aitutor.local",
+    query_password: str = "Student123!",
+    query_role: str = "student",
 ) -> dict[str, Any]:
     seed_data()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -542,17 +545,17 @@ def run_offline_benchmark(
         query_items = [{"id": f"q{i+1}", "text": text} for i, text in enumerate(questions)]
 
     with TestClient(app) as client:
-        student_headers = _login(client, "student@aitutor.local", "Student123!", "student")
+        query_headers = _login(client, query_account, query_password, query_role)
         admin_headers = _login(client, "admin@aitutor.local", "Admin123!", "admin")
         teacher_headers = _login(client, "teacher@aitutor.local", "Teacher123!", "teacher")
 
-        target_class_id = class_id or _resolve_class_id(client, student_headers)
+        target_class_id = class_id or _resolve_class_id(client, query_headers)
         query_results: list[dict[str, Any]] = []
         for item in query_items:
             question = str(item.get("text") or "")
             response = client.post(
                 "/api/v1/chat/query",
-                headers=student_headers,
+                headers=query_headers,
                 json={
                     "class_id": target_class_id,
                     "message": question,
@@ -683,6 +686,25 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional previous benchmark json report path for baseline-vs-current comparison.",
     )
+    parser.add_argument(
+        "--query-account",
+        type=str,
+        default="student@aitutor.local",
+        help="Account used to execute benchmark questions.",
+    )
+    parser.add_argument(
+        "--query-password",
+        type=str,
+        default="Student123!",
+        help="Password for the benchmark query account.",
+    )
+    parser.add_argument(
+        "--query-role",
+        type=str,
+        default="student",
+        choices=["student", "teacher", "admin"],
+        help="Role used when logging in the benchmark query account.",
+    )
     return parser.parse_args()
 
 
@@ -698,6 +720,9 @@ def main() -> None:
         benchmark_spec_path=args.benchmark_spec,
         retrieval_k=max(1, int(args.retrieval_k)),
         baseline_report_path=args.baseline_report,
+        query_account=args.query_account,
+        query_password=args.query_password,
+        query_role=args.query_role,
     )
     print("Benchmark completed.")
     print(f"JSON report: {result['report_json_path']}")
