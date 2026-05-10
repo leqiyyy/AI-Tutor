@@ -1,4 +1,5 @@
-import { http } from "@/lib/http";
+import { getAuthSession } from "@/lib/auth-storage";
+import { buildUrl, http } from "@/lib/http";
 import { shouldUseMockApi } from "@/lib/env";
 import {
   getMockCourseFaqs,
@@ -26,6 +27,7 @@ import {
 } from "@/mocks/course";
 import type {
   CourseFaqsData,
+  CourseSearchResult,
   CreateCourseRequest,
   CreateCourseResult,
   CourseDiscussionsData,
@@ -47,6 +49,8 @@ import type {
   TeacherCourseMaterialsData,
   TeacherCourseQuestionsData,
   TeacherCourseStudentsData,
+  TeacherStudentExportData,
+  TeacherStudentGroupMoveResult,
   TeacherCourseTaskDetail,
   TeacherCourseTasksData,
 } from "@/types/course";
@@ -57,6 +61,52 @@ type CourseMutationResult = {
   title?: string;
   recipientCount?: number;
 };
+
+function resolveDownloadUrl(url: string) {
+  if (/^(data:|blob:)/i.test(url)) return url;
+  if (/^https?:\/\//i.test(url) || url.startsWith("/")) return url;
+  return buildUrl(url);
+}
+
+function shouldAttachAuthToDownload(url: string) {
+  if (/^(data:|blob:)/i.test(url)) return false;
+  const resolved = new URL(resolveDownloadUrl(url), window.location.origin);
+  return resolved.origin === window.location.origin && resolved.pathname.startsWith("/api/");
+}
+
+export async function downloadCourseFileFromUrl(downloadUrl: string, fileName: string) {
+  if (/^(data:|blob:)/i.test(downloadUrl)) {
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    return;
+  }
+
+  const session = getAuthSession();
+  const headers = new Headers();
+  if (session?.accessToken && shouldAttachAuthToDownload(downloadUrl)) {
+    headers.set("Authorization", `Bearer ${session.accessToken}`);
+  }
+  const response = await fetch(resolveDownloadUrl(downloadUrl), {
+    headers,
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error("资料下载失败");
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
 
 function buildFormData(files: File[], extra?: CoursePayload) {
   const formData = new FormData();
@@ -103,6 +153,50 @@ export const courseService = {
     return shouldUseMockApi
       ? getMockStudentCourseMaterials()
       : http<StudentCourseMaterialsData>(`/student/courses/${courseId}/materials`);
+  },
+
+  async getStudentCourseMaterialPreview(
+    courseId: string,
+    fileId: string | number,
+  ): Promise<TeacherCourseMaterialPreviewData> {
+    return shouldUseMockApi
+      ? getMockTeacherCourseMaterialPreview(Number(fileId))
+      : http<TeacherCourseMaterialPreviewData>(
+          `/student/courses/${courseId}/materials/${fileId}/preview`,
+        );
+  },
+
+  async getStudentCourseMaterialAnalysis(
+    courseId: string,
+    fileId: string | number,
+  ): Promise<TeacherCourseMaterialAnalysisDetail> {
+    return shouldUseMockApi
+      ? getMockTeacherCourseMaterialAnalysis(Number(fileId))
+      : http<TeacherCourseMaterialAnalysisDetail>(
+          `/student/courses/${courseId}/materials/${fileId}/analysis`,
+        );
+  },
+
+  async downloadStudentCourseFile(
+    courseId: string,
+    fileId: string | number,
+  ): Promise<TeacherCourseMaterialDownloadData> {
+    return shouldUseMockApi
+      ? getMockTeacherCourseMaterialDownload(Number(fileId))
+      : http<TeacherCourseMaterialDownloadData>(
+          `/student/courses/${courseId}/materials/${fileId}/download`,
+        );
+  },
+
+  async searchStudentCourseContent(
+    courseId: string,
+    query: string,
+  ): Promise<CourseSearchResult[]> {
+    if (shouldUseMockApi) return [];
+
+    return http<CourseSearchResult[]>(`/student/courses/${courseId}/search`, {
+      query: { q: query },
+    });
   },
 
   async getStudentCourseHome(courseId: string): Promise<StudentCourseHomeData> {
@@ -409,19 +503,35 @@ export const courseService = {
     });
   },
 
-  async moveStudentsToGroup(courseId: string, payload: CoursePayload): Promise<void> {
-    if (shouldUseMockApi) return;
+  async moveStudentsToGroup(
+    courseId: string,
+    payload: CoursePayload,
+  ): Promise<TeacherStudentGroupMoveResult> {
+    if (shouldUseMockApi) {
+      return {
+        movedCount: Array.isArray(payload.studentIds) ? payload.studentIds.length : 0,
+        targetGroup: String(payload.targetGroup || 1),
+        persisted: true,
+      };
+    }
 
-    await http<void>(`/teacher/courses/${courseId}/students/group`, {
+    return http<TeacherStudentGroupMoveResult>(`/teacher/courses/${courseId}/students/group`, {
       method: "PATCH",
       body: payload,
     });
   },
 
-  async exportStudents(courseId: string, payload: CoursePayload): Promise<void> {
-    if (shouldUseMockApi) return;
+  async exportStudents(courseId: string, payload: CoursePayload): Promise<TeacherStudentExportData> {
+    if (shouldUseMockApi) {
+      return {
+        format: String(payload.format || "csv"),
+        fields: Array.isArray(payload.fields) ? payload.fields.map(String) : [],
+        students: [],
+        count: 0,
+      };
+    }
 
-    await http<void>(`/teacher/courses/${courseId}/students/export`, {
+    return http<TeacherStudentExportData>(`/teacher/courses/${courseId}/students/export`, {
       method: "POST",
       body: payload,
     });

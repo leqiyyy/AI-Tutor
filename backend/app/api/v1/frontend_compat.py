@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1 import kb as kb_api
 from app.core.deps import get_current_admin, get_current_student, get_current_teacher, get_current_user
-from app.core.exceptions import ForbiddenException, NotFoundException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.core.response import ok
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Submission, Task
@@ -336,13 +336,18 @@ def _student_members_with_users(db: Session, class_id: str) -> list[tuple[ClassM
     return rows
 
 
-def _resolve_student_from_display_id(db: Session, class_id: str, value: Any) -> User | None:
+def _resolve_student_member_from_display_id(db: Session, class_id: str, value: Any) -> tuple[ClassMember, User] | None:
     raw = str(value)
     members = _student_members_with_users(db, class_id)
-    for index, (_, user) in enumerate(members, start=1):
+    for index, (membership, user) in enumerate(members, start=1):
         if raw in {str(index), str(user.id), str(user.student_id or "")}:
-            return user
+            return membership, user
     return None
+
+
+def _resolve_student_from_display_id(db: Session, class_id: str, value: Any) -> User | None:
+    resolved = _resolve_student_member_from_display_id(db, class_id, value)
+    return resolved[1] if resolved else None
 
 
 def _student_count(db: Session, class_id: str) -> int:
@@ -694,7 +699,7 @@ def _task_status(task: Task) -> str:
     if not task.is_published:
         return "草稿"
     if task.task_type == "exam":
-        start_at = _extract_exam_start_time(task.description)
+        start_at = _extract_exam_start_time(task)
         if start_at:
             now = datetime.now(start_at.tzinfo) if start_at.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
             if start_at > now:
@@ -706,7 +711,16 @@ def _task_status(task: Task) -> str:
     return "进行中"
 
 
-def _extract_exam_start_time(description: str | None) -> datetime | None:
+def _task_extra(task: Task) -> dict[str, Any]:
+    return task.extra_data if isinstance(task.extra_data, dict) else {}
+
+
+def _extract_exam_start_time(task: Task) -> datetime | None:
+    extra = _task_extra(task)
+    start_value = extra.get("startTime") or extra.get("start_time")
+    if start_value:
+        return _parse_datetime(start_value)
+    description = task.description
     if not description:
         return None
     match = re.search(r"开始时间：([^\n]+)", description)
@@ -716,6 +730,25 @@ def _extract_exam_start_time(description: str | None) -> datetime | None:
 
 
 def _task_questions_for_student(task: Task) -> list[dict[str, Any]]:
+    extra = _task_extra(task)
+    structured_questions = extra.get("questions")
+    if isinstance(structured_questions, list):
+        questions = []
+        for index, item in enumerate(structured_questions, start=1):
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or item.get("description") or "").strip()
+            if not content:
+                continue
+            questions.append({
+                "id": int(item.get("id") or index),
+                "content": content,
+                "type": _normalize_frontend_question_type(str(item.get("type") or "")),
+                "answer": "",
+            })
+        if questions:
+            return questions
+
     description = task.description or ""
     questions: list[dict[str, Any]] = []
     for line in description.splitlines():
@@ -754,6 +787,37 @@ def _normalize_frontend_question_type(value: str) -> str:
     return "text"
 
 
+def _homework_questions_payload(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload = []
+    for index, question in enumerate(questions, start=1):
+        content = str(question.get("description") or question.get("content") or "").strip()
+        if not content:
+            continue
+        payload.append({
+            "id": index,
+            "type": _normalize_frontend_question_type(str(question.get("type") or "")),
+            "content": content,
+            "answer": str(question.get("answer") or "").strip(),
+            "score": question.get("score"),
+        })
+    return payload
+
+
+def _exam_questions_payload(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload = []
+    for index, question in enumerate(questions, start=1):
+        content = str(question.get("content") or question.get("description") or "").strip()
+        if not content:
+            continue
+        payload.append({
+            "id": index,
+            "type": str(question.get("type") or "简答题").strip() or "简答题",
+            "content": content,
+            "score": question.get("score"),
+        })
+    return payload
+
+
 def _student_task_status(task: Task, submission: Submission | None) -> str:
     if submission:
         if submission.score is not None or submission.status == "graded":
@@ -764,6 +828,20 @@ def _student_task_status(task: Task, submission: Submission | None) -> str:
         if task.due_date < now:
             return "overdue"
     return "pending"
+
+
+def _assert_task_submission_window(task: Task) -> None:
+    if task.task_type != "exam":
+        return
+    start_at = _extract_exam_start_time(task)
+    if start_at:
+        now = datetime.now(start_at.tzinfo) if start_at.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
+        if now < start_at:
+            raise BadRequestException("考试尚未开始")
+    if task.due_date:
+        now = datetime.now(task.due_date.tzinfo) if task.due_date.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
+        if now > task.due_date:
+            raise BadRequestException("考试已结束，不能提交")
 
 
 def _publish_class_notifications(
@@ -793,16 +871,19 @@ def _publish_class_notifications(
 
 
 def _teacher_task_item(task: Task, total: int) -> dict:
+    extra = _task_extra(task)
     return {
         "id": task.id,
         "type": task.task_type or "homework",
         "title": task.title,
         "deadline": _iso(task.due_date),
+        "startTime": extra.get("startTime") or extra.get("start_time"),
+        "duration": extra.get("duration"),
         "submitted": len(task.submissions or []),
         "total": total,
         "status": _task_status(task),
         "publishDate": _date(task.created_at),
-        "attachments": [],
+        "attachments": extra.get("attachments") if isinstance(extra.get("attachments"), list) else [],
         "_sortAt": _iso(task.created_at),
     }
 
@@ -1467,6 +1548,9 @@ def student_course_materials(
                 "size": _size_text(item.get("file_size")),
                 "date": _date(item.get("created_at")),
                 "views": 0,
+                "status": item.get("kb_status") or "pending",
+                "kbStatus": item.get("kb_status") or "pending",
+                "kbError": item.get("kb_error"),
             }
             for item in materials
         ]
@@ -1537,6 +1621,17 @@ def student_course_material_download(
     })
 
 
+@router.get("/student/courses/{class_id}/search", response_model=None)
+def student_course_search(
+    class_id: str,
+    q: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    return ok(data=kb_service.search_course_content(db, cls.course_id, q, current_user))
+
+
 @router.get("/teacher/courses/{class_id}/materials", response_model=None)
 def teacher_course_materials(
     class_id: str,
@@ -1553,6 +1648,7 @@ def teacher_course_materials(
                 "type": _file_type(item.get("file_type")),
                 "size": _size_text(item.get("file_size")),
                 "status": item.get("kb_status") or "pending",
+                "kbError": item.get("kb_error"),
                 "date": _date(item.get("created_at")),
                 "category": "lecture",
                 "downloads": 0,
@@ -1792,7 +1888,7 @@ def teacher_course_material_preview(
         "fileId": file_id,
         "previewType": preview_type,
         "previewUrl": "",
-        "note": raw.get("summary") or "暂无自动摘要",
+        "note": _material_preview_note(raw),
         "textContent": raw.get("preview_text") or "",
         "textTruncated": bool(raw.get("preview_text_truncated")),
         "previewSource": raw.get("preview_source"),
@@ -1801,7 +1897,7 @@ def teacher_course_material_preview(
     })
 
 
-@router.get("/teacher/courses/{class_id}/materials/{file_id}/download", response_class=FileResponse)
+@router.get("/teacher/courses/{class_id}/materials/{file_id}/download", response_model=None)
 def teacher_course_material_download(
     class_id: str,
     file_id: str,
@@ -1810,11 +1906,11 @@ def teacher_course_material_download(
 ):
     cls = _class_or_404_with_access(db, class_id, current_user)
     material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
-    return FileResponse(
-        path=material.file_path,
-        filename=material.file_name,
-        media_type=material.mime_type,
-    )
+    return ok(data={
+        "fileId": material.id,
+        "fileName": material.file_name,
+        "downloadUrl": _material_download_url(cls.course_id, material.id, material.file_name),
+    })
 
 
 @router.get("/student/courses/{class_id}/tasks", response_model=None)
@@ -1851,6 +1947,8 @@ def student_course_tasks(
                 "urgent": bool(item.get("due_date") and not submissions.get(item["id"])),
                 "questions": _task_questions_for_student(task_by_id[item["id"]]),
                 "isExam": item.get("task_type") == "exam",
+                "startTime": _task_extra(task_by_id[item["id"]]).get("startTime"),
+                "duration": _task_extra(task_by_id[item["id"]]).get("duration"),
                 "teacherComment": submissions.get(item["id"]).feedback if submissions.get(item["id"]) else None,
             }
             for item in tasks
@@ -1871,6 +1969,7 @@ def student_submit_course_task(
     task = db.query(Task).filter(Task.id == str(task_id), Task.class_id == cls.id).first()
     if not task:
         raise NotFoundException("Task not found")
+    _assert_task_submission_window(task)
     file_path = body.file_path or body.filePath
     if not file_path and body.attachments:
         file_path = ",".join(str(item) for item in body.attachments if item)
@@ -1941,6 +2040,8 @@ def teacher_course_task_detail(
         return ok(data={
             **item,
             "description": task.description or "",
+            "questions": _task_questions_for_student(task),
+            "extraData": _task_extra(task),
             "requirements": [],
             "participantCount": total,
             "averageScore": round(sum(scores) / len(scores), 1) if scores else 0,
@@ -2135,10 +2236,10 @@ def teacher_create_homework(
     current_user: User = Depends(get_current_teacher),
 ):
     _teacher_class_or_404(db, class_id, current_user)
+    structured_questions = _homework_questions_payload(body.questions)
     question_text = "\n".join(
-        f"{index}. {question.get('description', '')}".strip()
-        for index, question in enumerate(body.questions, start=1)
-        if question.get("description")
+        f"{question['id']}. {question['content']}".strip()
+        for question in structured_questions
     )
     task = Task(
         class_id=class_id,
@@ -2149,6 +2250,13 @@ def teacher_create_homework(
         due_date=_parse_datetime(body.deadline),
         max_score=100,
         is_published=True,
+        extra_data={
+            "kind": "homework",
+            "deadline": body.deadline,
+            "allowLate": body.allowLate,
+            "attachments": body.attachments,
+            "questions": structured_questions,
+        },
     )
     db.add(task)
     db.flush()
@@ -2178,10 +2286,10 @@ def teacher_create_exam(
     current_user: User = Depends(get_current_teacher),
 ):
     _teacher_class_or_404(db, class_id, current_user)
+    structured_questions = _exam_questions_payload(body.questions)
     question_text = "\n".join(
-        f"{index}. [{question.get('type', '题目')}] {question.get('content', '')}".strip()
-        for index, question in enumerate(body.questions, start=1)
-        if question.get("content")
+        f"{question['id']}. [{question['type']}] {question['content']}".strip()
+        for question in structured_questions
     )
     description = (
         f"开始时间：{body.startTime or '未设置'}\n"
@@ -2198,6 +2306,15 @@ def teacher_create_exam(
         due_date=_parse_datetime(body.endTime),
         max_score=body.totalScore,
         is_published=True,
+        extra_data={
+            "kind": "exam",
+            "startTime": body.startTime,
+            "endTime": body.endTime,
+            "duration": body.duration,
+            "totalScore": body.totalScore,
+            "attachments": body.attachments,
+            "questions": structured_questions,
+        },
     )
     db.add(task)
     db.flush()
@@ -3191,12 +3308,12 @@ def teacher_course_students(
 ):
     _class_or_404_with_access(db, class_id, current_user)
     students = []
-    for index, (_, user) in enumerate(_student_members_with_users(db, class_id), start=1):
+    for index, (membership, user) in enumerate(_student_members_with_users(db, class_id), start=1):
         students.append({
             "id": index,
             "name": user.real_name,
             "studentId": user.student_id or user.id,
-            "group": 1,
+            "group": membership.group_no or 1,
             "progress": 0,
             "homework": 0,
             "attendance": 100,
@@ -3240,20 +3357,26 @@ def teacher_move_students_to_group(
 ):
     _class_or_404_with_access(db, class_id, current_user)
     target_group = body.targetGroup if body.targetGroup is not None else body.target_group
+    try:
+        group_no = int(target_group)
+    except (TypeError, ValueError):
+        group_no = 1
+    group_no = max(1, min(group_no, 99))
     resolved = [
-        student for student in (
-            _resolve_student_from_display_id(db, class_id, item)
-            for item in body.studentIds
+        item for item in (
+            _resolve_student_member_from_display_id(db, class_id, student_id)
+            for student_id in body.studentIds
         )
-        if student is not None
+        if item is not None
     ]
-    # There is no group column in ClassMember yet, so keep this endpoint truthful:
-    # it lets the current UI continue while signalling that persistence needs a schema migration.
+    for membership, _ in resolved:
+        membership.group_no = group_no
+    db.commit()
     return ok(data={
         "movedCount": len(resolved),
-        "targetGroup": target_group,
-        "persisted": False,
-    }, message="Group move accepted; persistence requires a student group schema")
+        "targetGroup": group_no,
+        "persisted": True,
+    }, message="Group move persisted")
 
 
 @router.post("/teacher/courses/{class_id}/students/export", response_model=None)
@@ -3265,13 +3388,13 @@ def teacher_export_students(
 ):
     _class_or_404_with_access(db, class_id, current_user)
     students = []
-    for index, (_, user) in enumerate(_student_members_with_users(db, class_id), start=1):
+    for index, (membership, user) in enumerate(_student_members_with_users(db, class_id), start=1):
         students.append({
             "id": index,
             "name": user.real_name,
             "studentId": user.student_id or user.id,
             "email": user.email,
-            "group": 1,
+            "group": membership.group_no or 1,
             "progress": 0,
             "homework": 0,
             "attendance": 100,

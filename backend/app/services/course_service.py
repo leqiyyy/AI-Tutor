@@ -303,6 +303,7 @@ def list_materials(db: Session, class_id: str) -> List[dict]:
             "mime_type": material.mime_type,
             "file_type": material.file_type,
             "kb_status": material.kb_status,
+            "kb_error": material.kb_error,
             "description": material.description,
             "created_at": material.created_at,
             "uploader_name": uploader.real_name if uploader else "",

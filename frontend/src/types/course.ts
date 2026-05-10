@@ -81,10 +81,23 @@ export interface StudentCourseMaterial {
   size: string;
   date: string;
   views: number;
+  status?: string;
+  kbStatus?: string;
+  kbError?: string | null;
 }
 
 export interface StudentCourseMaterialsData {
   files: StudentCourseMaterial[];
+}
+
+export interface CourseSearchResult {
+  material_id: string;
+  source_name?: string | null;
+  source_type?: string | null;
+  page?: number | null;
+  chunk_id?: string | null;
+  score: number;
+  snippet: string;
 }
 
 export type TeacherCourseFileType = "PDF" | "PPT" | "Video";
@@ -100,6 +113,7 @@ export interface TeacherCourseFile {
   type: TeacherCourseFileType;
   size: string;
   status: string;
+  kbError?: string | null;
   date: string;
   category: TeacherCourseFileCategory;
   downloads: number;
@@ -282,6 +296,23 @@ export interface TeacherCourseStudent {
 
 export interface TeacherCourseStudentsData {
   students: TeacherCourseStudent[];
+}
+
+export interface TeacherStudentGroupMoveResult {
+  movedCount: number;
+  targetGroup: number | string;
+  persisted?: boolean;
+}
+
+export interface TeacherStudentExportRow extends TeacherCourseStudent {
+  email?: string;
+}
+
+export interface TeacherStudentExportData {
+  format: string;
+  fields: string[];
+  students: TeacherStudentExportRow[];
+  count: number;
 }
 
 export interface CourseDiscussionReply {

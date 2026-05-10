@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey, Integer, Enum
+from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey, Integer, Enum, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import uuid
@@ -58,6 +58,7 @@ class ClassMember(Base):
     class_id = Column(String(36), ForeignKey("classes.id"), nullable=False)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     role = Column(Enum("student", "teacher", "assistant", name="member_role"), default="student")
+    group_no = Column(Integer, nullable=False, default=1)
     joined_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     cls = relationship("Class", back_populates="members")
@@ -103,6 +104,7 @@ class Task(Base):
     due_date = Column(DateTime, nullable=True)
     max_score = Column(Integer, default=100)
     is_published = Column(Boolean, default=False)
+    extra_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))

@@ -10,17 +10,20 @@ import {
 import { getNameInitial } from '@/lib/display';
 import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
 import { useAuth } from '@/hooks/use-auth';
-import { courseService } from '@/services/course';
+import { courseService, downloadCourseFileFromUrl } from '@/services/course';
 import { learningService } from '@/services/learning';
 import type {
   CourseDiscussion,
   CourseFaq,
+  CourseSearchResult,
   KnowledgeGraphEdge,
   KnowledgeGraphNode,
   StudentCourseMaterial,
   StudentCourseHomeData,
   StudentCourseQuestion,
   StudentCourseTask,
+  TeacherCourseMaterialAnalysisDetail,
+  TeacherCourseMaterialPreviewData,
 } from '@/types/course';
 import type { Flashcard, FlashcardDeck, LearningMistake, MistakePracticeData } from '@/types/learning';
 
@@ -66,6 +69,37 @@ function StudentCourseEmptyState({
       <div className="mt-1 max-w-sm text-xs leading-5 text-gray-400">{description}</div>
     </div>
   );
+}
+
+function normalizeMaterialStatus(status?: string | null) {
+  return (status || '').trim().toLowerCase();
+}
+
+function isIndexedMaterialStatus(status?: string | null) {
+  const normalized = normalizeMaterialStatus(status);
+  return ['indexed', 'completed', 'complete', 'success', 'ready', '已解析', '解析完成'].includes(normalized);
+}
+
+function isMaterialIndexingStatus(status?: string | null) {
+  const normalized = normalizeMaterialStatus(status);
+  return ['pending', 'queued', 'processing', 'running', '待解析', '解析中'].includes(normalized);
+}
+
+function getMaterialStatusMeta(status?: string | null) {
+  const normalized = normalizeMaterialStatus(status);
+  if (isIndexedMaterialStatus(status)) {
+    return { label: '已解析', className: 'bg-green-50 text-green-600' };
+  }
+  if (['failed', 'error', '解析失败'].includes(normalized)) {
+    return { label: '解析失败', className: 'bg-red-50 text-red-600' };
+  }
+  if (['partial', 'degraded', '部分完成'].includes(normalized)) {
+    return { label: '部分完成', className: 'bg-orange-50 text-orange-600' };
+  }
+  if (isMaterialIndexingStatus(status)) {
+    return { label: '解析中', className: 'bg-yellow-50 text-yellow-600' };
+  }
+  return { label: status || '待解析', className: 'bg-gray-100 text-gray-600' };
 }
 
 function createEmptyMistakeForm() {
@@ -125,7 +159,16 @@ export default function StudentCourse() {
   const [showAIAnalysisModal, setShowAIAnalysisModal] = useState(false);
   const [showKnowledgeGraphModal, setShowKnowledgeGraphModal] = useState(false);
   const [currentFile, setCurrentFile] = useState<StudentCourseMaterial | null>(null);
+  const [currentFilePreview, setCurrentFilePreview] = useState<TeacherCourseMaterialPreviewData | null>(null);
+  const [currentFileAnalysis, setCurrentFileAnalysis] = useState<TeacherCourseMaterialAnalysisDetail | null>(null);
+  const [filePreviewError, setFilePreviewError] = useState('');
+  const [fileAnalysisError, setFileAnalysisError] = useState('');
+  const [isFilePreviewLoading, setIsFilePreviewLoading] = useState(false);
+  const [isFileAnalysisLoading, setIsFileAnalysisLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<CourseSearchResult[]>([]);
+  const [searchError, setSearchError] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
   const [videoSpeed, setVideoSpeed] = useState('1.0');
   const [courseMaterials, setCourseMaterials] = useState<StudentCourseMaterial[]>([]);
   const [graphNodes, setGraphNodes] = useState<KnowledgeGraphNode[]>([]);
@@ -137,7 +180,8 @@ export default function StudentCourse() {
   const [showHomeworkModal, setShowHomeworkModal] = useState(false);
   const [showGradingModal, setShowGradingModal] = useState(false);
   const [currentHomework, setCurrentHomework] = useState<any>(null);
-  const [homeworkAnswers, setHomeworkAnswers] = useState<Record<number, string>>({});
+  const [homeworkAnswers, setHomeworkAnswers] = useState<Record<string, string>>({});
+  const [isSubmittingHomework, setIsSubmittingHomework] = useState(false);
   const [showMistakeDetailModal, setShowMistakeDetailModal] = useState(false);
   const [showAddMistakeModal, setShowAddMistakeModal] = useState(false);
   const [currentMistake, setCurrentMistake] = useState<LearningMistake | null>(null);
@@ -168,90 +212,10 @@ export default function StudentCourse() {
 
   const questionAttachmentRef = useRef<HTMLInputElement>(null);
 
-  // 模拟作业数据
   const [examCountdown, setExamCountdown] = useState<number | null>(null);
   const examTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const [homeworks, setHomeworks] = useState<StudentCourseTask[]>([
-    { 
-      id: 'hw-tree-binary', 
-      title: '第5章树与二叉树课后作业', 
-      deadline: '今天 23:59', 
-      status: 'pending', 
-      score: null, 
-      urgent: true,
-      questions: [
-        { id: 1, content: '请简述二叉树的三种遍历方式（前序、中序、后序）的区别。', type: 'text', answer: '' },
-        { id: 2, content: '什么是完全二叉树？请画图说明。', type: 'text', answer: '' },
-        { id: 3, content: '红黑树的五个性质是什么？', type: 'text', answer: '' }
-      ]
-    },
-    { 
-      id: 'hw-graph', 
-      title: '第4章图论算法实现', 
-      deadline: '明天 23:59', 
-      status: 'pending', 
-      score: null, 
-      urgent: false,
-      questions: [
-        { id: 1, content: '请用代码实现图的深度优先遍历（DFS）。', type: 'code', answer: '' },
-        { id: 2, content: '请用代码实现图的广度优先遍历（BFS）。', type: 'code', answer: '' }
-      ]
-    },
-    { 
-      id: 'exam-midterm-os', 
-      title: '操作系统期中考试', 
-      startTime: '明天 14:00',
-      deadline: '明天 16:00', 
-      duration: 90,
-      status: 'pending', 
-      score: null, 
-      urgent: false, 
-      isExam: true,
-      questions: [
-        { id: 1, content: '请简述进程与线程的区别，并说明在什么场景下优先选择多线程而非多进程。', type: 'text', answer: '' },
-        { id: 2, content: '操作系统的四种进程调度算法各有什么优缺点？请结合实际场景分析。', type: 'text', answer: '' },
-        { id: 3, content: '什么是死锁？产生死锁的四个必要条件是什么？请给出一种预防死锁的方法。', type: 'text', answer: '' },
-        { id: 4, content: '请说明页面置换算法（FIFO、LRU、OPT）的工作原理，并比较其优劣。', type: 'text', answer: '' },
-      ]
-    },
-    { 
-      id: 'hw-stack-queue', 
-      title: '第3章栈和队列练习', 
-      deadline: '2024-03-15', 
-      status: 'submitted', 
-      score: null, 
-      urgent: false,
-      questions: []
-    },
-    { 
-      id: 'hw-linear-list', 
-      title: '第2章线性表编程题', 
-      deadline: '2024-03-10', 
-      status: 'graded', 
-      score: 88, 
-      urgent: false,
-      questions: [
-        { id: 1, content: '请实现单链表的插入操作。', type: 'code', answer: 'function insert(head, value) { ... }', correct: true, comment: '实现正确，代码规范' },
-        { id: 2, content: '请实现单链表的删除操作。', type: 'code', answer: 'function delete(head, value) { ... }', correct: false, comment: '边界条件处理不完善，需要考虑删除头节点的情况' },
-        { id: 3, content: '请实现单链表的反转操作。', type: 'code', answer: 'function reverse(head) { ... }', correct: true, comment: '实现正确，思路清晰' }
-      ],
-      teacherComment: '整体完成较好，但需要注意边界条件的处理。建议多做一些链表相关的练习题。'
-    },
-    { 
-      id: 'hw-complexity', 
-      title: '第1章算法复杂度分析', 
-      deadline: '2024-03-05', 
-      status: 'graded', 
-      score: 95, 
-      urgent: false,
-      questions: [
-        { id: 1, content: '请分析冒泡排序的时间复杂度。', type: 'text', answer: 'O(n^2)', correct: true, comment: '分析正确' },
-        { id: 2, content: '请分析快速排序的平均时间复杂度。', type: 'text', answer: 'O(nlogn)', correct: true, comment: '分析正确' }
-      ],
-      teacherComment: '非常好！对算法复杂度的理解很到位。'
-    }
-  ]);
+  const [homeworks, setHomeworks] = useState<StudentCourseTask[]>([]);
 
   const [mistakes, setMistakes] = useState<LearningMistake[]>([]);
 
@@ -301,49 +265,93 @@ export default function StudentCourse() {
   }, [searchParams]);
 
   // 新增：预览文件
-  const handlePreviewFile = (file: StudentCourseMaterial) => {
+  const handlePreviewFile = async (file: StudentCourseMaterial) => {
     setCurrentFile(file);
+    setCurrentFilePreview(null);
+    setFilePreviewError('');
+    setIsFilePreviewLoading(true);
     setShowPreviewModal(true);
-    
-    // 预留后端接口：获取文件预览URL
-    console.log('获取文件预览API调用:', { fileId: file.id });
+
+    try {
+      const preview = await courseService.getStudentCourseMaterialPreview(courseId, file.id);
+      setCurrentFilePreview(preview);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '资料预览加载失败';
+      setFilePreviewError(message);
+    } finally {
+      setIsFilePreviewLoading(false);
+    }
   };
 
   // 新增：下载文件
-  const handleDownloadFile = (file: StudentCourseMaterial) => {
-    // 预留后端接口：下载文件
-    console.log('下载文件API调用:', { fileId: file.id });
-    
-    // 模拟下载
-    alert(`正在下载 ${file.name}...`);
+  const handleDownloadFile = async (file: StudentCourseMaterial) => {
+    try {
+      const download = await courseService.downloadStudentCourseFile(courseId, file.id);
+      await downloadCourseFileFromUrl(download.downloadUrl, download.fileName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '资料下载失败';
+      alert(message);
+    }
   };
 
   // 新增：AI解析文件
-  const handleAIAnalysis = (file: StudentCourseMaterial) => {
+  const handleAIAnalysis = async (file: StudentCourseMaterial) => {
     setCurrentFile(file);
+    setCurrentFileAnalysis(null);
+    setFileAnalysisError('');
+    setIsFileAnalysisLoading(true);
     setShowAIAnalysisModal(true);
-    
-    // 预留后端接口：获取AI解析结果
-    console.log('获取AI解析结果API调用:', { fileId: file.id });
+
+    try {
+      const analysis = await courseService.getStudentCourseMaterialAnalysis(courseId, file.id);
+      setCurrentFileAnalysis(analysis);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'AI解析加载失败';
+      setFileAnalysisError(message);
+    } finally {
+      setIsFileAnalysisLoading(false);
+    }
   };
 
   // 新增：打开知识图谱
-  const handleOpenKnowledgeGraph = () => {
+  const handleOpenKnowledgeGraph = async () => {
     setShowKnowledgeGraphModal(true);
-    
-    // 预留后端接口：获取知识图谱数据
-    console.log('获取知识图谱数据API调用:', { courseId: id });
+    try {
+      const data = await courseService.getKnowledgeGraph(courseId, 'student');
+      const normalized = normalizeKnowledgeGraph(data);
+      const rootIds = getKnowledgeGraphRootIds(normalized);
+      setGraphNodes(normalized.nodes);
+      setGraphEdges(normalized.edges);
+      setGraphRootIds(rootIds);
+    } catch {
+      // Keep the last successfully loaded graph visible.
+    }
   };
 
   // 新增：全文搜索
-  const handleSearch = () => {
+  const handleSearch = async () => {
     if (!searchQuery.trim()) return;
-    
-    // 预留后端接口：全文搜索
-    console.log('全文搜索API调用:', { courseId: id, query: searchQuery });
-    
-    alert(`搜索结果：找到 ${Math.floor(Math.random() * 20) + 1} 条相关内容`);
+
+    setIsSearching(true);
+    setSearchError('');
+    try {
+      const results = await courseService.searchStudentCourseContent(courseId, searchQuery.trim());
+      setSearchResults(results);
+      if (results.length === 0) {
+        setSearchError('未检索到匹配片段。若资料刚上传，请等待解析和索引完成后再试。');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '搜索失败';
+      setSearchError(message);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
   };
+
+  const hasIndexingCourseMaterials = courseMaterials.some((file) =>
+    isMaterialIndexingStatus(file.status || file.kbStatus),
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -369,6 +377,42 @@ export default function StudentCourse() {
       mounted = false;
     };
   }, [courseId]);
+
+  useEffect(() => {
+    if (!hasIndexingCourseMaterials) {
+      return;
+    }
+
+    let mounted = true;
+    const intervalId = window.setInterval(async () => {
+      try {
+        const materials = await courseService.getStudentCourseMaterials(courseId);
+        if (!mounted) return;
+        setCourseMaterials(materials.files);
+
+        const stillIndexing = materials.files.some((file) =>
+          isMaterialIndexingStatus(file.status || file.kbStatus),
+        );
+        if (!stillIndexing) {
+          window.clearInterval(intervalId);
+          const graph = await courseService.getKnowledgeGraph(courseId, 'student');
+          if (!mounted) return;
+          const normalized = normalizeKnowledgeGraph(graph);
+          const rootIds = getKnowledgeGraphRootIds(normalized);
+          setGraphNodes(normalized.nodes);
+          setGraphEdges(normalized.edges);
+          setGraphRootIds(rootIds);
+        }
+      } catch {
+        // Keep current materials visible and try again on the next tick.
+      }
+    }, 8000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, [hasIndexingCourseMaterials, courseId]);
 
   useEffect(() => {
     let mounted = true;
@@ -449,8 +493,11 @@ export default function StudentCourse() {
     if (taskFilter === 'submitted') return homeworks.filter(hw => hw.status === 'submitted');
     if (taskFilter === 'graded') return homeworks.filter(hw => hw.status === 'graded');
     if (taskFilter === 'overdue') {
-      // 模拟逾期判断
-      return homeworks.filter(hw => hw.status === 'pending' && hw.deadline.includes('2024'));
+      const now = Date.now();
+      return homeworks.filter(hw => {
+        const deadlineTime = new Date(hw.deadline).getTime();
+        return hw.status === 'pending' && Number.isFinite(deadlineTime) && deadlineTime < now;
+      });
     }
     return homeworks;
   };
@@ -478,45 +525,49 @@ export default function StudentCourse() {
     } else {
       setExamCountdown(null);
     }
-    
-    // 预留后端接口：获取作业详情
-    console.log('获取作业详情API调用:', { homeworkId: homework.id });
   };
 
   // 新增：提交作业
   const handleSubmitHomework = async () => {
-    if (Object.keys(homeworkAnswers).length < currentHomework.questions.length) {
+    if (!currentHomework || isSubmittingHomework) return;
+
+    const unanswered = currentHomework.questions.some((question: { id: number }) => {
+      const answer = homeworkAnswers[String(question.id)];
+      return !answer || !answer.trim();
+    });
+    if (unanswered) {
       alert('请完成所有题目后再提交');
       return;
     }
 
-    await courseService.submitHomework(courseId, currentHomework.id, {
-      answers: homeworkAnswers,
-      taskType: currentHomework.isExam ? 'exam' : 'homework',
-    });
+    setIsSubmittingHomework(true);
+    try {
+      await courseService.submitHomework(courseId, currentHomework.id, {
+        answers: homeworkAnswers,
+        taskType: currentHomework.isExam ? 'exam' : 'homework',
+      });
+      const tasksData = await courseService.getStudentCourseTasks(courseId);
+      setHomeworks(tasksData.tasks);
 
-    // 更新作业状态
-    setHomeworks(prev => prev.map(hw => 
-      hw.id === currentHomework.id ? { ...hw, status: 'submitted' } : hw
-    ));
+      if (examTimerRef.current) clearInterval(examTimerRef.current);
+      setExamCountdown(null);
 
-    // 清除倒计时
-    if (examTimerRef.current) clearInterval(examTimerRef.current);
-    setExamCountdown(null);
-
-    alert(currentHomework.isExam ? '考试答卷已提交！等待成绩发布。' : '作业提交成功！等待教师批改。');
-    setShowHomeworkModal(false);
-    setCurrentHomework(null);
-    setHomeworkAnswers({});
+      alert(currentHomework.isExam ? '考试答卷已提交！等待成绩发布。' : '作业提交成功！等待教师批改。');
+      setShowHomeworkModal(false);
+      setCurrentHomework(null);
+      setHomeworkAnswers({});
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提交失败，请稍后重试';
+      alert(`提交失败：${message}`);
+    } finally {
+      setIsSubmittingHomework(false);
+    }
   };
 
   // 新增：查看批改
   const handleViewGrading = (homework: any) => {
     setCurrentHomework(homework);
     setShowGradingModal(true);
-    
-    // 预留后端接口：获取批改结果
-    console.log('获取批改结果API调用:', { homeworkId: homework.id });
   };
 
   // 新增：获取过滤后的错题列表
@@ -612,27 +663,11 @@ export default function StudentCourse() {
   const submitQuestionReply = async (questionId: number) => {
     if (!questionReplyContent.trim()) return;
 
-    const now = new Date();
-    const timeStr = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-
     await courseService.replyStudentQuestion(courseId, questionId, {
       content: questionReplyContent,
     });
-
-    setMyQuestions(prev => prev.map(q => {
-      if (q.id === questionId) {
-        return {
-          ...q,
-          replies: [...q.replies, {
-            author: '我',
-            content: questionReplyContent,
-            time: timeStr,
-            isTeacher: false
-          }]
-        };
-      }
-      return q;
-    }));
+    const questionsData = await courseService.getStudentCourseQuestions(courseId);
+    setMyQuestions(questionsData.questions);
 
     setReplyingToQuestion(null);
     setQuestionReplyContent('');
@@ -650,20 +685,8 @@ export default function StudentCourse() {
       content: newQuestionForm.content,
       attachments: newQuestionForm.attachments.map((file) => file.name),
     });
-
-    const now = new Date();
-    const timeStr = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-
-    const newQuestion = {
-      id: Date.now(),
-      title: newQuestionForm.title,
-      content: newQuestionForm.content,
-      time: timeStr,
-      status: 'pending' as const,
-      replies: []
-    };
-
-    setMyQuestions([newQuestion, ...myQuestions]);
+    const questionsData = await courseService.getStudentCourseQuestions(courseId);
+    setMyQuestions(questionsData.questions);
 
     alert('提问提交成功！等待教师回复。');
     setShowAddQuestionModal(false);
@@ -712,27 +735,11 @@ export default function StudentCourse() {
   const submitDiscussionReply = async (discussionId: number) => {
     if (!discussionReplyContent.trim()) return;
 
-    const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-
     await courseService.replyDiscussion('student', courseId, discussionId, {
       content: discussionReplyContent,
     });
-
-    setDiscussions(prev => prev.map(d => {
-      if (d.id === discussionId) {
-        return {
-          ...d,
-          replies: [...d.replies, {
-            author: '我',
-            content: discussionReplyContent,
-            time: `${timeStr}`,
-            isStudent: true
-          }]
-        };
-      }
-      return d;
-    }));
+    const discussionsData = await courseService.getCourseDiscussions('student', courseId);
+    setDiscussions(discussionsData.discussions);
 
     setReplyingToDiscussion(null);
     setDiscussionReplyContent('');
@@ -764,19 +771,8 @@ export default function StudentCourse() {
       title: newDiscussionForm.title,
       content: newDiscussionForm.content,
     });
-
-    const newDiscussion = {
-      id: Date.now(),
-      student: '我',
-      title: newDiscussionForm.title,
-      content: newDiscussionForm.content,
-      replies: [],
-      likes: 0,
-      time: '刚刚',
-      liked: false
-    };
-
-    setDiscussions([newDiscussion, ...discussions]);
+    const discussionsData = await courseService.getCourseDiscussions('student', courseId);
+    setDiscussions(discussionsData.discussions);
 
     alert('讨论发布成功！');
     setShowNewDiscussionModal(false);
@@ -836,9 +832,10 @@ export default function StudentCourse() {
     setCurrentCardIndex(0);
     setIsCardFlipped(false);
     setShowStudyModal(true);
-    
-    // 预留后端接口：开始学习卡组
-    console.log('开始学习卡组API调用:', { deckId: deck.id });
+    void learningService.recordLearningEvent(courseId, {
+      activity_type: 'flashcard_study_start',
+      ref_id: String(deck.id),
+    }).catch(() => undefined);
   };
 
   // 新增：翻转卡片
@@ -1264,6 +1261,49 @@ export default function StudentCourse() {
               </div>
             </div>
 
+            {(isSearching || searchError || searchResults.length > 0) && (
+              <div className="bg-white rounded-lg border border-gray-200">
+                <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-900">搜索结果</div>
+                  {searchResults.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setSearchResults([]);
+                        setSearchError('');
+                      }}
+                      className="text-xs text-gray-500 hover:text-gray-700 cursor-pointer"
+                    >
+                      清空
+                    </button>
+                  )}
+                </div>
+                <div className="p-5 space-y-3">
+                  {isSearching && <div className="text-sm text-gray-500">正在检索课程资料...</div>}
+                  {!isSearching && searchError && (
+                    <div className="rounded-lg border border-orange-100 bg-orange-50 px-4 py-3 text-sm text-orange-700">
+                      {searchError}
+                    </div>
+                  )}
+                  {!isSearching && searchResults.map((result) => (
+                    <div key={`${result.material_id}-${result.chunk_id || result.page || result.score}`} className="rounded-lg border border-gray-200 p-4">
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          {result.source_name || '课程资料'}
+                        </div>
+                        <div className="text-xs text-gray-500 whitespace-nowrap">
+                          匹配度 {Math.round((result.score || 0) * 100)}%
+                          {result.page ? ` · 第 ${result.page} 页` : ''}
+                        </div>
+                      </div>
+                      <div className="text-sm text-gray-700 leading-6 whitespace-pre-line">
+                        {result.snippet}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* 资料列表 */}
             <div className="bg-white rounded-lg border border-gray-200">
               <div className="divide-y divide-gray-100">
@@ -1296,8 +1336,16 @@ export default function StudentCourse() {
                       }`}></i>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-900">{file.name}</div>
-                      <div className="text-xs text-gray-500 mt-1">{file.size} · {file.date} · {file.views}次观看</div>
+                      <div className="flex items-center gap-2">
+                        <div className="truncate text-sm font-medium text-gray-900">{file.name}</div>
+                        <span className={`shrink-0 px-2 py-0.5 text-xs font-medium rounded-full ${getMaterialStatusMeta(file.status || file.kbStatus).className}`}>
+                          {getMaterialStatusMeta(file.status || file.kbStatus).label}
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {file.size} · {file.date} · {file.views}次观看
+                        {file.kbError ? <span className="ml-2 text-red-500">解析异常</span> : null}
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {file.type === 'video' && (
@@ -2083,7 +2131,15 @@ export default function StudentCourse() {
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">预览 - {currentFile.name}</h2>
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">预览 - {currentFile.name}</h2>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-gray-500">
+                    <span className={`px-2 py-0.5 font-medium rounded-full ${getMaterialStatusMeta(currentFile.status || currentFile.kbStatus).className}`}>
+                      {getMaterialStatusMeta(currentFile.status || currentFile.kbStatus).label}
+                    </span>
+                    {currentFile.kbError ? <span className="text-red-500">{currentFile.kbError}</span> : null}
+                  </div>
+                </div>
                 <div className="flex items-center gap-2">
                   {currentFile.type === 'video' && (
                     <select 
@@ -2098,7 +2154,11 @@ export default function StudentCourse() {
                     </select>
                   )}
                   <button
-                    onClick={() => setShowPreviewModal(false)}
+                    onClick={() => {
+                      setShowPreviewModal(false);
+                      setCurrentFilePreview(null);
+                      setFilePreviewError('');
+                    }}
                     className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
                   >
                     <i className="ri-close-line text-xl"></i>
@@ -2107,7 +2167,38 @@ export default function StudentCourse() {
               </div>
               
               <div className="flex-1 overflow-y-auto p-6">
-                {currentFile.type === 'video' ? (
+                {isFilePreviewLoading ? (
+                  <div className="min-h-[420px] flex items-center justify-center text-sm text-gray-500">
+                    正在加载预览...
+                  </div>
+                ) : filePreviewError ? (
+                  <div className="rounded-lg border border-orange-100 bg-orange-50 px-4 py-3 text-sm text-orange-700">
+                    {filePreviewError}
+                  </div>
+                ) : currentFilePreview?.previewType === 'video' && currentFilePreview.previewUrl ? (
+                  <video controls className="w-full rounded-lg bg-black">
+                    <source src={currentFilePreview.previewUrl} />
+                  </video>
+                ) : currentFilePreview?.previewUrl ? (
+                  <iframe
+                    title={`student-preview-${currentFile.id}`}
+                    src={currentFilePreview.previewUrl}
+                    className="h-[520px] w-full rounded-lg border border-gray-200 bg-white"
+                  />
+                ) : currentFilePreview?.textContent?.trim() ? (
+                  <div className="rounded-lg border border-gray-200 bg-white">
+                    <div className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
+                      <div className="text-sm font-medium text-gray-900">资料内容</div>
+                      <div className="text-xs text-gray-400">
+                        {currentFilePreview.previewSource === 'original_file' ? '原始文件' : '解析文本'}
+                        {currentFilePreview.textTruncated ? ' · 已截断显示' : ''}
+                      </div>
+                    </div>
+                    <pre className="max-h-[560px] overflow-auto whitespace-pre-wrap break-words p-4 text-sm leading-6 text-gray-700">
+                      {currentFilePreview.textContent}
+                    </pre>
+                  </div>
+                ) : currentFile.type === 'video' ? (
                   <div className="aspect-video bg-black rounded-lg flex items-center justify-center relative">
                     <div className="text-center text-white">
                       <i className="ri-play-circle-line text-6xl mb-3"></i>
@@ -2129,9 +2220,14 @@ export default function StudentCourse() {
                   <div className="border border-gray-200 rounded-lg p-8 bg-gray-50 min-h-[600px] flex items-center justify-center">
                     <div className="text-center text-gray-400">
                       <i className={`${currentFile.type === 'pdf' ? 'ri-file-pdf-line' : currentFile.type === 'ppt' ? 'ri-file-ppt-line' : 'ri-file-code-line'} text-6xl mb-3`}></i>
-                      <div className="text-sm">{currentFile.type === 'pdf' ? 'PDF' : currentFile.type === 'ppt' ? 'PPT' : '代码'}文档预览</div>
-                      <div className="text-xs text-gray-400 mt-2">第 1 / 25 页</div>
+                      <div className="text-sm">暂无可预览文本</div>
+                      <div className="text-xs text-gray-400 mt-2">{currentFilePreview?.note || '可先下载原文件查看'}</div>
                     </div>
+                  </div>
+                )}
+                {currentFilePreview?.note && (
+                  <div className="mt-4 rounded-lg border border-dashed border-gray-300 bg-white px-4 py-3 text-sm text-gray-600">
+                    {currentFilePreview.note}
                   </div>
                 )}
               </div>
@@ -2157,7 +2253,11 @@ export default function StudentCourse() {
                     <i className="ri-download-line mr-1"></i>下载
                   </button>
                   <button
-                    onClick={() => setShowPreviewModal(false)}
+                    onClick={() => {
+                      setShowPreviewModal(false);
+                      setCurrentFilePreview(null);
+                      setFilePreviewError('');
+                    }}
                     className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
                   >
                     关闭
@@ -2173,9 +2273,21 @@ export default function StudentCourse() {
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
               <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-lg font-semibold text-gray-900">AI解析 - {currentFile.name}</h2>
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">AI解析 - {currentFile.name}</h2>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-gray-500">
+                    <span className={`px-2 py-0.5 font-medium rounded-full ${getMaterialStatusMeta(currentFile.status || currentFile.kbStatus).className}`}>
+                      {getMaterialStatusMeta(currentFile.status || currentFile.kbStatus).label}
+                    </span>
+                    {currentFile.kbError ? <span className="text-red-500">{currentFile.kbError}</span> : null}
+                  </div>
+                </div>
                 <button
-                  onClick={() => setShowAIAnalysisModal(false)}
+                  onClick={() => {
+                    setShowAIAnalysisModal(false);
+                    setCurrentFileAnalysis(null);
+                    setFileAnalysisError('');
+                  }}
                   className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
                 >
                   <i className="ri-close-line text-xl"></i>
@@ -2183,25 +2295,28 @@ export default function StudentCourse() {
               </div>
               
               <div className="flex-1 overflow-y-auto p-6">
+                {isFileAnalysisLoading && (
+                  <div className="mb-4 rounded-lg border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700">
+                    正在读取资料解析结果...
+                  </div>
+                )}
+                {fileAnalysisError && (
+                  <div className="mb-4 rounded-lg border border-orange-100 bg-orange-50 px-4 py-3 text-sm text-orange-700">
+                    {fileAnalysisError}
+                  </div>
+                )}
                 <div className="space-y-5">
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-2">内容摘要</div>
                     <div className="text-sm text-gray-700 leading-relaxed">
-                      本章节主要介绍了计算机网络的基本概念、发展历史和体系结构。重点讲解了OSI七层模型和TCP/IP四层模型的区别与联系，以及各层的主要功能和协议。通过学习本章，学生将掌握网络分层的思想和各层协议的基本原理。
+                      {currentFileAnalysis?.summary || '资料已上传，解析完成后将展示自动摘要。你也可以先下载原文件查看。'}
                     </div>
                   </div>
                   
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-2">核心知识点</div>
                     <div className="space-y-2">
-                      {[
-                        '计算机网络的定义与分类',
-                        'OSI七层模型详解',
-                        'TCP/IP协议栈结构',
-                        '网络拓扑结构类型',
-                        '数据传输方式（单播/广播/组播）',
-                        '网络性能指标（带宽/时延/吞吐量）'
-                      ].map((point, i) => (
+                      {(currentFileAnalysis?.keyPoints?.length ? currentFileAnalysis.keyPoints : ['暂无关键词，等待资料解析完成']).map((point, i) => (
                         <div key={i} className="flex items-start gap-2 text-sm text-gray-700">
                           <i className="ri-checkbox-circle-fill text-teal-500 mt-0.5"></i>
                           <span>{point}</span>
@@ -2213,11 +2328,7 @@ export default function StudentCourse() {
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-2">难点分析</div>
                     <div className="space-y-2">
-                      {[
-                        { title: 'OSI与TCP/IP模型对比', difficulty: '中等', desc: '需要理解两种模型的层次划分差异' },
-                        { title: '各层协议的封装与解封装', difficulty: '较难', desc: '涉及数据包在各层的处理过程' },
-                        { title: '网络性能指标计算', difficulty: '中等', desc: '需要掌握带宽、时延等参数的计算方法' }
-                      ].map((item, i) => (
+                      {(currentFileAnalysis?.difficulties?.length ? currentFileAnalysis.difficulties : [{ title: '等待解析结果', difficulty: '基础' as const }]).map((item, i) => (
                         <div key={i} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-sm font-medium text-gray-900">{item.title}</span>
@@ -2225,7 +2336,7 @@ export default function StudentCourse() {
                               item.difficulty === '较难' ? 'bg-orange-100 text-orange-600' : 'bg-yellow-100 text-yellow-600'
                             }`}>{item.difficulty}</span>
                           </div>
-                          <div className="text-xs text-gray-600">{item.desc}</div>
+                          <div className="text-xs text-gray-600">建议结合原文和 AI 助教问答进一步理解。</div>
                         </div>
                       ))}
                     </div>
@@ -2234,10 +2345,10 @@ export default function StudentCourse() {
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-2">学习建议</div>
                     <div className="text-sm text-gray-700 leading-relaxed space-y-2">
-                      <p>• 建议学习时长：2-3小时</p>
-                      <p>• 配合视频讲解效果更佳</p>
-                      <p>• 重点掌握OSI七层模型和TCP/IP四层模型的对应关系</p>
-                      <p>• 建议完成课后习题巩固知识点</p>
+                      <p>• 建议学习时长：{currentFileAnalysis?.recommendedStudyDuration || '等待解析结果'}</p>
+                      <p>• 若预览为空，说明文本解析可能仍在进行，可先下载原文件学习。</p>
+                      <p>• 解析完成后，可围绕核心知识点向 AI 助教追问。</p>
+                      <p>• 后续错题和闪卡会优先结合已解析资料进行推荐。</p>
                     </div>
                   </div>
 
@@ -2266,7 +2377,11 @@ export default function StudentCourse() {
 
               <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end flex-shrink-0">
                 <button
-                  onClick={() => setShowAIAnalysisModal(false)}
+                  onClick={() => {
+                    setShowAIAnalysisModal(false);
+                    setCurrentFileAnalysis(null);
+                    setFileAnalysisError('');
+                  }}
                   className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   关闭
@@ -2376,7 +2491,7 @@ export default function StudentCourse() {
 
               <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between flex-shrink-0">
                 <div className="text-sm text-gray-600">
-                  已完成 {Object.keys(homeworkAnswers).length} / {currentHomework.questions.length} 题
+                  已完成 {currentHomework.questions.filter((question: { id: number }) => (homeworkAnswers[String(question.id)] || '').trim()).length} / {currentHomework.questions.length} 题
                 </div>
                 <div className="flex items-center gap-3">
                   <button
@@ -2387,15 +2502,17 @@ export default function StudentCourse() {
                       setCurrentHomework(null);
                       setHomeworkAnswers({});
                     }}
-                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
+                    disabled={isSubmittingHomework}
+                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     暂存草稿
                   </button>
                   <button
                     onClick={handleSubmitHomework}
-                    className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                    disabled={isSubmittingHomework}
+                    className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    提交作业
+                    {isSubmittingHomework ? '提交中...' : currentHomework.isExam ? '提交考试' : '提交作业'}
                   </button>
                 </div>
               </div>

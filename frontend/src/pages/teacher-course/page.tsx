@@ -10,7 +10,7 @@ import { getNameInitial } from '@/lib/display';
 import { useCourseBootstrap } from '@/lib/use-course-bootstrap';
 import { useAuth } from '@/hooks/use-auth';
 import { aiService } from '@/services/ai';
-import { courseService } from '@/services/course';
+import { courseService, downloadCourseFileFromUrl } from '@/services/course';
 import type {
   CourseDiscussion,
   KnowledgeGraphEdge,
@@ -21,6 +21,7 @@ import type {
   TeacherCourseMaterialPreviewData,
   TeacherCourseQuestion,
   TeacherCourseStudent,
+  TeacherStudentExportRow,
   TeacherCourseTaskDetail,
   TeacherCourseTask,
 } from '@/types/course';
@@ -89,6 +90,82 @@ function createEmptyExportForm() {
       attendance: true,
     },
   };
+}
+
+function parseExamDraftToQuestions(draft: string, totalScore: number, desiredCount: number) {
+  const lines = draft
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const numberedLines = lines.filter((line) => /^\d+[.、)]\s*/.test(line));
+  const bulletLines = lines.filter((line) => /^[-*]\s*/.test(line));
+  const candidates = numberedLines.length > 0 ? numberedLines : bulletLines;
+  const count = Math.max(1, Math.min(desiredCount, candidates.length || 1));
+  const baseScore = Math.floor(totalScore / count);
+
+  return (candidates.length > 0 ? candidates : [draft.trim() || '请结合课程资料回答本题。'])
+    .slice(0, count)
+    .map((line, index) => {
+      const content = line.replace(/^\d+[.、)]\s*/, '').replace(/^[-*]\s*/, '').trim();
+      const typeMatch = content.match(/[【[]([^】\]]+)[】\]]/);
+
+      return {
+        type: typeMatch?.[1] || '简答题',
+        content: content || `第${index + 1}题：请结合课程资料回答本题。`,
+        score: index === count - 1 ? totalScore - baseScore * (count - 1) : baseScore,
+      };
+    });
+}
+
+const STUDENT_EXPORT_FIELD_LABELS: Record<string, string> = {
+  name: '姓名',
+  studentId: '学号',
+  group: '分组',
+  progress: '学习进度',
+  homework: '作业完成情况',
+  attendance: '出勤率',
+  status: '状态',
+  email: '邮箱',
+};
+
+function exportStudentsAsFile(rows: TeacherStudentExportRow[], fields: string[], format: string) {
+  const normalizedFormat = format === 'excel' ? 'csv' : format;
+  const extension = normalizedFormat === 'json' ? 'json' : 'csv';
+  const mimeType = extension === 'json' ? 'application/json;charset=utf-8' : 'text/csv;charset=utf-8';
+  const timestamp = new Date().toISOString().slice(0, 10);
+  const fileName = `students-${timestamp}.${extension}`;
+  const content = extension === 'json'
+    ? JSON.stringify(rows.map((row) => pickStudentExportFields(row, fields)), null, 2)
+    : toStudentCsv(rows, fields);
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function pickStudentExportFields(row: TeacherStudentExportRow, fields: string[]) {
+  return fields.reduce<Record<string, unknown>>((acc, field) => {
+    acc[STUDENT_EXPORT_FIELD_LABELS[field] || field] = row[field as keyof TeacherStudentExportRow] ?? '';
+    return acc;
+  }, {});
+}
+
+function toStudentCsv(rows: TeacherStudentExportRow[], fields: string[]) {
+  const header = fields.map((field) => STUDENT_EXPORT_FIELD_LABELS[field] || field);
+  const lines = rows.map((row) =>
+    fields.map((field) => csvCell(row[field as keyof TeacherStudentExportRow] ?? '')).join(','),
+  );
+  return `\uFEFF${header.map(csvCell).join(',')}\n${lines.join('\n')}`;
+}
+
+function csvCell(value: unknown) {
+  const text = String(value ?? '');
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function createEmptyDiscussionForm() {
@@ -350,6 +427,8 @@ export default function TeacherCourse() {
   const [showExamModal, setShowExamModal] = useState(false);
   const [noticeForm, setNoticeForm] = useState(createEmptyNoticeForm);
   const [isPublishingNotice, setIsPublishingNotice] = useState(false);
+  const [isPublishingHomework, setIsPublishingHomework] = useState(false);
+  const [isPublishingExam, setIsPublishingExam] = useState(false);
   const [homeworkForm, setHomeworkForm] = useState(createEmptyHomeworkForm);
   const [examForm, setExamForm] = useState(createEmptyExamForm);
   const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
@@ -384,6 +463,8 @@ export default function TeacherCourse() {
   const [students, setStudents] = useState<TeacherCourseStudent[]>([]);
   const [selectedStudents, setSelectedStudents] = useState<number[]>([]);
   const [targetGroup, setTargetGroup] = useState<number>(1);
+  const [isMovingStudents, setIsMovingStudents] = useState(false);
+  const [isExportingStudents, setIsExportingStudents] = useState(false);
 
   // 新增：班级讨论相关状态
   const [expandedDiscussions, setExpandedDiscussions] = useState<number[]>([]);
@@ -648,7 +729,7 @@ export default function TeacherCourse() {
       const title = noticeForm.title.trim();
       const content = noticeForm.content.trim();
       const attachments = noticeForm.attachments.map(f => f.name);
-      const result = await courseService.publishNotice(courseId, {
+      await courseService.publishNotice(courseId, {
         title,
         content,
         importance: noticeForm.importance,
@@ -660,20 +741,7 @@ export default function TeacherCourse() {
         const tasksData = await courseService.getTeacherCourseTasks(courseId);
         setPublishedTasks(tasksData.tasks);
       } catch {
-        const newTask: TeacherCourseTask = {
-          id: result.id ?? Date.now(),
-          type: 'notice',
-          title,
-          deadline: '-',
-          submitted: 68,
-          total: 68,
-          status: '已发布',
-          publishDate: new Date().toISOString().split('T')[0],
-          attachments,
-          description: content,
-        };
-
-        setPublishedTasks(prev => [newTask, ...prev]);
+        alert('通知已发布，但任务列表刷新失败，请稍后手动刷新页面查看。');
       }
 
       alert('通知发布成功！');
@@ -689,6 +757,7 @@ export default function TeacherCourse() {
 
   // 新增：创建作业
   const handleCreateHomework = async () => {
+    if (isPublishingHomework) return;
     if (!homeworkForm.title || !homeworkForm.deadline) {
       alert('请填写作业标题和截止时间');
       return;
@@ -698,32 +767,27 @@ export default function TeacherCourse() {
       return;
     }
 
-    const result = await courseService.createHomework(courseId, {
-      title: homeworkForm.title,
-      deadline: homeworkForm.deadline,
-      allowLate: homeworkForm.allowLate,
-      questions: homeworkForm.questions,
-      attachments: homeworkForm.attachments.map(f => f.name),
-    });
-    
-    // 模拟创建作业
-    const newTask = {
-      id: result.id ?? Date.now(),
-      type: 'homework',
-      title: homeworkForm.title,
-      deadline: homeworkForm.deadline,
-      submitted: 0,
-      total: 68,
-      status: '进行中',
-      publishDate: new Date().toISOString().split('T')[0],
-      attachments: homeworkForm.attachments.map(f => f.name)
-    };
-    
-    setPublishedTasks([newTask, ...publishedTasks]);
-    
-    alert('作业创建成功！');
-    setShowHomeworkModal(false);
-    setHomeworkForm(createEmptyHomeworkForm());
+    setIsPublishingHomework(true);
+    try {
+      await courseService.createHomework(courseId, {
+        title: homeworkForm.title,
+        deadline: homeworkForm.deadline,
+        allowLate: homeworkForm.allowLate,
+        questions: homeworkForm.questions,
+        attachments: homeworkForm.attachments.map(f => f.name),
+      });
+      const tasksData = await courseService.getTeacherCourseTasks(courseId);
+      setPublishedTasks(tasksData.tasks);
+
+      alert('作业创建成功！');
+      setShowHomeworkModal(false);
+      setHomeworkForm(createEmptyHomeworkForm());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '作业创建失败，请稍后重试';
+      alert(`作业创建失败：${message}`);
+    } finally {
+      setIsPublishingHomework(false);
+    }
   };
 
   // 新增：添加作业题目
@@ -744,22 +808,29 @@ export default function TeacherCourse() {
 
   // 新增：AI智能组卷
   const handleGenerateQuestions = async () => {
+    if (isGeneratingQuestions) return;
     setIsGeneratingQuestions(true);
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    const questionTypes = ['单选题', '多选题', '判断题', '填空题', '简答题'];
-    const generated = Array.from({ length: examForm.questionCount }, (_, i) => ({
-      type: questionTypes[Math.floor(Math.random() * questionTypes.length)],
-      content: `第${i + 1}题：这是一道关于计算机网络的${questionTypes[Math.floor(Math.random() * questionTypes.length)]}`,
-      score: Math.floor(examForm.totalScore / examForm.questionCount)
-    }));
-    
-    setExamForm({ ...examForm, generatedQuestions: generated });
-    setIsGeneratingQuestions(false);
+    try {
+      const prompt = [
+        `请为考试“${examForm.name || '阶段测验'}”生成中文试题。`,
+        `题目数量：${examForm.questionCount}。`,
+        `总分：${examForm.totalScore}。`,
+        '请优先结合当前班级课程资料、知识图谱概念和学生常见问题。',
+      ].join('\n');
+      const draft = await aiService.generateExam({ prompt });
+      const generated = parseExamDraftToQuestions(draft, examForm.totalScore, examForm.questionCount);
+      setExamForm(prev => ({ ...prev, generatedQuestions: generated }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'AI组卷失败，请稍后重试';
+      alert(`AI组卷失败：${message}`);
+    } finally {
+      setIsGeneratingQuestions(false);
+    }
   };
 
   // 新增：创建考试
   const handleCreateExam = async () => {
+    if (isPublishingExam) return;
     if (!examForm.name || !examForm.startTime || !examForm.endTime) {
       alert('请填写完整的考试信息');
       return;
@@ -769,36 +840,29 @@ export default function TeacherCourse() {
       return;
     }
 
-    const result = await courseService.createExam(courseId, {
-      name: examForm.name,
-      startTime: examForm.startTime,
-      endTime: examForm.endTime,
-      duration: examForm.duration,
-      totalScore: examForm.totalScore,
-      questions: examForm.generatedQuestions,
-      attachments: examForm.attachments.map(f => f.name),
-    });
-    
-    // 模拟创建考试
-    const newTask = {
-      id: result.id ?? Date.now(),
-      type: 'exam',
-      title: examForm.name,
-      startTime: examForm.startTime,
-      deadline: examForm.endTime,
-      duration: examForm.duration,
-      submitted: 0,
-      total: 68,
-      status: '未开始',
-      publishDate: new Date().toISOString().split('T')[0],
-      attachments: examForm.attachments.map(f => f.name)
-    };
-    
-    setPublishedTasks([newTask, ...publishedTasks]);
-    
-    alert('考试创建成功！');
-    setShowExamModal(false);
-    setExamForm(createEmptyExamForm());
+    setIsPublishingExam(true);
+    try {
+      await courseService.createExam(courseId, {
+        name: examForm.name,
+        startTime: examForm.startTime,
+        endTime: examForm.endTime,
+        duration: examForm.duration,
+        totalScore: examForm.totalScore,
+        questions: examForm.generatedQuestions,
+        attachments: examForm.attachments.map(f => f.name),
+      });
+      const tasksData = await courseService.getTeacherCourseTasks(courseId);
+      setPublishedTasks(tasksData.tasks);
+
+      alert('考试创建成功！');
+      setShowExamModal(false);
+      setExamForm(createEmptyExamForm());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '考试创建失败，请稍后重试';
+      alert(`考试创建失败：${message}`);
+    } finally {
+      setIsPublishingExam(false);
+    }
   };
 
   // 新增：获取过滤后的任务列表
@@ -909,31 +973,18 @@ export default function TeacherCourse() {
   const submitReply = async (questionId: number) => {
     if (!replyContent.trim()) return;
 
-    const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-
-    await courseService.replyTeacherQuestion(courseId, questionId, {
-      content: replyContent,
-      author: '王教授',
-    });
-
-    setQuestions(prev => prev.map(q => {
-      if (q.id === questionId) {
-        return {
-          ...q,
-          status: 'answered',
-          replies: [...q.replies, {
-            author: '王教授',
-            content: replyContent,
-            time: timeStr
-          }]
-        };
-      }
-      return q;
-    }));
-
-    setReplyingTo(null);
-    setReplyContent('');
+    try {
+      await courseService.replyTeacherQuestion(courseId, questionId, {
+        content: replyContent,
+      });
+      const questionsData = await courseService.getTeacherCourseQuestions(courseId);
+      setQuestions(questionsData.questions);
+      setReplyingTo(null);
+      setReplyContent('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '回复失败';
+      alert(`回复失败：${message}`);
+    }
   };
 
   // 新增：查看AI回答
@@ -957,31 +1008,18 @@ export default function TeacherCourse() {
   const adoptAIAnswer = async () => {
     if (!currentAIAnswer) return;
 
-    await aiService.adoptAiAnswer(currentAIAnswer.id);
-
-    const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-
-    const questionToUpdate = questions.find(q => q.id === currentAIAnswer.id);
-    if (questionToUpdate) {
-      setQuestions(prev => prev.map(q => {
-        if (q.id === currentAIAnswer.id) {
-          return {
-            ...q,
-            status: 'answered',
-            replies: [...q.replies, {
-              author: 'AI助教',
-              content: currentAIAnswer.aiAnswer,
-              time: timeStr
-            }]
-          };
-        }
-        return q;
-      }));
+    try {
+      await courseService.replyTeacherQuestion(courseId, currentAIAnswer.id, {
+        content: currentAIAnswer.aiAnswer,
+      });
+      const questionsData = await courseService.getTeacherCourseQuestions(courseId);
+      setQuestions(questionsData.questions);
+      setShowAIAnswerModal(false);
+      setCurrentAIAnswer(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '采纳 AI 回答失败';
+      alert(`采纳失败：${message}`);
     }
-
-    setShowAIAnswerModal(false);
-    setCurrentAIAnswer(null);
   };
 
   // 新增：自行回复（关闭AI回答弹窗并打开回复区）
@@ -1022,31 +1060,47 @@ export default function TeacherCourse() {
   const handleSendWarningReminder = async (studentId: number) => {
     const student = students.find(s => s.id === studentId);
     if (student) {
-      await courseService.sendWarningReminder(courseId, studentId);
-      alert(`已向 ${student.name}（${student.studentId}）发送学习提醒`);
+      try {
+        await courseService.sendWarningReminder(courseId, studentId);
+        alert(`已向 ${student.name}（${student.studentId}）发送学习提醒`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '发送学习提醒失败';
+        alert(`发送失败：${message}`);
+      }
     }
   };
 
   const handleMoveStudentsToGroup = async () => {
+    if (isMovingStudents) return;
     if (selectedStudents.length === 0) {
       alert('请先选择要移动的学生');
       return;
     }
 
-    await courseService.moveStudentsToGroup(courseId, {
-      studentIds: selectedStudents,
-      targetGroup,
-    });
-    
-    setStudents(prev => prev.map(s => 
-      selectedStudents.includes(s.id) ? { ...s, group: targetGroup } : s
-    ));
-    
-    setSelectedStudents([]);
-    alert(`已将 ${selectedStudents.length} 名学生移动到第${targetGroup}组`);
+    setIsMovingStudents(true);
+    try {
+      const result = await courseService.moveStudentsToGroup(courseId, {
+        studentIds: selectedStudents,
+        targetGroup,
+      });
+      const studentsData = await courseService.getTeacherCourseStudents(courseId);
+      setStudents(studentsData.students);
+      setSelectedStudents([]);
+      alert(
+        result.persisted
+          ? `已将 ${result.movedCount} 名学生移动到第${targetGroup}组`
+          : `已处理 ${result.movedCount} 名学生，但当前后端还没有分组持久化字段，刷新后仍以后端学生列表为准。`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '移动分组失败';
+      alert(`移动失败：${message}`);
+    } finally {
+      setIsMovingStudents(false);
+    }
   };
 
   const handleExport = async () => {
+    if (isExportingStudents) return;
     const selectedFields = Object.entries(exportForm.fields)
       .filter(([_, checked]) => checked)
       .map(([field]) => field);
@@ -1057,15 +1111,28 @@ export default function TeacherCourse() {
     }
     
     const studentsToExport = exportForm.scope === 'current' ? getFilteredStudents() : students;
-    await courseService.exportStudents(courseId, {
-      fields: selectedFields,
-      scope: exportForm.scope,
-      format: exportForm.format,
-      studentIds: studentsToExport.map((student) => student.id),
-    });
-    
-    alert(`导出成功！已导出 ${studentsToExport.length} 名学生的数据（${exportForm.format.toUpperCase()}格式）`);
-    setShowExportModal(false);
+    setIsExportingStudents(true);
+    try {
+      const exportData = await courseService.exportStudents(courseId, {
+        fields: selectedFields,
+        scope: exportForm.scope,
+        format: exportForm.format,
+        studentIds: studentsToExport.map((student) => student.id),
+      });
+      const selectedIds = new Set(studentsToExport.map((student) => student.id));
+      const rows = exportData.students.filter((student) =>
+        exportForm.scope === 'all' || selectedIds.has(student.id),
+      );
+      exportStudentsAsFile(rows, selectedFields, exportForm.format);
+
+      alert(`导出成功！已导出 ${rows.length} 名学生的数据（${exportForm.format.toUpperCase()}格式）`);
+      setShowExportModal(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '导出失败';
+      alert(`导出失败：${message}`);
+    } finally {
+      setIsExportingStudents(false);
+    }
   };
 
   // 新增：切换文件展开状态
@@ -1108,13 +1175,7 @@ export default function TeacherCourse() {
 
     try {
       const download = await courseService.downloadTeacherCourseFile(courseId, file.id);
-      const link = document.createElement('a');
-      link.href = download.downloadUrl;
-      link.download = download.fileName;
-      link.rel = 'noopener';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      await downloadCourseFileFromUrl(download.downloadUrl, download.fileName);
 
       setCourseFiles(prev => prev.map((item) => (
         item.id === file.id ? { ...item, downloads: item.downloads + 1 } : item
@@ -1371,20 +1432,8 @@ export default function TeacherCourse() {
       content: newDiscussionForm.content,
       pinned: newDiscussionForm.pinned,
     });
-
-    const newDiscussion = {
-      id: Date.now(),
-      student: '王教授',
-      title: newDiscussionForm.title,
-      content: newDiscussionForm.content,
-      replies: [],
-      likes: 0,
-      time: '刚刚',
-      pinned: newDiscussionForm.pinned,
-      liked: false
-    };
-
-    setDiscussions([newDiscussion, ...discussions]);
+    const discussionsData = await courseService.getCourseDiscussions('teacher', courseId);
+    setDiscussions(discussionsData.discussions);
 
     alert('讨论发布成功！');
     setShowNewDiscussionModal(false);
@@ -1882,10 +1931,18 @@ export default function TeacherCourse() {
                               <div className="text-sm text-gray-900">{getMaterialStatusMeta(file.status).label}</div>
                             </div>
                             <div>
-                              <div className="text-xs text-gray-500 mb-1">知识点数量</div>
-                              <div className="text-sm text-gray-900">{Math.floor(Math.random() * 50) + 20}个</div>
+                              <div className="text-xs text-gray-500 mb-1">索引说明</div>
+                              <div className="text-sm text-gray-900">
+                                {isIndexedMaterialStatus(file.status) ? '已进入知识图谱' : '完成解析后更新图谱'}
+                              </div>
                             </div>
                           </div>
+                          {file.kbError && (
+                            <div className="mb-4 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                              <div className="font-medium mb-1">解析失败原因</div>
+                              <div className="break-words">{file.kbError}</div>
+                            </div>
+                          )}
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => { void handlePreviewFile(file); }}
@@ -2844,15 +2901,17 @@ export default function TeacherCourse() {
                       setShowHomeworkModal(false);
                       setHomeworkForm(createEmptyHomeworkForm());
                     }}
-                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
+                    disabled={isPublishingHomework}
+                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     取消
                   </button>
                   <button
                     onClick={handleCreateHomework}
-                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                    disabled={isPublishingHomework}
+                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    确认发布
+                    {isPublishingHomework ? '发布中...' : '确认发布'}
                   </button>
                 </div>
               </div>
@@ -3068,15 +3127,17 @@ export default function TeacherCourse() {
                       setShowExamModal(false);
                       setExamForm(createEmptyExamForm());
                     }}
-                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
+                    disabled={isPublishingExam}
+                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     取消
                   </button>
                   <button
                     onClick={handleCreateExam}
-                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                    disabled={isPublishingExam}
+                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    确认发布
+                    {isPublishingExam ? '发布中...' : '确认发布'}
                   </button>
                 </div>
               </div>
@@ -3954,10 +4015,11 @@ export default function TeacherCourse() {
                   </select>
                   <button
                     onClick={handleMoveStudentsToGroup}
-                    disabled={selectedStudents.length === 0}
+                    disabled={selectedStudents.length === 0 || isMovingStudents}
                     className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <i className="ri-arrow-right-line mr-1"></i>移动选中学生
+                    <i className={isMovingStudents ? 'ri-loader-4-line animate-spin mr-1' : 'ri-arrow-right-line mr-1'}></i>
+                    {isMovingStudents ? '移动中...' : '移动选中学生'}
                   </button>
                   <span className="text-sm text-gray-500">
                     已选择 {selectedStudents.length} 名学生
@@ -4015,7 +4077,8 @@ export default function TeacherCourse() {
                   setShowGroupManageModal(false);
                   setSelectedStudents([]);
                 }}
-                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
+                disabled={isMovingStudents}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 关闭
               </button>
@@ -4125,15 +4188,18 @@ export default function TeacherCourse() {
                   setShowExportModal(false);
                   setExportForm(createEmptyExportForm());
                 }}
-                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
+                disabled={isExportingStudents}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 取消
               </button>
               <button
                 onClick={handleExport}
-                className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                disabled={isExportingStudents}
+                className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <i className="ri-download-line mr-1"></i>确认导出
+                <i className={isExportingStudents ? 'ri-loader-4-line animate-spin mr-1' : 'ri-download-line mr-1'}></i>
+                {isExportingStudents ? '导出中...' : '确认导出'}
               </button>
             </div>
           </div>
