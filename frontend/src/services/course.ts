@@ -371,6 +371,23 @@ export const courseService = {
     });
   },
 
+  async gradeTeacherCourseSubmission(
+    courseId: string,
+    taskId: string | number,
+    submissionId: string | number,
+    payload: CoursePayload,
+  ): Promise<void> {
+    if (shouldUseMockApi) return;
+
+    await http<void>(
+      `/teacher/courses/${courseId}/tasks/${taskId}/submissions/${submissionId}/grade`,
+      {
+        method: "POST",
+        body: payload,
+      },
+    );
+  },
+
   async replyTeacherQuestion(
     courseId: string,
     questionId: string | number,

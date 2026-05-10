@@ -24,8 +24,12 @@ export interface CreateMistakeRequest {
 }
 
 export interface Flashcard {
+  id?: string | number;
   front: string;
   back: string;
+  due?: boolean;
+  nextReviewAt?: string | null;
+  reviewCount?: number;
 }
 
 export interface FlashcardDeck {
@@ -35,6 +39,7 @@ export interface FlashcardDeck {
   mastered: number;
   learning: number;
   new: number;
+  dueCount?: number;
   nextReview: string;
   cardList: Flashcard[];
 }
@@ -50,8 +55,18 @@ export interface CreateFlashcardDeckRequest {
 
 export interface SubmitFlashcardReviewRequest {
   deckId: string | number;
-  cardIndex: number;
+  cardIndex?: number;
+  cardId?: string | number;
   difficulty: "forget" | "hard" | "good" | "easy";
+}
+
+export interface MistakePracticeData {
+  mistakeId: string | number;
+  prompt: string;
+  answerHint: string;
+  analysis: string;
+  lastPracticeTime: string;
+  mistake: LearningMistake;
 }
 
 export interface LearningSummaryCard {

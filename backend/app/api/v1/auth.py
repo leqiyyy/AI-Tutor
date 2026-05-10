@@ -11,6 +11,7 @@ from app.db.base import get_db
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
+    ResetPasswordRequest,
     SendVerifyCodeRequest,
     StudentRegisterRequest,
     TeacherRegisterRequest,
@@ -34,6 +35,18 @@ def register(
 ):
     user = auth_service.register_user(db, body.model_dump())
     return ok(data={"user_id": user.id, "role": user.role}, message="Registration successful")
+
+
+@router.post("/reset-password")
+def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
+    auth_service.reset_password(
+        db,
+        body.email,
+        body.verify_code,
+        body.password,
+        body.confirm_password,
+    )
+    return ok(data={"status": "updated"}, message="Password reset successful")
 
 
 @router.post(

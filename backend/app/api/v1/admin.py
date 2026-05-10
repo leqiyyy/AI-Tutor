@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timezone
 from app.db.base import get_db
 from app.core.deps import get_current_admin
 from app.models.user import User
 from app.models.course import Class, Course
 from app.models.chat import ReviewItem
+from app.models.admin import AdminSetting
 from app.core.response import ok
 from app.core.config import settings
 from app.core.error_codes import ErrorCode
@@ -45,6 +46,59 @@ class RAGStorageConfigUpdateRequest(BaseModel):
     graph_db_url: Optional[str] = None
     graph_db_database: Optional[str] = None
     graph_db_username: Optional[str] = None
+
+
+class RegistrationReviewRequest(BaseModel):
+    userId: str
+    decision: str
+    reason: Optional[str] = None
+
+
+class UserStatusUpdateRequest(BaseModel):
+    status: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class CourseStatusUpdateRequest(BaseModel):
+    status: str
+    reason: Optional[str] = None
+
+
+class ContentReviewRequest(BaseModel):
+    itemId: str
+    decision: str
+    reason: Optional[str] = None
+
+
+class SystemSettingsUpdateRequest(BaseModel):
+    maintenanceMode: Optional[bool] = None
+    examWeekLimit: Optional[bool] = None
+    backupSchedule: Optional[str] = None
+    announcement: Optional[dict[str, Any]] = None
+
+
+def _upsert_admin_setting(
+    db: Session,
+    *,
+    section: str,
+    key: str,
+    value: Any,
+    description: str,
+) -> None:
+    setting = db.query(AdminSetting).filter(
+        AdminSetting.section == section,
+        AdminSetting.key == key,
+    ).first()
+    if not setting:
+        setting = AdminSetting(
+            section=section,
+            key=key,
+            value=value,
+            description=description,
+        )
+        db.add(setting)
+    else:
+        setting.value = value
 
 
 @router.get("/overview", response_model=None)
@@ -93,16 +147,58 @@ def list_users(
 @router.put("/users/{user_id}/status", response_model=None)
 def toggle_user_status(
     user_id: str,
+    body: UserStatusUpdateRequest | None = None,
     db: Session = Depends(get_db),
-    _=Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         from app.core.exceptions import NotFoundException
         raise NotFoundException("用户不存在")
-    user.is_active = not user.is_active
+    if body and body.status:
+        user.is_active = body.status == "enabled"
+    else:
+        user.is_active = not user.is_active
+    user.updated_at = datetime.now(timezone.utc)
     db.commit()
+    audit_service.record_event(
+        event_type="admin.user_status_updated",
+        actor=current_admin,
+        target_type="user",
+        target_id=user.id,
+        summary=f"User status set to {'enabled' if user.is_active else 'disabled'}",
+        extra_data={"reason": body.reason if body else None, "status": body.status if body else None},
+    )
     return ok(data={"user_id": user_id, "is_active": user.is_active})
+
+
+@router.post("/registrations/review", response_model=None)
+def review_registration(
+    body: RegistrationReviewRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    user = db.query(User).filter(User.id == body.userId).first()
+    if not user:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("用户不存在")
+    decision = body.decision.strip().lower()
+    user.is_active = decision == "approve"
+    user.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    audit_service.record_event(
+        event_type="admin.registration_reviewed",
+        actor=current_admin,
+        target_type="user",
+        target_id=user.id,
+        summary=f"Registration {decision}",
+        extra_data={"decision": decision, "reason": body.reason},
+    )
+    return ok(data={
+        "user_id": user.id,
+        "decision": decision,
+        "is_active": user.is_active,
+    }, message="Registration reviewed")
 
 
 @router.get("/classes", response_model=None)
@@ -147,6 +243,37 @@ def list_courses_admin(
     return ok(data={"items": data, "total": total, "page": page, "page_size": page_size})
 
 
+@router.patch("/courses/{course_id}/status", response_model=None)
+def update_course_status(
+    course_id: str,
+    body: CourseStatusUpdateRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("课程不存在")
+    normalized = body.status.strip().lower()
+    course.is_active = normalized == "active"
+    course.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    audit_service.record_event(
+        event_type="admin.course_status_updated",
+        actor=current_admin,
+        target_type="course",
+        target_id=course.id,
+        course_id=course.id,
+        summary=f"Course status set to {normalized}",
+        extra_data={"status": normalized, "reason": body.reason},
+    )
+    return ok(data={
+        "course_id": course.id,
+        "status": normalized,
+        "is_active": course.is_active,
+    }, message="Course status updated")
+
+
 @router.get("/audit-events", response_model=None)
 def list_audit_events(
     event_type: Optional[str] = Query(None),
@@ -175,6 +302,72 @@ def list_audit_events(
         page=page,
         page_size=page_size,
     ))
+
+
+@router.post("/content/review", response_model=None)
+def review_content(
+    body: ContentReviewRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    review = db.query(ReviewItem).filter(ReviewItem.id == body.itemId).first()
+    if not review:
+        from app.core.exceptions import NotFoundException
+        raise NotFoundException("审核内容不存在")
+    decision = body.decision.strip().lower()
+    if decision in {"approve", "markincorrect"}:
+        review.status = "resolved"
+    elif decision in {"reject", "delete"}:
+        review.status = "dismissed"
+    review.reviewed_by = current_admin.id
+    review.reviewed_at = datetime.now(timezone.utc)
+    if body.reason:
+        review.teacher_answer = body.reason
+    db.commit()
+    audit_service.record_event(
+        event_type="admin.content_reviewed",
+        actor=current_admin,
+        target_type="review_item",
+        target_id=review.id,
+        class_id=review.class_id,
+        summary=f"Content review decision: {decision}",
+        extra_data={"decision": decision, "reason": body.reason},
+    )
+    return ok(data={
+        "item_id": review.id,
+        "decision": decision,
+        "status": review.status,
+    }, message="Content reviewed")
+
+
+@router.patch("/system-settings", response_model=None)
+def update_system_settings(
+    body: SystemSettingsUpdateRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    payload = body.model_dump(exclude_unset=True)
+    for key, value in payload.items():
+        _upsert_admin_setting(
+            db,
+            section="system_settings",
+            key=key,
+            value=value,
+            description=f"System setting for {key}",
+        )
+    db.commit()
+    audit_service.record_event(
+        event_type="admin.system_settings_updated",
+        actor=current_admin,
+        target_type="system_settings",
+        summary="System settings updated",
+        extra_data={"keys": sorted(payload.keys())},
+    )
+    return ok(data={
+        "settings": payload,
+        "applied_runtime": False,
+        "restart_required": any(key in payload for key in {"maintenanceMode", "backupSchedule"}),
+    }, message="System settings saved")
 
 
 @router.get("/settings", response_model=None)

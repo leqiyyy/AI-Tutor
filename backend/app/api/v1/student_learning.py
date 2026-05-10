@@ -40,6 +40,8 @@ class FlashcardDeckRequest(BaseModel):
 class FlashcardReviewRequest(BaseModel):
     deckId: str | int
     cardIndex: int = 0
+    cardId: Optional[str] = None
+    card_id: Optional[str] = None
     difficulty: str = "good"
 
 
@@ -147,6 +149,16 @@ def mark_learning_mistake_mastered(
     current_user: User = Depends(get_current_student),
 ):
     return ok(data=student_learning_service.mark_learning_mistake_mastered(db, current_user, mistake_id))
+
+
+@router.post("/mistakes/{mistake_id}/practice", response_model=None)
+def practice_learning_mistake(
+    course_id: str,
+    mistake_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    return ok(data=student_learning_service.practice_learning_mistake(db, current_user, course_id, mistake_id))
 
 
 @router.get("/flashcards", response_model=None)

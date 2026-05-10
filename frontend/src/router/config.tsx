@@ -4,6 +4,7 @@ import { PublicOnlyRoute, RequireAuth } from './guards';
 
 const Login = lazy(() => import('../pages/login/page'));
 const Register = lazy(() => import('../pages/register/page'));
+const ForgotPassword = lazy(() => import('../pages/forgot-password/page'));
 const TeacherDashboard = lazy(() => import('../pages/teacher-dashboard/page'));
 const StudentDashboard = lazy(() => import('../pages/student-dashboard/page'));
 const AdminDashboard = lazy(() => import('../pages/admin-dashboard/page'));
@@ -26,6 +27,10 @@ const routes: RouteObject[] = [
       {
         path: '/register',
         element: <Register />,
+      },
+      {
+        path: '/forgot-password',
+        element: <ForgotPassword />,
       },
     ],
   },

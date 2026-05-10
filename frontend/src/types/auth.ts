@@ -36,6 +36,7 @@ export interface SendVerificationCodeRequest {
   role: RegisterRole;
   channel: VerificationChannel;
   target: string;
+  purpose?: "register" | "reset_password";
 }
 
 export interface SendVerificationCodeResult {
@@ -84,4 +85,16 @@ export interface RegisterResult {
   status: "created";
   message: string;
   nextAction?: string;
+}
+
+export interface ResetPasswordRequest {
+  email: string;
+  verifyCode: string;
+  password: string;
+  confirmPassword: string;
+}
+
+export interface ResetPasswordResult {
+  status: "updated";
+  message?: string;
 }

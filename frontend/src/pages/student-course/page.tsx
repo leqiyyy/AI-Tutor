@@ -22,7 +22,7 @@ import type {
   StudentCourseQuestion,
   StudentCourseTask,
 } from '@/types/course';
-import type { FlashcardDeck, LearningMistake } from '@/types/learning';
+import type { Flashcard, FlashcardDeck, LearningMistake, MistakePracticeData } from '@/types/learning';
 
 const EMPTY_STUDENT_HOME: StudentCourseHomeData = {
   welcome: {
@@ -141,6 +141,7 @@ export default function StudentCourse() {
   const [showMistakeDetailModal, setShowMistakeDetailModal] = useState(false);
   const [showAddMistakeModal, setShowAddMistakeModal] = useState(false);
   const [currentMistake, setCurrentMistake] = useState<LearningMistake | null>(null);
+  const [currentMistakePractice, setCurrentMistakePractice] = useState<MistakePracticeData | null>(null);
   const [mistakeFilter, setMistakeFilter] = useState('all');
   const [newMistakeForm, setNewMistakeForm] = useState(createEmptyMistakeForm);
 
@@ -526,18 +527,34 @@ export default function StudentCourse() {
     return mistakes;
   };
 
+  const isCardDue = (card: Flashcard) => {
+    if (card.due) return true;
+    if (!card.nextReviewAt) return false;
+    return new Date(card.nextReviewAt).getTime() <= Date.now();
+  };
+
+  const isDeckDue = (deck: FlashcardDeck) => {
+    if ((deck.dueCount || 0) > 0) return true;
+    if (deck.nextReview === '今天') return true;
+    return deck.cardList.some(isCardDue);
+  };
+
   // 新增：查看错题详情
   const handleViewMistake = (mistake: LearningMistake) => {
     setCurrentMistake(mistake);
+    setCurrentMistakePractice(null);
     setShowMistakeDetailModal(true);
   };
 
   // 新增：重新练习错题
-  const handlePracticeMistake = (mistake: LearningMistake) => {
-    // 预留后端接口：开始练习错题
-    console.log('开始练习错题API调用:', { mistakeId: mistake.id });
-    
-    alert(`开始练习：${mistake.question}`);
+  const handlePracticeMistake = async (mistake: LearningMistake) => {
+    const practice = await learningService.practiceMistake(courseId, mistake.id);
+    setCurrentMistakePractice(practice);
+    setCurrentMistake(practice.mistake);
+    setMistakes(prev => prev.map(item => 
+      item.id === mistake.id ? { ...practice.mistake } : item
+    ));
+    setShowMistakeDetailModal(true);
   };
 
   // 新增：标记错题为已掌握
@@ -796,21 +813,21 @@ export default function StudentCourse() {
 
   // 新增：开始今日复习
   const handleStartTodayReview = () => {
-    // 获取所有需要今日复习的卡组
-    const todayDecks = decks.filter(d => d.nextReview === '今天');
+    const todayDecks = decks.filter(isDeckDue);
     if (todayDecks.length === 0) {
       alert('今天没有需要复习的卡片！');
       return;
     }
     
-    // 选择第一个需要复习的卡组
-    setCurrentDeck(todayDecks[0]);
+    const deck = todayDecks[0];
+    const dueCards = deck.cardList.filter(card => isCardDue(card));
+    setCurrentDeck({
+      ...deck,
+      cardList: dueCards.length > 0 ? dueCards : deck.cardList,
+    });
     setCurrentCardIndex(0);
     setIsCardFlipped(false);
     setShowReviewModal(true);
-    
-    // 预留后端接口：获取今日复习卡片
-    console.log('获取今日复习卡片API调用:', { courseId: id });
   };
 
   // 新增：开始学习卡组
@@ -833,9 +850,11 @@ export default function StudentCourse() {
   const handleAnswerCard = async (difficulty: 'forget' | 'hard' | 'good' | 'easy') => {
     if (!currentDeck) return;
 
+    const currentCard = currentDeck.cardList[currentCardIndex];
     await learningService.submitFlashcardReview(courseId, {
       deckId: currentDeck.id,
       cardIndex: currentCardIndex,
+      cardId: currentCard.id,
       difficulty,
     });
 
@@ -850,6 +869,7 @@ export default function StudentCourse() {
       setShowStudyModal(false);
       setCurrentDeck(null);
       setCurrentCardIndex(0);
+      learningService.getFlashcardDecks(courseId).then((data) => setDecks(data.decks)).catch(() => undefined);
     }
   };
 
@@ -1960,7 +1980,9 @@ export default function StudentCourse() {
                   <p className="text-sm opacity-90">基于间隔重复算法为您安排</p>
                 </div>
                 <div className="text-right">
-                  <div className="text-3xl font-bold">12</div>
+                  <div className="text-3xl font-bold">
+                    {decks.reduce((sum, deck) => sum + (deck.dueCount ?? deck.cardList.filter(isCardDue).length), 0)}
+                  </div>
                   <div className="text-sm opacity-90">张卡片待复习</div>
                 </div>
               </div>
@@ -2482,6 +2504,7 @@ export default function StudentCourse() {
                   onClick={() => {
                     setShowMistakeDetailModal(false);
                     setCurrentMistake(null);
+                    setCurrentMistakePractice(null);
                   }}
                   className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer"
                 >
@@ -2495,6 +2518,15 @@ export default function StudentCourse() {
                     <div className="text-sm font-semibold text-gray-900 mb-2">题目</div>
                     <div className="text-sm text-gray-700 p-3 bg-gray-50 rounded-lg">{currentMistake.question}</div>
                   </div>
+
+                  {currentMistakePractice && currentMistakePractice.mistakeId === currentMistake.id && (
+                    <div className="p-4 bg-teal-50 border border-teal-100 rounded-lg">
+                      <div className="text-sm font-semibold text-teal-800 mb-2">本次练习</div>
+                      <div className="text-sm text-gray-800 whitespace-pre-line leading-relaxed">
+                        {currentMistakePractice.prompt}
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-2">所属章节</div>
@@ -2544,17 +2576,14 @@ export default function StudentCourse() {
                   onClick={() => {
                     setShowMistakeDetailModal(false);
                     setCurrentMistake(null);
+                    setCurrentMistakePractice(null);
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap"
                 >
                   关闭
                 </button>
                 <button
-                  onClick={() => {
-                    handlePracticeMistake(currentMistake);
-                    setShowMistakeDetailModal(false);
-                    setCurrentMistake(null);
-                  }}
+                  onClick={() => handlePracticeMistake(currentMistake)}
                   className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   重新练习

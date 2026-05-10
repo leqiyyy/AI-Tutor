@@ -5,6 +5,8 @@ import type {
   LoginResult,
   RegisterRequest,
   RegisterResult,
+  ResetPasswordRequest,
+  ResetPasswordResult,
   SendVerificationCodeRequest,
   SendVerificationCodeResult,
   UserProfile,
@@ -69,6 +71,27 @@ export async function mockSendVerificationCode(
     delivery: request.channel,
     maskedTarget: request.target,
     previewCode: "123456",
+  };
+}
+
+export async function mockResetPassword(
+  request: ResetPasswordRequest,
+): Promise<ResetPasswordResult> {
+  await waitForMockLatency();
+
+  if (!request.email.trim() || !request.verifyCode.trim()) {
+    throw new Error("请填写邮箱和验证码");
+  }
+  if (request.password.length < 8 || !/[a-zA-Z]/.test(request.password) || !/\d/.test(request.password)) {
+    throw new Error("密码不少于8位，且需包含字母和数字");
+  }
+  if (request.password !== request.confirmPassword) {
+    throw new Error("两次输入的新密码不一致");
+  }
+
+  return {
+    status: "updated",
+    message: "密码重置成功",
   };
 }
 

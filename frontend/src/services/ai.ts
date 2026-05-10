@@ -717,7 +717,7 @@ export const aiService = {
       : http<AiTeacherQuestion[]>("/teacher/ai/questions");
   },
 
-  async getTeacherAiQuestionDetail(questionId: number): Promise<AiTeacherQuestion> {
+  async getTeacherAiQuestionDetail(questionId: string | number): Promise<AiTeacherQuestion> {
     return shouldUseMockApi
       ? getMockTeacherAiQuestionDetail(questionId)
       : http<AiTeacherQuestion>(`/teacher/ai/questions/${questionId}`);
@@ -735,7 +735,7 @@ export const aiService = {
     });
   },
 
-  async adoptAiAnswer(questionId: number): Promise<void> {
+  async adoptAiAnswer(questionId: string | number): Promise<void> {
     if (shouldUseMockApi) {
       await mockAdoptAiAnswer(questionId);
       return;

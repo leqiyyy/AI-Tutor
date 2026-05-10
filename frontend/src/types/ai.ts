@@ -92,7 +92,7 @@ export interface AiResourceRecommendation {
 }
 
 export interface AiTeacherQuestion {
-  id: number;
+  id: string | number;
   student: string;
   avatar: string;
   question: string;
@@ -159,7 +159,7 @@ export interface SubmitFeedbackPayload {
 }
 
 export interface ReplyAiQuestionPayload {
-  questionId: number;
+  questionId: string | number;
   reply: string;
 }
 

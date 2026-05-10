@@ -19,6 +19,7 @@ import type {
   LearningMistake,
   LearningMistakesData,
   LearningReportData,
+  MistakePracticeData,
   SubmitFlashcardReviewRequest,
 } from "@/types/learning";
 
@@ -129,6 +130,42 @@ export const learningService = {
 
     await http<void>(
       `/student/courses/${courseId}/learning/mistakes/${mistakeId}/mastered`,
+      {
+        method: "POST",
+      },
+    );
+  },
+
+  async practiceMistake(
+    courseId: string,
+    mistakeId: string | number,
+  ): Promise<MistakePracticeData> {
+    if (shouldUseMockApi) {
+      const data = await getMockMistakes();
+      const mistake = data.mistakes.find((item) => item.id === mistakeId) || data.mistakes[0] || {
+        id: mistakeId,
+        question: "",
+        chapter: "",
+        wrongCount: 0,
+        myAnswer: "",
+        correctAnswer: "",
+        analysis: "",
+        addTime: new Date().toISOString().slice(0, 10),
+        lastPracticeTime: new Date().toISOString().slice(0, 10),
+        mastered: false,
+      };
+      return {
+        mistakeId,
+        prompt: `请重新作答这道错题，并说明关键步骤：\n\n${mistake?.question || ""}`,
+        answerHint: mistake?.correctAnswer || "",
+        analysis: mistake?.analysis || "",
+        lastPracticeTime: new Date().toISOString().slice(0, 10),
+        mistake,
+      };
+    }
+
+    return http<MistakePracticeData>(
+      `/student/courses/${courseId}/learning/mistakes/${mistakeId}/practice`,
       {
         method: "POST",
       },

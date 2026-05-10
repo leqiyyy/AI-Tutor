@@ -856,6 +856,34 @@ export default function TeacherCourse() {
     }
   };
 
+  const handleGradeSubmission = async (submissionId: string | number) => {
+    if (!currentTask || currentTask.type === 'notice') return;
+    const scoreInput = prompt('请输入分数');
+    if (scoreInput === null) return;
+    const score = Number(scoreInput);
+    if (!Number.isFinite(score) || score < 0) {
+      alert('请输入有效分数');
+      return;
+    }
+    const feedback = prompt('请输入评语（可选）') || '';
+    await courseService.gradeTeacherCourseSubmission(courseId, currentTask.id, submissionId, {
+      score,
+      feedback,
+    });
+    setCurrentTask(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        submissions: prev.submissions.map(submission =>
+          submission.id === submissionId
+            ? { ...submission, score, status: 'graded' as const }
+            : submission,
+        ),
+      };
+    });
+    alert('批改已保存');
+  };
+
   // 新增：切换问题展开/收起
   const toggleQuestion = (questionId: number) => {
     setExpandedQuestions(prev => 
@@ -3213,18 +3241,19 @@ export default function TeacherCourse() {
 
                         {currentTask.submissions.length > 0 ? (
                           <div className="overflow-hidden rounded-lg border border-gray-200">
-                            <div className="grid grid-cols-[1.4fr_1fr_1fr_1fr] gap-3 bg-gray-50 px-4 py-3 text-xs font-medium text-gray-500">
+                            <div className="grid grid-cols-[1.4fr_1fr_1fr_1fr_auto] gap-3 bg-gray-50 px-4 py-3 text-xs font-medium text-gray-500">
                               <span>学生</span>
                               <span>分组</span>
                               <span>提交状态</span>
                               <span>成绩/时间</span>
+                              <span>操作</span>
                             </div>
                             <div className="divide-y divide-gray-100">
                               {currentTask.submissions.map((submission) => {
                                 const submissionMeta = getTaskSubmissionStatusMeta(submission.status);
 
                                 return (
-                                  <div key={submission.id} className="grid grid-cols-[1.4fr_1fr_1fr_1fr] gap-3 px-4 py-3 text-sm text-gray-700">
+                                  <div key={submission.id} className="grid grid-cols-[1.4fr_1fr_1fr_1fr_auto] gap-3 px-4 py-3 text-sm text-gray-700">
                                     <div>
                                       <div className="font-medium text-gray-900">{submission.studentName}</div>
                                       <div className="text-xs text-gray-400">{submission.studentId}</div>
@@ -3244,6 +3273,14 @@ export default function TeacherCourse() {
                                       {submission.score !== undefined && submission.submittedAt !== '-' && (
                                         <div className="text-xs text-gray-400 mt-0.5">{submission.submittedAt}</div>
                                       )}
+                                    </div>
+                                    <div>
+                                      <button
+                                        onClick={() => handleGradeSubmission(submission.id)}
+                                        className="px-2.5 py-1 text-xs font-medium text-teal-600 bg-teal-50 rounded-md hover:bg-teal-100 cursor-pointer whitespace-nowrap"
+                                      >
+                                        {submission.status === 'graded' ? '改分' : '批改'}
+                                      </button>
                                     </div>
                                   </div>
                                 );

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, DateTime, Text, Enum
+from sqlalchemy import Column, String, Boolean, DateTime, Text, Enum, Integer
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import uuid
@@ -19,6 +19,9 @@ class User(Base):
     role = Column(Enum("student", "teacher", "admin", name="user_role"), nullable=False)
     is_active = Column(Boolean, default=True)
     avatar_url = Column(String(500), nullable=True)
+    failed_login_count = Column(Integer, default=0, nullable=False)
+    locked_until = Column(DateTime, nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
 
     # Common profile fields
     phone = Column(String(20), nullable=True)
@@ -26,14 +29,14 @@ class User(Base):
     bio = Column(Text, nullable=True)
 
     # Student-specific
-    student_id = Column(String(50), nullable=True)  # 学号
+    student_id = Column(String(50), unique=True, nullable=True)  # 学号
     college = Column(String(200), nullable=True)
     major = Column(String(200), nullable=True)
     grade = Column(String(50), nullable=True)
     class_no = Column(String(50), nullable=True)
 
     # Teacher-specific
-    teacher_id = Column(String(50), nullable=True)  # 工号
+    teacher_id = Column(String(50), unique=True, nullable=True)  # 工号
     department = Column(String(200), nullable=True)
     title = Column(String(100), nullable=True)  # 职称
 

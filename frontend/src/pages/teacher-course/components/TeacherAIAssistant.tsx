@@ -284,24 +284,24 @@ function FeedbackDetailModal({ item, onClose, onResolve }: {
 function AIQuestionsPanel({ questions, onUpdate, onAdopt, onReply, isWide = false }: {
   questions: AIQuestion[];
   onUpdate: (updated: AIQuestion[]) => void;
-  onAdopt: (questionId: number) => Promise<void>;
-  onReply: (questionId: number, reply: string) => Promise<void>;
+  onAdopt: (questionId: AIQuestion['id']) => Promise<void>;
+  onReply: (questionId: AIQuestion['id'], reply: string) => Promise<void>;
   isWide?: boolean;
 }) {
   const [filter, setFilter] = useState<'all' | 'pending' | 'adopted' | 'replied'>('all');
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [replyingId, setReplyingId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<AIQuestion['id'] | null>(null);
+  const [replyingId, setReplyingId] = useState<AIQuestion['id'] | null>(null);
   const [replyText, setReplyText] = useState('');
 
   const filtered = filter === 'all' ? questions : questions.filter(q => q.status === filter);
   const pendingCount = questions.filter(q => q.status === 'pending').length;
 
-  const adopt = async (id: number) => {
+  const adopt = async (id: AIQuestion['id']) => {
     await onAdopt(id);
     onUpdate(questions.map(q => q.id === id ? { ...q, status: 'adopted' as const, teacherReply: '已采纳AI回答' } : q));
   };
 
-  const submitReply = async (id: number) => {
+  const submitReply = async (id: AIQuestion['id']) => {
     if (!replyText.trim()) return;
     await onReply(id, replyText);
     onUpdate(questions.map(q => q.id === id ? { ...q, status: 'replied' as const, teacherReply: replyText } : q));
@@ -784,12 +784,12 @@ export default function TeacherAIAssistant() {
     await aiService.deleteConversation('teacher', convId);
   };
 
-  const handleAdoptQuestion = async (questionId: number) => {
+  const handleAdoptQuestion = async (questionId: AIQuestion['id']) => {
     await aiService.adoptAiAnswer(questionId);
     setAIQuestions(prev => prev.map(item => item.id === questionId ? { ...item, status: 'adopted', teacherReply: '已采纳AI回答' } : item));
   };
 
-  const handleReplyQuestion = async (questionId: number, reply: string) => {
+  const handleReplyQuestion = async (questionId: AIQuestion['id'], reply: string) => {
     await aiService.replyAiQuestion({ questionId, reply });
     setAIQuestions(prev => prev.map(item => item.id === questionId ? { ...item, status: 'replied', teacherReply: reply } : item));
   };

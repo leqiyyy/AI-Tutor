@@ -6460,9 +6460,21 @@ class RAGAnythingAdapter:
             signature = inspect.signature(QueryParam)
             supports_user_prompt = "user_prompt" in signature.parameters
             supports_enable_rerank = "enable_rerank" in signature.parameters
+            supported_param_names = set(signature.parameters)
         except Exception:  # pragma: no cover - optional dependency implementation detail
             supports_user_prompt = False
             supports_enable_rerank = False
+            supported_param_names = set()
+        explicit_limits = {
+            "top_k": max(1, int(getattr(settings, "RAG_LIGHTRAG_TOP_K", 12) or 12)),
+            "chunk_top_k": max(1, int(getattr(settings, "RAG_LIGHTRAG_CHUNK_TOP_K", 6) or 6)),
+            "max_entity_tokens": max(512, int(getattr(settings, "RAG_LIGHTRAG_MAX_ENTITY_TOKENS", 2000) or 2000)),
+            "max_relation_tokens": max(512, int(getattr(settings, "RAG_LIGHTRAG_MAX_RELATION_TOKENS", 3000) or 3000)),
+            "max_total_tokens": max(2048, int(getattr(settings, "RAG_LIGHTRAG_MAX_TOTAL_TOKENS", 8000) or 8000)),
+        }
+        for param_name, value in explicit_limits.items():
+            if param_name in supported_param_names:
+                kwargs[param_name] = value
         if user_prompt and supports_user_prompt:
             if bool(getattr(settings, "RAG_KG_CONTEXT_FILTER_ENABLED", True)):
                 user_prompt = (

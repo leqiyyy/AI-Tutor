@@ -8,6 +8,22 @@ class SendVerifyCodeRequest(BaseModel):
     purpose: Literal["register", "reset_password"] = "register"
 
 
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: EmailStr
+    verify_code: str = Field(validation_alias=AliasChoices("verify_code", "verifyCode"))
+    password: str
+    confirm_password: str = Field(validation_alias=AliasChoices("confirm_password", "confirmPassword"))
+
+    @field_validator("confirm_password")
+    @classmethod
+    def passwords_match(cls, value, info):
+        if "password" in info.data and value != info.data["password"]:
+            raise ValueError("Passwords do not match")
+        return value
+
+
 class StudentRegisterRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

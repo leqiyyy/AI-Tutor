@@ -334,7 +334,7 @@ export async function getMockTeacherAiQuestions() {
   return structuredClone(teacherAiQuestionStore);
 }
 
-export async function getMockTeacherAiQuestionDetail(questionId: number) {
+export async function getMockTeacherAiQuestionDetail(questionId: string | number) {
   await waitForMockLatency();
   const target = teacherAiQuestionStore.find((item) => item.id === questionId);
   return structuredClone(target ?? teacherAiQuestionStore[0]);
@@ -349,7 +349,7 @@ export async function mockReplyAiQuestion(payload: ReplyAiQuestionPayload) {
   }
 }
 
-export async function mockAdoptAiAnswer(questionId: number) {
+export async function mockAdoptAiAnswer(questionId: string | number) {
   await waitForMockLatency();
   const target = teacherAiQuestionStore.find((item) => item.id === questionId);
   if (target) {

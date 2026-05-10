@@ -87,6 +87,11 @@ def _ensure_runtime_schema_compatibility() -> None:
             "provenance": "ALTER TABLE knowledge_relations ADD COLUMN provenance JSON",
             "updated_at": "ALTER TABLE knowledge_relations ADD COLUMN updated_at DATETIME",
         },
+        "users": {
+            "failed_login_count": "ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0",
+            "locked_until": "ALTER TABLE users ADD COLUMN locked_until DATETIME",
+            "last_login_at": "ALTER TABLE users ADD COLUMN last_login_at DATETIME",
+        },
     }
 
     with engine.begin() as connection:
@@ -107,6 +112,10 @@ def _ensure_runtime_schema_compatibility() -> None:
             "SET confidence = COALESCE(confidence, 0.55), "
             "updated_at = COALESCE(updated_at, created_at)"
         ))
+        if "users" in inspect(engine).get_table_names():
+            connection.execute(text(
+                "UPDATE users SET failed_login_count = COALESCE(failed_login_count, 0)"
+            ))
 
 
 def _sqlite_columns(connection, table_name: str) -> set[str]:

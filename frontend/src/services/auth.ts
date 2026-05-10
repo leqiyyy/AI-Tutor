@@ -2,13 +2,15 @@ import { clearAuthSession, getAuthSession, saveAuthSession } from "@/lib/auth-st
 import { http } from "@/lib/http";
 import { shouldUseMockApi } from "@/lib/env";
 import { getDefaultRouteForRole } from "@/lib/role-routes";
-import { mockLogin, mockRegister, mockSendVerificationCode } from "@/mocks/auth";
+import { mockLogin, mockRegister, mockResetPassword, mockSendVerificationCode } from "@/mocks/auth";
 import type {
   AppRole,
   LoginRequest,
   LoginResult,
   RegisterRequest,
   RegisterResult,
+  ResetPasswordRequest,
+  ResetPasswordResult,
   SendVerificationCodeRequest,
   SendVerificationCodeResult,
   UserProfile,
@@ -188,7 +190,7 @@ export const authService = {
       method: "POST",
       body: {
         email: payload.target,
-        purpose: "register",
+        purpose: payload.purpose || "register",
       },
       auth: false,
     });
@@ -218,6 +220,29 @@ export const authService = {
           ? "教师账号注册成功，可直接登录"
           : "学生账号注册成功，可直接登录",
       nextAction: "login",
+    };
+  },
+
+  async resetPassword(payload: ResetPasswordRequest): Promise<ResetPasswordResult> {
+    if (shouldUseMockApi) {
+      return mockResetPassword(payload);
+    }
+
+    await http<unknown>("/auth/reset-password", {
+      method: "POST",
+      body: {
+        email: payload.email.trim(),
+        verify_code: payload.verifyCode.trim(),
+        password: payload.password,
+        confirm_password: payload.confirmPassword,
+        confirmPassword: payload.confirmPassword,
+      },
+      auth: false,
+    });
+
+    return {
+      status: "updated",
+      message: "密码重置成功",
     };
   },
 

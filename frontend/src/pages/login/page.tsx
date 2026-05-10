@@ -210,7 +210,13 @@ export default function LoginPage() {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-sm font-medium text-gray-700">密码</label>
-                <button type="button" className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap">忘记密码？</button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/forgot-password')}
+                  className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap"
+                >
+                  忘记密码？
+                </button>
               </div>
               <div className="relative">
                 <div className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center text-gray-400">

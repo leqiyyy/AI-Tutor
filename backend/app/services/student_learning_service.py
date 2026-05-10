@@ -249,6 +249,38 @@ def mark_learning_mistake_mastered(db: Session, student: User, mistake_id: str) 
     return _mistake_to_frontend(mistake)
 
 
+def practice_learning_mistake(db: Session, student: User, course_or_class_id: str, mistake_id: str) -> dict:
+    cls = resolve_learning_class(db, student, course_or_class_id)
+    mistake = db.query(StudyMistake).filter(
+        StudyMistake.id == mistake_id,
+        StudyMistake.user_id == student.id,
+        StudyMistake.class_id == cls.id,
+    ).first()
+    if not mistake:
+        raise NotFoundException("Mistake not found")
+    mistake.last_practice_at = datetime.now(timezone.utc)
+    db.add(LearningRecord(
+        user_id=student.id,
+        class_id=cls.id,
+        activity_type="mistake_practice",
+        ref_id=mistake.id,
+        extra_data={
+            "chapter": mistake.chapter,
+            "mastered": bool(mistake.mastered),
+        },
+    ))
+    db.commit()
+    db.refresh(mistake)
+    return {
+        "mistakeId": mistake.id,
+        "prompt": f"请重新作答这道错题，并特别说明关键步骤：\n\n{mistake.question}",
+        "answerHint": mistake.correct_answer or "",
+        "analysis": mistake.analysis or "",
+        "lastPracticeTime": _date_text(mistake.last_practice_at),
+        "mistake": _mistake_to_frontend(mistake),
+    }
+
+
 def list_learning_flashcard_decks(db: Session, student: User, course_or_class_id: str) -> dict:
     cls = resolve_learning_class(db, student, course_or_class_id)
     cards = _flashcards(db, student.id, cls.id)
@@ -258,6 +290,7 @@ def list_learning_flashcard_decks(db: Session, student: User, course_or_class_id
     learning = sum(1 for card in cards if (card.review_count or 0) > 0 and (card.interval_days or 0) < 7)
     new = sum(1 for card in cards if not card.review_count)
     next_review = min([card.next_review_at for card in cards if card.next_review_at] or [None])
+    due_count = sum(1 for card in cards if _flashcard_due(card))
     return {
         "decks": [{
             "id": f"class:{cls.id}",
@@ -266,8 +299,9 @@ def list_learning_flashcard_decks(db: Session, student: User, course_or_class_id
             "mastered": mastered,
             "learning": learning,
             "new": new,
-            "nextReview": _date_text(next_review) if next_review else "暂无复习计划",
-            "cardList": [{"front": card.question, "back": card.answer} for card in cards],
+            "dueCount": due_count,
+            "nextReview": "今天" if due_count else (_date_text(next_review) if next_review else "暂无复习计划"),
+            "cardList": [_flashcard_to_frontend(card) for card in cards],
         }]
     }
 
@@ -298,6 +332,7 @@ def create_learning_flashcard_deck(db: Session, student: User, course_or_class_i
         "mastered": 0,
         "learning": 0,
         "new": 0,
+        "dueCount": 0,
         "nextReview": "暂无复习计划",
         "cardList": [],
     }
@@ -306,10 +341,14 @@ def create_learning_flashcard_deck(db: Session, student: User, course_or_class_i
 def review_learning_flashcard(db: Session, student: User, course_or_class_id: str, payload: dict) -> dict:
     cls = resolve_learning_class(db, student, course_or_class_id)
     cards = _flashcards(db, student.id, cls.id)
-    card_index = int(payload.get("cardIndex") or payload.get("card_index") or 0)
-    if card_index < 0 or card_index >= len(cards):
+    card_id = payload.get("cardId") or payload.get("card_id")
+    if card_id:
+        card = next((item for item in cards if str(item.id) == str(card_id)), None)
+    else:
+        card_index = int(payload.get("cardIndex") or payload.get("card_index") or 0)
+        card = cards[card_index] if 0 <= card_index < len(cards) else None
+    if not card:
         raise NotFoundException("Flashcard not found")
-    card = cards[card_index]
     response = payload.get("difficulty") or payload.get("response") or "good"
     rating = {"forget": 1, "hard": 2, "good": 4, "easy": 5}.get(response, 4)
     before = card.interval_days or 1
@@ -402,6 +441,23 @@ def _flashcards(db: Session, user_id: str, class_id: str) -> list[Flashcard]:
         Flashcard.class_id == class_id,
         Flashcard.is_active == True,
     ).order_by(Flashcard.created_at.asc()).all()
+
+
+def _flashcard_due(card: Flashcard) -> bool:
+    if not card.next_review_at:
+        return True
+    return _aware(card.next_review_at) <= datetime.now(timezone.utc)
+
+
+def _flashcard_to_frontend(card: Flashcard) -> dict:
+    return {
+        "id": card.id,
+        "front": card.question,
+        "back": card.answer,
+        "due": _flashcard_due(card),
+        "nextReviewAt": _iso(card.next_review_at) if card.next_review_at else None,
+        "reviewCount": card.review_count or 0,
+    }
 
 
 def _flashcard_review_count(db: Session, user_id: str, start_at: datetime, class_id: str) -> int:
@@ -713,6 +769,10 @@ def _range_label(start_at: datetime, now: datetime, period: str) -> str:
 
 def _date_text(value: Optional[datetime]) -> str:
     return _aware(value).date().isoformat() if value else ""
+
+
+def _iso(value: Optional[datetime]) -> str:
+    return _aware(value).isoformat().replace("+00:00", "Z") if value else ""
 
 
 def _aware(value: Optional[datetime]) -> datetime:

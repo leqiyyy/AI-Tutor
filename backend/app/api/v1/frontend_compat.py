@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 import math
 import os
 import re
@@ -16,14 +17,14 @@ from app.core.deps import get_current_admin, get_current_student, get_current_te
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.response import ok
 from app.db.base import get_db
-from app.models.course import Class, ClassMember, Course, Discussion, Material, Task
+from app.models.course import Class, ClassMember, Course, Discussion, Material, Submission, Task
 from app.models.chat import ChatMessage, ChatSession, ReviewItem
 from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.personalization import LearningConcept, StudentConceptMastery
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
-from app.services import course_service, kb_service, personalized_recommendation_service
+from app.services import auth_service, course_service, kb_service, personalized_recommendation_service, task_service
 
 router = APIRouter(tags=["frontend-compat"])
 
@@ -123,6 +124,63 @@ class TeacherTaskStatusRequest(BaseModel):
     is_published: bool | None = None
 
 
+class MaterialRenameRequest(BaseModel):
+    name: str
+
+
+class MaterialShareRequest(BaseModel):
+    scope: str = "class"
+    message: str | None = None
+
+
+class CourseContentRequest(BaseModel):
+    title: str | None = None
+    content: str
+    parentId: str | None = None
+    parent_id: str | None = None
+    attachments: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    aiAnswer: str | None = None
+    ai_answer: str | None = None
+
+
+class StudentGroupMoveRequest(BaseModel):
+    studentIds: list[Any] = Field(default_factory=list)
+    targetGroup: int | str | None = None
+    target_group: int | str | None = None
+
+
+class StudentExportRequest(BaseModel):
+    format: str = "json"
+    fields: list[str] = Field(default_factory=list)
+
+
+class CourseSubmissionRequest(BaseModel):
+    content: str | None = None
+    file_path: str | None = None
+    filePath: str | None = None
+    attachments: list[str] = Field(default_factory=list)
+    answers: dict[str, Any] | None = None
+    taskType: str | None = None
+
+
+class GradeSubmissionRequest(BaseModel):
+    score: int
+    feedback: str | None = None
+
+
+class TeacherToolRequest(BaseModel):
+    prompt: str = ""
+
+
+class TeacherAiQuestionReplyRequest(BaseModel):
+    questionId: str
+    reply: str
+
+
+QUESTION_TITLE_PREFIX = "[student_question] "
+
+
 def _iso(value: Any) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -183,6 +241,23 @@ def _student_file_type(value: str | None) -> str:
     return mapping.get((value or "").lower(), "pdf")
 
 
+def _material_preview_note(raw: dict[str, Any]) -> str:
+    source = raw.get("preview_source")
+    if source == "original_file":
+        return "已直接读取原始文本文件，上传后即可预览。"
+    if source in {"extracted_text", "chunks"}:
+        return "当前展示解析文本；完整 AI 检索仍需等待索引完成。"
+    status = raw.get("kb_status") or "pending"
+    if status in {"pending", "processing"}:
+        return "资料已上传，正在解析/索引；当前可下载原文件，文本预览稍后可用。"
+    return "暂无可预览文本，可先下载原文件查看。"
+
+
+def _material_download_url(course_id: str, file_id: str, file_name: str | None = None) -> str:
+    query = f"?filename={quote(file_name or '')}" if file_name else ""
+    return f"/api/v1/courses/{course_id}/files/{file_id}/download{query}"
+
+
 def _course_image(seed: str) -> str:
     return f"https://readdy.ai/api/search-image?query=course%20learning%20space%20{seed}&width=400&height=240&orientation=landscape"
 
@@ -197,6 +272,77 @@ def _get_teacher(db: Session, teacher_id: str | None) -> User | None:
     if not teacher_id:
         return None
     return db.query(User).filter(User.id == teacher_id).first()
+
+
+def _question_storage_title(title: str | None) -> str:
+    cleaned = str(title or "课程提问").strip() or "课程提问"
+    if cleaned.startswith(QUESTION_TITLE_PREFIX):
+        return cleaned
+    return f"{QUESTION_TITLE_PREFIX}{cleaned}"
+
+
+def _question_display_title(title: str | None) -> str:
+    text = str(title or "").strip()
+    if text.startswith(QUESTION_TITLE_PREFIX):
+        return text[len(QUESTION_TITLE_PREFIX):].strip() or "课程提问"
+    return text or "课程提问"
+
+
+def _is_question_discussion(row: Discussion) -> bool:
+    return str(row.title or "").startswith(QUESTION_TITLE_PREFIX)
+
+
+def _discussion_author_name(db: Session, author_id: str | None) -> str:
+    user = db.query(User).filter(User.id == author_id).first() if author_id else None
+    return (user.real_name or user.email or "用户") if user else "用户"
+
+
+def _discussion_reply_payload(db: Session, reply: Discussion) -> dict[str, Any]:
+    author = db.query(User).filter(User.id == reply.author_id).first()
+    role = author.role if author else ""
+    return {
+        "author": (author.real_name or author.email or "用户") if author else "用户",
+        "content": reply.content or "",
+        "time": _iso(reply.created_at),
+        "isTeacher": role == "teacher",
+        "isStudent": role == "student",
+    }
+
+
+def _discussion_replies(db: Session, parent_id: str) -> list[Discussion]:
+    return (
+        db.query(Discussion)
+        .filter(
+            Discussion.parent_id == parent_id,
+            Discussion.is_active == True,
+        )
+        .order_by(Discussion.created_at.asc())
+        .all()
+    )
+
+
+def _student_members_with_users(db: Session, class_id: str) -> list[tuple[ClassMember, User]]:
+    rows: list[tuple[ClassMember, User]] = []
+    memberships = (
+        db.query(ClassMember)
+        .filter(ClassMember.class_id == class_id, ClassMember.role == "student")
+        .order_by(ClassMember.joined_at.asc())
+        .all()
+    )
+    for membership in memberships:
+        user = db.query(User).filter(User.id == membership.user_id).first()
+        if user:
+            rows.append((membership, user))
+    return rows
+
+
+def _resolve_student_from_display_id(db: Session, class_id: str, value: Any) -> User | None:
+    raw = str(value)
+    members = _student_members_with_users(db, class_id)
+    for index, (_, user) in enumerate(members, start=1):
+        if raw in {str(index), str(user.id), str(user.student_id or "")}:
+            return user
+    return None
 
 
 def _student_count(db: Session, class_id: str) -> int:
@@ -443,13 +589,17 @@ def update_teacher_settings(
 @router.post("/settings/password", response_model=None)
 def update_password_placeholder(
     payload: dict[str, Any],
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    new_password = str(payload.get("newPassword") or "")
-    confirm_password = str(payload.get("confirmPassword") or "")
-    if not new_password or new_password != confirm_password:
-        return ok(data={"status": "ignored", "message": "两次输入的新密码不一致"})
-    return ok(data={"status": "updated", "message": "密码校验已通过"})
+    auth_service.change_password(
+        db,
+        current_user,
+        str(payload.get("oldPassword") or ""),
+        str(payload.get("newPassword") or ""),
+        str(payload.get("confirmPassword") or ""),
+    )
+    return ok(data={"status": "updated", "message": "密码修改成功"})
 
 
 @router.post("/settings/avatar", response_model=None)
@@ -563,6 +713,57 @@ def _extract_exam_start_time(description: str | None) -> datetime | None:
     if not match:
         return None
     return _parse_datetime(match.group(1))
+
+
+def _task_questions_for_student(task: Task) -> list[dict[str, Any]]:
+    description = task.description or ""
+    questions: list[dict[str, Any]] = []
+    for line in description.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith(("开始时间：", "结束时间：", "考试时长：")):
+            continue
+        match = re.match(r"^(\d+)[.、]\s*(?:[【\\[]([^】\\]]+)[】\\]])?\s*(.+)$", text)
+        if not match:
+            continue
+        index = int(match.group(1))
+        question_type = _normalize_frontend_question_type(match.group(2) or "")
+        content = match.group(3).strip()
+        if content:
+            questions.append({
+                "id": index,
+                "content": content,
+                "type": question_type,
+                "answer": "",
+            })
+    if not questions and description.strip():
+        questions.append({
+            "id": 1,
+            "content": description.strip(),
+            "type": "text",
+            "answer": "",
+        })
+    return questions
+
+
+def _normalize_frontend_question_type(value: str) -> str:
+    normalized = value.strip().lower()
+    if any(token in normalized for token in ("code", "编程", "代码", "program")):
+        return "code"
+    return "text"
+
+
+def _student_task_status(task: Task, submission: Submission | None) -> str:
+    if submission:
+        if submission.score is not None or submission.status == "graded":
+            return "graded"
+        return "submitted"
+    if task.due_date:
+        now = datetime.now(task.due_date.tzinfo) if task.due_date.tzinfo else datetime.now(timezone.utc).replace(tzinfo=None)
+        if task.due_date < now:
+            return "overdue"
+    return "pending"
 
 
 def _publish_class_notifications(
@@ -1272,6 +1473,70 @@ def student_course_materials(
     })
 
 
+@router.get("/student/courses/{class_id}/materials/{file_id}/analysis", response_model=None)
+def student_course_material_analysis(
+    class_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    raw = kb_service.get_material_analysis(db, cls.course_id, file_id, current_user)
+    keywords = raw.get("keywords") or []
+    return ok(data={
+        "fileId": file_id,
+        "summary": raw.get("summary") or "资料仍在解析中，解析完成后将展示自动摘要。",
+        "keyPoints": keywords[:8],
+        "difficulties": [
+            {"title": keyword, "difficulty": "中等"}
+            for keyword in keywords[:5]
+        ],
+        "recommendedStudyDuration": "30 分钟",
+        "generatedAt": _iso(datetime.now(timezone.utc)),
+        "raw": raw,
+    })
+
+
+@router.get("/student/courses/{class_id}/materials/{file_id}/preview", response_model=None)
+def student_course_material_preview(
+    class_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    raw = kb_service.get_material_preview(db, cls.course_id, file_id, current_user)
+    preview_type = "video" if raw.get("file_type") in {"video", "mp4"} else "document"
+    return ok(data={
+        "fileId": file_id,
+        "previewType": preview_type,
+        "previewUrl": "",
+        "note": _material_preview_note(raw),
+        "textContent": raw.get("preview_text") or "",
+        "textTruncated": bool(raw.get("preview_text_truncated")),
+        "previewSource": raw.get("preview_source"),
+        "chunkCount": raw.get("chunk_count", 0),
+        "pageCount": None,
+        "raw": raw,
+    })
+
+
+@router.get("/student/courses/{class_id}/materials/{file_id}/download", response_model=None)
+def student_course_material_download(
+    class_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
+    return ok(data={
+        "fileId": material.id,
+        "fileName": material.file_name,
+        "downloadUrl": _material_download_url(cls.course_id, material.id, material.file_name),
+    })
+
+
 @router.get("/teacher/courses/{class_id}/materials", response_model=None)
 def teacher_course_materials(
     class_id: str,
@@ -1324,6 +1589,28 @@ async def teacher_upload_course_files(
     return ok(data={"files": results}, message="Files uploaded")
 
 
+@router.patch("/teacher/courses/{class_id}/files/{file_id}", response_model=None)
+def teacher_rename_course_file(
+    class_id: str,
+    file_id: str,
+    body: MaterialRenameRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
+    if material.class_id != cls.id:
+        raise NotFoundException("Material not found")
+    material.title = body.name.strip() or material.title
+    material.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(material)
+    return ok(data={
+        "id": material.id,
+        "name": material.title or material.file_name,
+    }, message="File renamed")
+
+
 @router.delete("/teacher/courses/{class_id}/files/{file_id}", response_model=None)
 async def teacher_delete_course_file(
     class_id: str,
@@ -1353,6 +1640,49 @@ async def teacher_delete_course_file(
         "graph_cleanup": graph_cleanup,
         "index_cleanup": index_cleanup,
     }, message="File deleted")
+
+
+@router.post("/teacher/courses/{class_id}/files/{file_id}/share", response_model=None)
+def teacher_share_course_file(
+    class_id: str,
+    file_id: str,
+    body: MaterialShareRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
+    if material.class_id != cls.id or not material.is_active:
+        raise NotFoundException("Material not found")
+    recipient_count = _publish_class_notifications(
+        db,
+        class_id=class_id,
+        notification_type="system",
+        title=f"课程资料分享：{material.title or material.file_name}",
+        content=body.message or "教师分享了一份课程资料，请及时查看。",
+        extra_data={
+            "source": "material_share",
+            "material_id": material.id,
+            "scope": body.scope,
+        },
+    )
+    db.add(Notification(
+        user_id=current_user.id,
+        type="system",
+        title=f"已分享资料：{material.title or material.file_name}",
+        content=body.message or "",
+        extra_data={
+            "class_id": class_id,
+            "source": "material_share",
+            "material_id": material.id,
+            "recipient_count": recipient_count,
+        },
+    ))
+    db.commit()
+    return ok(data={
+        "file_id": material.id,
+        "recipientCount": recipient_count,
+    }, message="File shared")
 
 
 @router.post("/teacher/courses/{class_id}/files/{file_id}/kb/retry", response_model=None)
@@ -1495,20 +1825,86 @@ def student_course_tasks(
 ):
     _class_or_404_with_access(db, class_id, current_user)
     tasks = course_service.list_tasks(db, class_id, published_only=True)
+    task_ids = [item["id"] for item in tasks]
+    task_by_id = {
+        task.id: task
+        for task in db.query(Task).filter(Task.id.in_(task_ids)).all()
+    } if task_ids else {}
+    submissions = {
+        submission.task_id: submission
+        for submission in db.query(Submission).filter(
+            Submission.student_id == current_user.id,
+            Submission.task_id.in_(task_ids),
+        ).all()
+    } if task_ids else {}
     return ok(data={
         "tasks": [
             {
                 "id": item["id"],
                 "title": item["title"],
                 "deadline": _iso(item.get("due_date")),
-                "status": "待完成",
-                "score": None,
-                "urgent": False,
-                "questions": [],
+                "status": _student_task_status(
+                    task_by_id[item["id"]],
+                    submissions.get(item["id"]),
+                ),
+                "score": submissions.get(item["id"]).score if submissions.get(item["id"]) else None,
+                "urgent": bool(item.get("due_date") and not submissions.get(item["id"])),
+                "questions": _task_questions_for_student(task_by_id[item["id"]]),
+                "isExam": item.get("task_type") == "exam",
+                "teacherComment": submissions.get(item["id"]).feedback if submissions.get(item["id"]) else None,
             }
             for item in tasks
+            if item["id"] in task_by_id
         ]
     })
+
+
+@router.post("/student/courses/{class_id}/tasks/{task_id}/submissions", response_model=None)
+def student_submit_course_task(
+    class_id: str,
+    task_id: str,
+    body: CourseSubmissionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    task = db.query(Task).filter(Task.id == str(task_id), Task.class_id == cls.id).first()
+    if not task:
+        raise NotFoundException("Task not found")
+    file_path = body.file_path or body.filePath
+    if not file_path and body.attachments:
+        file_path = ",".join(str(item) for item in body.attachments if item)
+    content = body.content
+    if content is None and body.answers is not None:
+        content = json.dumps({
+            "answers": body.answers,
+            "taskType": body.taskType or task.task_type,
+        }, ensure_ascii=False)
+    submission = task_service.submit_task(
+        db,
+        task_id=task.id,
+        student=current_user,
+        content=content,
+        file_path=file_path,
+    )
+    db.add(Notification(
+        user_id=cls.teacher_id,
+        type="system",
+        title=f"作业提交：{task.title}",
+        content=f"{current_user.real_name or current_user.email} 已提交任务。",
+        extra_data={
+            "class_id": class_id,
+            "task_id": task.id,
+            "submission_id": submission.id,
+            "source": "task_submission",
+        },
+    ))
+    db.commit()
+    return ok(data={
+        "id": submission.id,
+        "status": submission.status,
+        "submittedAt": _iso(submission.submitted_at),
+    }, message="Task submitted")
 
 
 @router.get("/teacher/courses/{class_id}/tasks", response_model=None)
@@ -1639,6 +2035,52 @@ def teacher_delete_course_task(
         db.add(cls)
     db.commit()
     return ok(data={"id": notice_id, "type": "notice", "deleted": True}, message="Notice deleted")
+
+
+@router.post("/teacher/courses/{class_id}/tasks/{task_id}/submissions/{submission_id}/grade", response_model=None)
+def teacher_grade_course_submission(
+    class_id: str,
+    task_id: str,
+    submission_id: str,
+    body: GradeSubmissionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _teacher_class_or_404(db, class_id, current_user)
+    task = db.query(Task).filter(Task.id == task_id, Task.class_id == cls.id).first()
+    if not task:
+        raise NotFoundException("Task not found")
+    submission = db.query(Submission).filter(
+        Submission.id == submission_id,
+        Submission.task_id == task.id,
+    ).first()
+    if not submission:
+        raise NotFoundException("Submission not found")
+    submission.score = max(0, min(int(body.score), int(task.max_score or 100)))
+    submission.feedback = body.feedback or ""
+    submission.status = "graded"
+    submission.graded_at = datetime.now(timezone.utc)
+    db.add(Notification(
+        user_id=submission.student_id,
+        type="system",
+        title=f"任务已批改：{task.title}",
+        content=f"得分：{submission.score}。{submission.feedback or ''}".strip(),
+        extra_data={
+            "class_id": class_id,
+            "task_id": task.id,
+            "submission_id": submission.id,
+            "source": "task_graded",
+        },
+    ))
+    db.commit()
+    db.refresh(submission)
+    return ok(data={
+        "id": submission.id,
+        "score": submission.score,
+        "feedback": submission.feedback,
+        "status": submission.status,
+        "gradedAt": _iso(submission.graded_at),
+    }, message="Submission graded")
 
 
 @router.post("/teacher/courses/{class_id}/notices", response_model=None)
@@ -2267,7 +2709,69 @@ def student_course_questions(
     current_user: User = Depends(get_current_student),
 ):
     _class_or_404_with_access(db, class_id, current_user)
-    return ok(data={"questions": []})
+    rows = (
+        db.query(Discussion)
+        .filter(
+            Discussion.class_id == class_id,
+            Discussion.author_id == current_user.id,
+            Discussion.parent_id == None,
+            Discussion.is_active == True,
+        )
+        .order_by(Discussion.created_at.desc())
+        .all()
+    )
+    return ok(data={
+        "questions": [
+            {
+                "id": row.id,
+                "title": _question_display_title(row.title),
+                "content": row.content or "",
+                "time": _iso(row.created_at),
+                "status": "answered" if any(
+                    reply.get("isTeacher")
+                    for reply in [_discussion_reply_payload(db, item) for item in _discussion_replies(db, row.id)]
+                ) else "pending",
+                "replies": [_discussion_reply_payload(db, item) for item in _discussion_replies(db, row.id)],
+            }
+            for row in rows
+            if _is_question_discussion(row)
+        ]
+    })
+
+
+@router.post("/student/courses/{class_id}/questions", response_model=None)
+def student_create_course_question(
+    class_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    question = Discussion(
+        class_id=class_id,
+        author_id=current_user.id,
+        title=_question_storage_title(body.title),
+        content=body.content.strip(),
+    )
+    db.add(question)
+    db.flush()
+    cls = db.query(Class).filter(Class.id == class_id).first()
+    if cls:
+        db.add(Notification(
+            user_id=cls.teacher_id,
+            type="system",
+            title=f"学生提问：{_question_display_title(question.title)}",
+            content=question.content[:300],
+            extra_data={
+                "class_id": class_id,
+                "question_id": question.id,
+                "source": "student_question",
+                "attachments": body.attachments,
+            },
+        ))
+    db.commit()
+    db.refresh(question)
+    return ok(data={"id": question.id}, message="Question submitted")
 
 
 @router.get("/teacher/courses/{class_id}/questions", response_model=None)
@@ -2277,7 +2781,144 @@ def teacher_course_questions(
     current_user: User = Depends(get_current_teacher),
 ):
     _class_or_404_with_access(db, class_id, current_user)
-    return ok(data={"questions": []})
+    rows = (
+        db.query(Discussion)
+        .filter(
+            Discussion.class_id == class_id,
+            Discussion.parent_id == None,
+            Discussion.is_active == True,
+        )
+        .order_by(Discussion.created_at.desc())
+        .all()
+    )
+    questions = []
+    for row in rows:
+        if not _is_question_discussion(row):
+            continue
+        replies = [_discussion_reply_payload(db, item) for item in _discussion_replies(db, row.id)]
+        questions.append({
+            "id": row.id,
+            "student": _discussion_author_name(db, row.author_id),
+            "question": row.content or _question_display_title(row.title),
+            "confidence": "人工提问",
+            "time": _iso(row.created_at),
+            "status": "answered" if any(reply.get("isTeacher") for reply in replies) else "pending",
+            "replies": replies,
+        })
+    return ok(data={"questions": questions})
+
+
+def _reply_course_question(
+    *,
+    class_id: str,
+    question_id: str,
+    body: CourseContentRequest,
+    db: Session,
+    current_user: User,
+) -> dict[str, Any]:
+    _class_or_404_with_access(db, class_id, current_user)
+    question = db.query(Discussion).filter(
+        Discussion.id == str(question_id),
+        Discussion.class_id == class_id,
+        Discussion.parent_id == None,
+        Discussion.is_active == True,
+    ).first()
+    if not question or not _is_question_discussion(question):
+        raise NotFoundException("Question not found")
+    reply = Discussion(
+        class_id=class_id,
+        author_id=current_user.id,
+        content=body.content.strip(),
+        parent_id=question.id,
+    )
+    db.add(reply)
+    if current_user.role == "teacher":
+        db.add(Notification(
+            user_id=question.author_id,
+            type="system",
+            title=f"教师回复：{_question_display_title(question.title)}",
+            content=reply.content[:300],
+            extra_data={
+                "class_id": class_id,
+                "question_id": question.id,
+                "source": "teacher_question_reply",
+            },
+        ))
+    db.commit()
+    db.refresh(reply)
+    return {"id": reply.id, **_discussion_reply_payload(db, reply)}
+
+
+@router.post("/student/courses/{class_id}/questions/{question_id}/replies", response_model=None)
+def student_reply_course_question(
+    class_id: str,
+    question_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    return ok(data=_reply_course_question(
+        class_id=class_id,
+        question_id=question_id,
+        body=body,
+        db=db,
+        current_user=current_user,
+    ), message="Reply created")
+
+
+@router.post("/teacher/courses/{class_id}/questions/{question_id}/replies", response_model=None)
+def teacher_reply_course_question(
+    class_id: str,
+    question_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    return ok(data=_reply_course_question(
+        class_id=class_id,
+        question_id=question_id,
+        body=body,
+        db=db,
+        current_user=current_user,
+    ), message="Reply created")
+
+
+@router.post("/student/courses/{class_id}/teacher-help-requests", response_model=None)
+def student_request_teacher_help(
+    class_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    details = [
+        body.content.strip(),
+        f"申请原因：{body.reason}" if body.reason else "",
+        f"AI回答：{body.aiAnswer or body.ai_answer}" if (body.aiAnswer or body.ai_answer) else "",
+    ]
+    question = Discussion(
+        class_id=class_id,
+        author_id=current_user.id,
+        title=_question_storage_title(body.title or "AI 转人工申请"),
+        content="\n\n".join(item for item in details if item),
+    )
+    db.add(question)
+    db.flush()
+    db.add(Notification(
+        user_id=cls.teacher_id,
+        type="system",
+        title=f"AI 转人工：{_question_display_title(question.title)}",
+        content=question.content[:300],
+        extra_data={
+            "class_id": class_id,
+            "question_id": question.id,
+            "source": "teacher_help_request",
+            "reason": body.reason,
+        },
+    ))
+    db.commit()
+    db.refresh(question)
+    return ok(data={"id": question.id}, message="Teacher help request submitted")
 
 
 @router.get("/student/courses/{class_id}/faqs", response_model=None)
@@ -2287,7 +2928,37 @@ def student_course_faqs(
     current_user: User = Depends(get_current_student),
 ):
     _class_or_404_with_access(db, class_id, current_user)
-    return ok(data={"faqs": []})
+    rows = (
+        db.query(ReviewItem)
+        .filter(
+            ReviewItem.class_id == class_id,
+            ReviewItem.status == "resolved",
+            ReviewItem.teacher_answer.isnot(None),
+        )
+        .order_by(ReviewItem.reviewed_at.desc().nullslast(), ReviewItem.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    return ok(data={
+        "faqs": [
+            {
+                "id": index,
+                "title": _faq_title(item.question_content),
+                "date": _date(item.reviewed_at or item.created_at),
+                "views": 0,
+                "content": item.teacher_answer or item.ai_answer,
+                "attachments": [],
+            }
+            for index, item in enumerate(rows, start=1)
+        ]
+    })
+
+
+def _faq_title(question: str | None) -> str:
+    text = re.sub(r"\s+", " ", str(question or "课程答疑")).strip()
+    if len(text) <= 32:
+        return text
+    return f"{text[:32]}..."
 
 
 @router.get("/student/courses/{class_id}/discussions", response_model=None)
@@ -2311,23 +2982,205 @@ def teacher_course_discussions(
 
 
 def _discussion_payload(db: Session, class_id: str):
-    items = course_service.list_discussions(db, class_id)
+    items = (
+        db.query(Discussion)
+        .filter(
+            Discussion.class_id == class_id,
+            Discussion.parent_id == None,
+            Discussion.is_active == True,
+        )
+        .order_by(Discussion.is_pinned.desc(), Discussion.created_at.desc())
+        .all()
+    )
     return ok(data={
         "discussions": [
             {
-                "id": item["id"],
-                "student": item.get("author_name") or "用户",
-                "title": item.get("title") or "课程讨论",
-                "content": item.get("content") or "",
-                "replies": [],
-                "likes": item.get("likes") or 0,
-                "time": _iso(item.get("created_at")),
-                "pinned": bool(item.get("is_pinned")),
+                "id": item.id,
+                "student": _discussion_author_name(db, item.author_id),
+                "title": item.title or "课程讨论",
+                "content": item.content or "",
+                "replies": [_discussion_reply_payload(db, reply) for reply in _discussion_replies(db, item.id)],
+                "likes": item.likes or 0,
+                "time": _iso(item.created_at),
+                "pinned": bool(item.is_pinned),
                 "liked": False,
             }
             for item in items
+            if not _is_question_discussion(item)
         ]
     })
+
+
+@router.post("/student/courses/{class_id}/discussions", response_model=None)
+def student_create_course_discussion(
+    class_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    discussion = Discussion(
+        class_id=class_id,
+        author_id=current_user.id,
+        title=(body.title or "课程讨论").strip(),
+        content=body.content.strip(),
+    )
+    db.add(discussion)
+    db.commit()
+    db.refresh(discussion)
+    return ok(data={"id": discussion.id}, message="Discussion created")
+
+
+@router.post("/teacher/courses/{class_id}/discussions", response_model=None)
+def teacher_create_course_discussion(
+    class_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    discussion = Discussion(
+        class_id=class_id,
+        author_id=current_user.id,
+        title=(body.title or "课程讨论").strip(),
+        content=body.content.strip(),
+    )
+    db.add(discussion)
+    db.commit()
+    db.refresh(discussion)
+    return ok(data={"id": discussion.id}, message="Discussion created")
+
+
+def _reply_course_discussion(
+    *,
+    class_id: str,
+    discussion_id: str,
+    body: CourseContentRequest,
+    db: Session,
+    current_user: User,
+) -> dict[str, Any]:
+    _class_or_404_with_access(db, class_id, current_user)
+    parent = db.query(Discussion).filter(
+        Discussion.id == str(discussion_id),
+        Discussion.class_id == class_id,
+        Discussion.is_active == True,
+    ).first()
+    if not parent:
+        raise NotFoundException("Discussion not found")
+    reply = Discussion(
+        class_id=class_id,
+        author_id=current_user.id,
+        content=body.content.strip(),
+        parent_id=parent.id,
+    )
+    db.add(reply)
+    db.commit()
+    db.refresh(reply)
+    return {"id": reply.id, **_discussion_reply_payload(db, reply)}
+
+
+@router.post("/student/courses/{class_id}/discussions/{discussion_id}/replies", response_model=None)
+def student_reply_course_discussion(
+    class_id: str,
+    discussion_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    return ok(data=_reply_course_discussion(
+        class_id=class_id,
+        discussion_id=discussion_id,
+        body=body,
+        db=db,
+        current_user=current_user,
+    ), message="Reply created")
+
+
+@router.post("/teacher/courses/{class_id}/discussions/{discussion_id}/replies", response_model=None)
+def teacher_reply_course_discussion(
+    class_id: str,
+    discussion_id: str,
+    body: CourseContentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    return ok(data=_reply_course_discussion(
+        class_id=class_id,
+        discussion_id=discussion_id,
+        body=body,
+        db=db,
+        current_user=current_user,
+    ), message="Reply created")
+
+
+def _toggle_course_discussion_like(
+    *,
+    class_id: str,
+    discussion_id: str,
+    db: Session,
+    current_user: User,
+) -> dict[str, Any]:
+    _class_or_404_with_access(db, class_id, current_user)
+    discussion = db.query(Discussion).filter(
+        Discussion.id == str(discussion_id),
+        Discussion.class_id == class_id,
+        Discussion.is_active == True,
+    ).first()
+    if not discussion:
+        raise NotFoundException("Discussion not found")
+    discussion.likes = max(0, int(discussion.likes or 0) + 1)
+    db.commit()
+    return {"id": discussion.id, "likes": discussion.likes}
+
+
+@router.post("/student/courses/{class_id}/discussions/{discussion_id}/like", response_model=None)
+def student_like_course_discussion(
+    class_id: str,
+    discussion_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    return ok(data=_toggle_course_discussion_like(
+        class_id=class_id,
+        discussion_id=discussion_id,
+        db=db,
+        current_user=current_user,
+    ))
+
+
+@router.post("/teacher/courses/{class_id}/discussions/{discussion_id}/like", response_model=None)
+def teacher_like_course_discussion(
+    class_id: str,
+    discussion_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    return ok(data=_toggle_course_discussion_like(
+        class_id=class_id,
+        discussion_id=discussion_id,
+        db=db,
+        current_user=current_user,
+    ))
+
+
+@router.post("/teacher/courses/{class_id}/discussions/{discussion_id}/pin", response_model=None)
+def teacher_pin_course_discussion(
+    class_id: str,
+    discussion_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    discussion = db.query(Discussion).filter(
+        Discussion.id == str(discussion_id),
+        Discussion.class_id == class_id,
+        Discussion.is_active == True,
+    ).first()
+    if not discussion:
+        raise NotFoundException("Discussion not found")
+    discussion.is_pinned = not bool(discussion.is_pinned)
+    db.commit()
+    return ok(data={"id": discussion.id, "pinned": discussion.is_pinned})
 
 
 @router.get("/teacher/courses/{class_id}/students", response_model=None)
@@ -2337,15 +3190,8 @@ def teacher_course_students(
     current_user: User = Depends(get_current_teacher),
 ):
     _class_or_404_with_access(db, class_id, current_user)
-    members = db.query(ClassMember).filter(
-        ClassMember.class_id == class_id,
-        ClassMember.role == "student",
-    ).all()
     students = []
-    for index, membership in enumerate(members, start=1):
-        user = db.query(User).filter(User.id == membership.user_id).first()
-        if not user:
-            continue
+    for index, (_, user) in enumerate(_student_members_with_users(db, class_id), start=1):
         students.append({
             "id": index,
             "name": user.real_name,
@@ -2357,6 +3203,86 @@ def teacher_course_students(
             "status": "正常",
         })
     return ok(data={"students": students})
+
+
+@router.post("/teacher/courses/{class_id}/students/{student_id}/warning-reminders", response_model=None)
+def teacher_send_warning_reminder(
+    class_id: str,
+    student_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    student = _resolve_student_from_display_id(db, class_id, student_id)
+    if not student:
+        raise NotFoundException("Student not found")
+    db.add(Notification(
+        user_id=student.id,
+        type="system",
+        title="学习提醒",
+        content="教师提醒你关注近期学习进度，请及时查看课程任务和学习建议。",
+        extra_data={
+            "class_id": class_id,
+            "source": "teacher_warning_reminder",
+            "teacher_id": current_user.id,
+        },
+    ))
+    db.commit()
+    return ok(data={"studentId": student.student_id or student.id}, message="Reminder sent")
+
+
+@router.patch("/teacher/courses/{class_id}/students/group", response_model=None)
+def teacher_move_students_to_group(
+    class_id: str,
+    body: StudentGroupMoveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    target_group = body.targetGroup if body.targetGroup is not None else body.target_group
+    resolved = [
+        student for student in (
+            _resolve_student_from_display_id(db, class_id, item)
+            for item in body.studentIds
+        )
+        if student is not None
+    ]
+    # There is no group column in ClassMember yet, so keep this endpoint truthful:
+    # it lets the current UI continue while signalling that persistence needs a schema migration.
+    return ok(data={
+        "movedCount": len(resolved),
+        "targetGroup": target_group,
+        "persisted": False,
+    }, message="Group move accepted; persistence requires a student group schema")
+
+
+@router.post("/teacher/courses/{class_id}/students/export", response_model=None)
+def teacher_export_students(
+    class_id: str,
+    body: StudentExportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    students = []
+    for index, (_, user) in enumerate(_student_members_with_users(db, class_id), start=1):
+        students.append({
+            "id": index,
+            "name": user.real_name,
+            "studentId": user.student_id or user.id,
+            "email": user.email,
+            "group": 1,
+            "progress": 0,
+            "homework": 0,
+            "attendance": 100,
+            "status": "正常",
+        })
+    return ok(data={
+        "format": body.format,
+        "fields": body.fields,
+        "students": students,
+        "count": len(students),
+    }, message="Students exported")
 
 
 @router.get("/ai/recommendations", response_model=None)
@@ -2420,9 +3346,39 @@ def _personalized_item_to_legacy_ai_recommendation(item: dict[str, Any], *, inde
 @router.get("/ai/messages/{message_id}/sources", response_model=None)
 def ai_message_sources(
     message_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return ok(data=[])
+    message = (
+        db.query(ChatMessage)
+        .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+        .filter(ChatMessage.id == message_id)
+        .first()
+    )
+    if not message:
+        raise NotFoundException("Message not found")
+    session = message.session
+    if session.user_id != current_user.id:
+        teacher_access = (
+            current_user.role == "teacher"
+            and db.query(Class).filter(
+                Class.id == session.class_id,
+                Class.teacher_id == current_user.id,
+            ).first()
+        )
+        if not teacher_access and current_user.role != "admin":
+            raise ForbiddenException("You do not have access to this message")
+    sources = message.sources
+    if not sources and message.citations:
+        sources = [{
+            "name": citation.source_name,
+            "page": citation.page,
+            "type": citation.source_type,
+            "score": citation.score,
+            "chunk_id": citation.chunk_id,
+            **(citation.extra_data or {}),
+        } for citation in message.citations]
+    return ok(data=sources or [])
 
 
 @router.post("/ai/feedback", response_model=None)
@@ -2510,70 +3466,367 @@ def ai_style(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/teacher/ai/questions", response_model=None)
-def teacher_ai_questions(current_user: User = Depends(get_current_teacher)):
-    return ok(data=[])
+def teacher_ai_questions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    class_ids = _teacher_active_class_ids(db, current_user)
+    if not class_ids:
+        return ok(data=[])
+    rows = (
+        db.query(ReviewItem)
+        .filter(ReviewItem.class_id.in_(class_ids))
+        .order_by(ReviewItem.created_at.desc())
+        .limit(80)
+        .all()
+    )
+    return ok(data=[_teacher_ai_question_payload(db, item) for item in rows])
 
 
 @router.get("/teacher/ai/questions/{question_id}", response_model=None)
 def teacher_ai_question_detail(
-    question_id: int,
+    question_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    return ok(data={
-        "id": question_id,
-        "student": "",
-        "avatar": "",
-        "question": "",
-        "aiAnswer": "",
-        "confidence": 0,
-        "confidenceLevel": "low",
-        "sources": [],
-        "time": "",
-        "status": "pending",
-    })
+    item = _teacher_review_item_or_404(db, question_id, current_user)
+    return ok(data=_teacher_ai_question_payload(db, item))
 
 
 @router.post("/teacher/ai/questions/reply", response_model=None)
-def teacher_ai_question_reply(current_user: User = Depends(get_current_teacher)):
-    return ok(message="Reply recorded")
+def teacher_ai_question_reply(
+    body: TeacherAiQuestionReplyRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    item = _teacher_review_item_or_404(db, body.questionId, current_user)
+    item.teacher_answer = body.reply.strip()
+    item.status = "resolved"
+    item.reviewed_by = current_user.id
+    item.reviewed_at = datetime.now(timezone.utc)
+    if item.message:
+        item.message.needs_review = False
+    db.commit()
+    return ok(data=_teacher_ai_question_payload(db, item), message="Reply recorded")
 
 
 @router.post("/teacher/ai/questions/{question_id}/adopt", response_model=None)
 def teacher_ai_question_adopt(
-    question_id: int,
+    question_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    return ok(message="AI answer adopted")
+    item = _teacher_review_item_or_404(db, question_id, current_user)
+    item.teacher_answer = item.ai_answer
+    item.status = "resolved"
+    item.reviewed_by = current_user.id
+    item.reviewed_at = datetime.now(timezone.utc)
+    if item.message:
+        item.message.needs_review = False
+    db.commit()
+    return ok(data=_teacher_ai_question_payload(db, item), message="AI answer adopted")
 
 
 @router.get("/teacher/ai/feedback", response_model=None)
-def teacher_ai_feedback(current_user: User = Depends(get_current_teacher)):
-    return ok(data=[])
+def teacher_ai_feedback(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    class_ids = _teacher_active_class_ids(db, current_user)
+    if not class_ids:
+        return ok(data=[])
+    rows = (
+        db.query(ReviewItem)
+        .filter(ReviewItem.class_id.in_(class_ids), ReviewItem.status == "pending")
+        .order_by(ReviewItem.created_at.desc())
+        .limit(80)
+        .all()
+    )
+    return ok(data=[_teacher_ai_feedback_payload(db, item) for item in rows])
 
 
 @router.post("/teacher/ai/feedback/{feedback_id}/resolve", response_model=None)
 def teacher_ai_feedback_resolve(
     feedback_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    return ok(message="Feedback resolved")
+    item = _teacher_review_item_or_404(db, feedback_id, current_user)
+    item.status = "resolved"
+    item.reviewed_by = current_user.id
+    item.reviewed_at = datetime.now(timezone.utc)
+    if item.message:
+        item.message.needs_review = False
+    db.commit()
+    return ok(data=_teacher_ai_feedback_payload(db, item), message="Feedback resolved")
+
+
+def _teacher_active_class_ids(db: Session, teacher: User) -> list[str]:
+    return [
+        cls.id
+        for cls in db.query(Class).filter(
+            Class.teacher_id == teacher.id,
+            Class.is_active == True,
+        ).all()
+    ]
+
+
+def _teacher_review_item_or_404(db: Session, review_id: str, teacher: User) -> ReviewItem:
+    class_ids = _teacher_active_class_ids(db, teacher)
+    item = db.query(ReviewItem).filter(
+        ReviewItem.id == str(review_id),
+        ReviewItem.class_id.in_(class_ids),
+    ).first() if class_ids else None
+    if not item:
+        raise NotFoundException("Review item not found")
+    return item
+
+
+def _confidence_level(value: float | None) -> str:
+    confidence = float(value or 0.0)
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.55:
+        return "medium"
+    return "low"
+
+
+def _review_sources_for_teacher(item: ReviewItem) -> list[dict[str, Any]]:
+    message = item.message
+    raw_sources = (message.sources if message else None) or []
+    if not raw_sources and message and message.citations:
+        raw_sources = [{
+            "name": citation.source_name,
+            "page": citation.page,
+            "type": citation.source_type,
+            "score": citation.score,
+            "chunk_id": citation.chunk_id,
+        } for citation in message.citations]
+    result = []
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        result.append({
+            "name": source.get("name") or source.get("file") or source.get("source") or "课程资料",
+            "page": int(source.get("page") or source.get("page_start") or 0),
+        })
+    return result
+
+
+def _teacher_ai_question_payload(db: Session, item: ReviewItem) -> dict[str, Any]:
+    student = db.query(User).filter(User.id == item.student_id).first()
+    confidence = item.message.confidence if item.message else 0.0
+    status = "pending"
+    if item.status == "resolved":
+        status = "adopted" if (item.teacher_answer or "").strip() == (item.ai_answer or "").strip() else "replied"
+    return {
+        "id": item.id,
+        "student": student.real_name if student else "学生",
+        "avatar": student.real_name[:1] if student and student.real_name else "学",
+        "question": item.question_content,
+        "aiAnswer": item.ai_answer,
+        "confidence": round(float(confidence or 0.0) * 100),
+        "confidenceLevel": _confidence_level(confidence),
+        "sources": _review_sources_for_teacher(item),
+        "time": _iso(item.created_at),
+        "status": status,
+        "teacherReply": item.teacher_answer,
+    }
+
+
+def _teacher_ai_feedback_payload(db: Session, item: ReviewItem) -> dict[str, Any]:
+    student = db.query(User).filter(User.id == item.student_id).first()
+    cls = db.query(Class).filter(Class.id == item.class_id).first()
+    return {
+        "id": item.id,
+        "messageId": item.message_id,
+        "classId": item.class_id,
+        "studentId": item.student_id,
+        "studentName": student.real_name if student else "学生",
+        "conversationTitle": cls.name if cls else "课程对话",
+        "questionContent": item.question_content,
+        "aiAnswer": item.ai_answer,
+        "teacherAnswer": item.teacher_answer,
+        "reason": item.message.feedback_reason if item.message and item.message.feedback_reason else item.trigger,
+        "timestamp": _iso(item.created_at),
+        "status": "resolved" if item.status == "resolved" else "pending",
+        "trigger": item.trigger,
+        "reviewContext": item.message.sources if item.message else {},
+    }
 
 
 @router.post("/teacher/ai/tools/lesson-plan", response_model=None)
-def teacher_ai_lesson_plan(current_user: User = Depends(get_current_teacher)):
-    return ok(data="教案生成接口已接入，后续可进一步连接课程知识库和生成模型。")
+def teacher_ai_lesson_plan(
+    body: TeacherToolRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    context = _teacher_tool_context(db, current_user)
+    material_lines = "\n".join(f"- {item}" for item in context["materials"][:6]) or "- 暂无已上传资料"
+    task_lines = "\n".join(f"- {item}" for item in context["tasks"][:4]) or "- 暂无近期任务"
+    prompt = body.prompt.strip() or "请基于当前课程生成一份教学设计"
+    return ok(data=(
+        f"# 教案草稿\n\n"
+        f"## 生成要求\n{prompt}\n\n"
+        f"## 课程上下文\n"
+        f"- 班级数：{context['class_count']}\n"
+        f"- 学生数：{context['student_count']}\n"
+        f"- 待审核 AI 回答：{context['pending_reviews']}\n\n"
+        f"## 可参考资料\n{material_lines}\n\n"
+        f"## 近期任务\n{task_lines}\n\n"
+        f"## 建议教学流程\n"
+        f"1. 导入：用 1 个贴近学生已有问题的情境引出本节主题。\n"
+        f"2. 概念讲解：围绕资料中的核心概念，拆成 3 个递进知识点。\n"
+        f"3. 例题演示：选择一个容易出错的步骤做板书/屏幕演示。\n"
+        f"4. 课堂练习：安排 2 道基础题和 1 道迁移题，要求学生说明理由。\n"
+        f"5. 形成性评价：用 AI 助教收集学生疑问，低置信回答进入教师审核。\n"
+        f"6. 课后巩固：把本节关键概念生成闪卡，并将错误率高的问题加入错题本。\n"
+    ))
 
 
 @router.post("/teacher/ai/tools/exam", response_model=None)
-def teacher_ai_exam(current_user: User = Depends(get_current_teacher)):
-    return ok(data="试题生成接口已接入，后续可进一步连接课程知识库和生成模型。")
+def teacher_ai_exam(
+    body: TeacherToolRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    context = _teacher_tool_context(db, current_user)
+    concepts = context["concepts"][:6] or ["核心概念", "资料理解", "综合应用"]
+    prompt = body.prompt.strip() or "请生成一份阶段测验"
+    questions = []
+    for index, concept in enumerate(concepts[:5], start=1):
+        questions.append(
+            f"{index}. 【简答题】围绕“{concept}”设计一道能够检验理解深度的问题，并要求学生写出关键推理过程。"
+        )
+    return ok(data=(
+        f"# 试题草稿\n\n"
+        f"## 生成要求\n{prompt}\n\n"
+        f"## 命题范围\n" + "\n".join(f"- {concept}" for concept in concepts) + "\n\n"
+        f"## 题目建议\n" + "\n".join(questions) + "\n\n"
+        f"## 评分建议\n"
+        f"- 概念准确：40%\n"
+        f"- 推理过程：35%\n"
+        f"- 表达与规范：15%\n"
+        f"- 能结合课程资料或案例：10%\n"
+    ))
 
 
 @router.post("/teacher/ai/tools/learning-analysis", response_model=None)
-def teacher_ai_learning_analysis(current_user: User = Depends(get_current_teacher)):
-    return ok(data="学情分析接口已接入，后续可进一步聚合真实学习行为数据。")
+def teacher_ai_learning_analysis(
+    body: TeacherToolRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    context = _teacher_tool_context(db, current_user)
+    prompt = body.prompt.strip() or "请生成当前班级学情分析"
+    return ok(data=(
+        f"# 学情分析草稿\n\n"
+        f"## 分析要求\n{prompt}\n\n"
+        f"## 当前数据概况\n"
+        f"- 班级数：{context['class_count']}\n"
+        f"- 学生数：{context['student_count']}\n"
+        f"- 已发布任务：{context['task_count']}\n"
+        f"- 课程资料：{context['material_count']}\n"
+        f"- 待审核 AI 回答：{context['pending_reviews']}\n\n"
+        f"## 教学风险\n"
+        f"- 若待审核回答较多，说明学生问题集中或资料证据不足，应优先处理审核队列。\n"
+        f"- 若任务数较少，建议补充形成性练习以支撑学生画像。\n"
+        f"- 若资料数较少，个性化推荐和 RAG 检索覆盖面会受限。\n\n"
+        f"## 后续建议\n"
+        f"1. 对低掌握知识点补充讲解资料。\n"
+        f"2. 将高频错误问题发布为集中答疑。\n"
+        f"3. 把教师纠错回流到班级知识库，提升后续 AI 助教稳定性。\n"
+    ))
 
 
 @router.post("/teacher/ai/tools/flashcards", response_model=None)
-def teacher_ai_flashcards(current_user: User = Depends(get_current_teacher)):
-    return ok(data="闪卡生成接口已接入，后续可进一步结合知识点和错题记录。")
+def teacher_ai_flashcards(
+    body: TeacherToolRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    context = _teacher_tool_context(db, current_user)
+    concepts = context["concepts"][:8] or ["课程核心概念", "关键步骤", "易错点"]
+    cards = "\n".join(
+        f"{index}. 正面：{concept} 是什么？\n   背面：请用课程资料中的定义、例子和常见误区进行回答。"
+        for index, concept in enumerate(concepts, start=1)
+    )
+    prompt = body.prompt.strip() or "请生成学生复习闪卡"
+    return ok(data=(
+        f"# 闪卡草稿\n\n"
+        f"## 生成要求\n{prompt}\n\n"
+        f"{cards}\n\n"
+        f"## 使用建议\n"
+        f"- 初次学习后立即复习一次。\n"
+        f"- 选择“忘记/模糊”的卡片自动进入次日复习。\n"
+        f"- 与错题本联动，把反复遗忘的卡片转为针对性练习。\n"
+    ))
+
+
+def _teacher_tool_context(db: Session, teacher: User) -> dict[str, Any]:
+    classes = db.query(Class).filter(
+        Class.teacher_id == teacher.id,
+        Class.is_active == True,
+    ).order_by(Class.created_at.desc()).all()
+    class_ids = [cls.id for cls in classes]
+    materials = (
+        db.query(Material)
+        .filter(Material.class_id.in_(class_ids), Material.is_active == True)
+        .order_by(Material.created_at.desc())
+        .limit(12)
+        .all()
+        if class_ids
+        else []
+    )
+    tasks = (
+        db.query(Task)
+        .filter(Task.class_id.in_(class_ids))
+        .order_by(Task.created_at.desc())
+        .limit(8)
+        .all()
+        if class_ids
+        else []
+    )
+    entities = (
+        db.query(KnowledgeEntity)
+        .filter(KnowledgeEntity.class_id.in_(class_ids), KnowledgeEntity.status != "rejected")
+        .order_by(KnowledgeEntity.confidence.desc(), KnowledgeEntity.created_at.desc())
+        .limit(12)
+        .all()
+        if class_ids
+        else []
+    )
+    student_count = (
+        db.query(ClassMember)
+        .filter(ClassMember.class_id.in_(class_ids), ClassMember.role == "student")
+        .count()
+        if class_ids
+        else 0
+    )
+    pending_reviews = (
+        db.query(ReviewItem)
+        .filter(ReviewItem.class_id.in_(class_ids), ReviewItem.status == "pending")
+        .count()
+        if class_ids
+        else 0
+    )
+    return {
+        "class_count": len(classes),
+        "student_count": student_count,
+        "material_count": len(materials),
+        "task_count": len(tasks),
+        "pending_reviews": pending_reviews,
+        "materials": [
+            f"{material.title or material.file_name}（{material.kb_status or 'pending'}）"
+            for material in materials
+        ],
+        "tasks": [
+            f"{task.title}（{task.task_type}，{'已发布' if task.is_published else '未发布'}）"
+            for task in tasks
+        ],
+        "concepts": [
+            entity.name
+            for entity in entities
+            if entity.name and not _looks_like_graph_noise_label(entity.name)
+        ],
+    }

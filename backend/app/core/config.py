@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=BASE_DIR / ".env",
+        env_file=(BASE_DIR / ".env", BASE_DIR / ".env.local"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     RAG_RETRIEVAL_STRATEGY: str = "hybrid"  # lexical | hybrid | graph
     RAG_RETRIEVAL_CANDIDATE_K: int = 12
     RAG_ANSWER_TOP_K: int = 3
+    RAG_LIGHTRAG_TOP_K: int = 12
+    RAG_LIGHTRAG_CHUNK_TOP_K: int = 6
+    RAG_LIGHTRAG_MAX_ENTITY_TOKENS: int = 2000
+    RAG_LIGHTRAG_MAX_RELATION_TOKENS: int = 3000
+    RAG_LIGHTRAG_MAX_TOTAL_TOKENS: int = 8000
     RAG_QUERY_REWRITE_ENABLED: bool = False
     RAG_QUERY_REWRITE_MODE: str = "hybrid"  # none | hybrid | compact | keywords; legacy simple maps to hybrid
     RAG_QUERY_REWRITE_MAX_VARIANTS: int = 3
@@ -173,6 +178,13 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     EMAIL_FROM: str = "noreply@ai-tutor.com"
     EMAIL_DEV_MODE: bool = True
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+    VERIFY_CODE_EXPIRE_MINUTES: int = 10
+    VERIFY_CODE_COOLDOWN_SECONDS: int = 60
+    VERIFY_CODE_DAILY_LIMIT: int = 10
+    AUTH_LOGIN_FAILURE_LIMIT: int = 5
+    AUTH_LOGIN_LOCK_SECONDS: int = 900
 
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
@@ -186,6 +198,8 @@ class Settings(BaseSettings):
         "REDIS_AVAILABLE",
         "MINIO_SECURE",
         "EMAIL_DEV_MODE",
+        "SMTP_USE_TLS",
+        "SMTP_USE_SSL",
         "KB_QUEUE_AUTO_RETRY_ENABLED",
         "KB_INDEX_ALERT_NOTIFY_ADMIN",
         "RAG_QUERY_REWRITE_ENABLED",
