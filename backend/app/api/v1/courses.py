@@ -50,6 +50,7 @@ def create_course(
             "id": course.id,
             "name": course.name,
             "code": course.code,
+            "graph_schema": course.graph_schema,
             "created_at": course.created_at,
         },
         message="Course created",

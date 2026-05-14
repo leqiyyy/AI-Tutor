@@ -45,6 +45,49 @@ export interface UpdateSystemSettingsPayload {
   };
 }
 
+export interface AdminModelConfig {
+  llm_provider?: string;
+  llm_model?: string;
+  llm_backend?: string;
+  llm_local_api_base?: string;
+  llm_temperature?: string | number;
+  llm_top_p?: string | number;
+  llm_enable_thinking?: boolean;
+  llm_thinking_budget?: string | number;
+  extract_model?: string;
+  extract_temperature?: string | number;
+  extract_top_p?: string | number;
+  extract_enable_thinking?: boolean;
+  extract_thinking_budget?: string | number;
+  embedding_model?: string;
+  embedding_backend?: string;
+  embedding_local_api_base?: string;
+  vlm_model?: string;
+  vlm_backend?: string;
+  vlm_local_api_base?: string;
+  vlm_temperature?: string | number;
+  vlm_top_p?: string | number;
+  vlm_enable_thinking?: boolean;
+  vlm_thinking_budget?: string | number;
+  reranker_provider?: string;
+  reranker_model?: string;
+  reranker_local_model?: string;
+  rag_engine?: string;
+  storage_backend?: string;
+  email_dev_mode?: boolean;
+}
+
+export interface AdminRagStorageConfig {
+  rag_storage_backend?: string;
+  vector_db_provider?: string;
+  vector_db_url?: string;
+  vector_db_collection?: string;
+  graph_db_provider?: string;
+  graph_db_url?: string;
+  graph_db_database?: string;
+  graph_db_username?: string;
+}
+
 export interface AdminAuditEvent {
   id: string;
   event_type: string;
@@ -138,5 +181,31 @@ export const adminService = {
       method: "PATCH",
       body: payload,
     });
+  },
+
+  async getModelConfig(): Promise<AdminModelConfig> {
+    return shouldUseMockApi ? {} : http<AdminModelConfig>("/admin/model-config");
+  },
+
+  async updateModelConfig(payload: AdminModelConfig): Promise<AdminModelConfig> {
+    return shouldUseMockApi
+      ? payload
+      : http<AdminModelConfig>("/admin/model-config", {
+          method: "PUT",
+          body: payload,
+        });
+  },
+
+  async getRagStorageConfig(): Promise<AdminRagStorageConfig> {
+    return shouldUseMockApi ? {} : http<AdminRagStorageConfig>("/admin/rag-storage-config");
+  },
+
+  async updateRagStorageConfig(payload: AdminRagStorageConfig): Promise<AdminRagStorageConfig> {
+    return shouldUseMockApi
+      ? payload
+      : http<AdminRagStorageConfig>("/admin/rag-storage-config", {
+          method: "PUT",
+          body: payload,
+        });
   },
 };

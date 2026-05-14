@@ -161,6 +161,16 @@ def practice_learning_mistake(
     return ok(data=student_learning_service.practice_learning_mistake(db, current_user, course_id, mistake_id))
 
 
+@router.post("/mistakes/{mistake_id}/similar-practice", response_model=None)
+def similar_practice_learning_mistake(
+    course_id: str,
+    mistake_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    return ok(data=student_learning_service.generate_similar_mistake_practice(db, current_user, course_id, mistake_id))
+
+
 @router.get("/flashcards", response_model=None)
 def learning_flashcards(
     course_id: str,

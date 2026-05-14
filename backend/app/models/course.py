@@ -17,6 +17,7 @@ class Course(Base):
     code = Column(String(50), nullable=True)
     description = Column(Text, nullable=True)
     cover_color = Column(String(20), default="#3b82f6")
+    graph_schema = Column(JSON, nullable=True)
     created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -37,6 +38,7 @@ class Class(Base):
     semester = Column(String(50), nullable=True)
     invite_code = Column(String(20), unique=True, nullable=False)
     announcement = Column(Text, nullable=True)
+    graph_schema = Column(JSON, nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
@@ -124,6 +126,7 @@ class Submission(Base):
     file_path = Column(String(500), nullable=True)
     score = Column(Integer, nullable=True)
     feedback = Column(Text, nullable=True)
+    extra_data = Column(JSON, nullable=True)
     status = Column(
         Enum("submitted", "graded", "late", "missing", name="submission_status"),
         default="submitted"

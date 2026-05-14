@@ -6,6 +6,7 @@ import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } 
 import { getNameInitial } from '@/lib/display';
 import { useAuth } from '@/hooks/use-auth';
 import { aiService } from '@/services/ai';
+import { learningService } from '@/services/learning';
 import { recommendationService } from '@/services/recommendations';
 import type {
   AiAttachment as AttachedFile,
@@ -119,6 +120,7 @@ const DISLIKE_REASONS = ['回答不准确', '答非所问', '解释太复杂', '
 
 type RightTab = 'quick' | 'recommend' | 'source';
 type RightPanelMode = 'closed' | 'standard' | 'wide';
+type StudentToolAction = 'flashcards' | 'mindmap' | 'summary' | 'weakness';
 
 function getSourceIconClass(type: string) {
   if (type === 'pdf') return 'ri-file-pdf-line text-red-500';
@@ -126,6 +128,17 @@ function getSourceIconClass(type: string) {
   if (type === 'ppt' || type === 'pptx') return 'ri-file-ppt-line text-orange-500';
   if (type === 'image') return 'ri-image-line text-green-600';
   return 'ri-file-text-line text-teal-600';
+}
+
+function parseFlashcardsFromText(content: string): Array<{ front: string; back: string }> {
+  const cards: Array<{ front: string; back: string }> = [];
+  const pattern = /(?:^|\n)\s*\d+[\.\)、)]\s*正面[:：]\s*(.+?)\n\s*背面[:：]\s*([\s\S]+?)(?=\n\s*\d+[\.\)、)]\s*正面[:：]|\n\s*##|\Z)/g;
+  for (const match of content.matchAll(pattern)) {
+    const front = match[1]?.replace(/\s+/g, ' ').trim();
+    const back = match[2]?.replace(/\s+/g, ' ').trim();
+    if (front && back) cards.push({ front, back });
+  }
+  return cards.slice(0, 20);
 }
 
 export default function AIAssistant() {
@@ -149,6 +162,8 @@ export default function AIAssistant() {
   const [showConvList, setShowConvList] = useState(true);
   const [rightTab, setRightTab] = useState<RightTab>('quick');
   const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>('standard');
+  const [toolLoadingAction, setToolLoadingAction] = useState<StudentToolAction | null>(null);
+  const [toolNotice, setToolNotice] = useState('');
 
   const [feedbackModal, setFeedbackModal] = useState<{ msgId: number } | null>(null);
   const [feedbackReason, setFeedbackReason] = useState('');
@@ -345,18 +360,18 @@ export default function AIAssistant() {
     }
   }, [rightPanelMode]);
 
-  const sendMessage = async () => {
-    const text = input.trim();
-    if ((!text && attachedFiles.length === 0) || isTyping) return;
+  const sendMessage = async (overrideText?: string, options?: { keepInput?: boolean }): Promise<Message | null> => {
+    const text = (overrideText ?? input).trim();
+    if ((!text && attachedFiles.length === 0) || isTyping) return null;
     const userMsg: Message = {
       id: Date.now(), role: 'user',
       content: text, time: getNow(),
-      attachments: attachedFiles.length > 0 ? [...attachedFiles] : undefined,
+      attachments: overrideText ? undefined : (attachedFiles.length > 0 ? [...attachedFiles] : undefined),
     };
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
-    setInput('');
-    setAttachedFiles([]);
+    if (!options?.keepInput) setInput('');
+    if (!overrideText) setAttachedFiles([]);
     setIsTyping(true);
     setProgressSteps([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
@@ -395,6 +410,7 @@ export default function AIAssistant() {
       }
       await refreshRecommendations(text, finalMessages);
       setProgressSteps([]);
+      return reply;
     } catch (error) {
       console.error('ai_send_message_failed', error);
       const aiMsg: Message = {
@@ -407,13 +423,14 @@ export default function AIAssistant() {
       setRecommendations(getLocalRecommendations(finalMessages));
       saveCurrentConversation(finalMessages);
       setProgressSteps([]);
+      return null;
     } finally {
       setIsTyping(false);
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendMessage(); }
   };
 
   const handleDeleteConversation = async (convId: number, e: React.MouseEvent) => {
@@ -454,12 +471,55 @@ export default function AIAssistant() {
       return <p key={i} className={line === '' ? 'mt-1' : 'leading-relaxed'} dangerouslySetInnerHTML={{ __html: bold }} />;
     });
 
-  const quickPrompts = [
-    { label: '生成学习闪卡', icon: 'ri-stack-line', color: 'text-teal-600', prompt: '请帮我生成本章节的学习闪卡' },
-    { label: '生成思维导图', icon: 'ri-mind-map', color: 'text-green-600', prompt: '请为本章节生成思维导图' },
-    { label: '生成学习摘要', icon: 'ri-file-list-3-line', color: 'text-amber-600', prompt: '请生成本章节的学习摘要' },
-    { label: '薄弱点分析', icon: 'ri-bar-chart-line', color: 'text-orange-600', prompt: '请分析我的薄弱知识点' },
+  const quickPrompts: Array<{ label: string; icon: string; color: string; prompt: string; action: StudentToolAction }> = [
+    { label: '生成学习闪卡', icon: 'ri-stack-line', color: 'text-teal-600', action: 'flashcards', prompt: '请结合当前课程资料生成 6 张中文学习闪卡，严格使用格式：1. 正面：...\\n   背面：...' },
+    { label: '生成思维导图', icon: 'ri-mind-map', color: 'text-green-600', action: 'mindmap', prompt: '请结合当前课程资料，用 Mermaid mindmap 语法生成本章节思维导图，并补充关键概念说明。' },
+    { label: '生成学习摘要', icon: 'ri-file-list-3-line', color: 'text-amber-600', action: 'summary', prompt: '请结合当前课程资料生成中文学习摘要，包含核心概念、易错点和复习建议。' },
+    { label: '薄弱点分析', icon: 'ri-bar-chart-line', color: 'text-orange-600', action: 'weakness', prompt: '请根据我最近的提问、错题和课程学习情况，分析薄弱知识点并给出下一步学习建议。' },
   ];
+
+  const runStudentTool = async (action: StudentToolAction, prompt: string) => {
+    if (toolLoadingAction || isTyping) return;
+    setToolLoadingAction(action);
+    setToolNotice('');
+    try {
+      const reply = await sendMessage(prompt);
+      if (action === 'flashcards' && reply?.content) {
+        if (!classId) {
+          setToolNotice('缺少班级上下文，无法保存闪卡。');
+          return;
+        }
+        let cards = parseFlashcardsFromText(reply.content);
+        if (cards.length === 0) {
+          cards = [{ front: '本次 AI 生成的学习要点是什么？', back: reply.content.slice(0, 4000) }];
+        }
+        await learningService.createFlashcardDeck(classId || '', {
+          name: `AI生成闪卡-${new Date().toISOString().slice(0, 10)}`,
+          cards,
+        });
+        setToolNotice(`已生成并保存 ${cards.length} 张个人学习闪卡。`);
+      } else if (reply) {
+        setToolNotice('工具结果已生成到当前对话。');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '工具执行失败，请稍后重试。';
+      setToolNotice(message);
+    } finally {
+      setToolLoadingAction(null);
+    }
+  };
+
+  const saveAiAnswerAsFlashcard = async (msg: Message) => {
+    if (!classId || msg.role !== 'ai' || msg.isWelcome) return;
+    const msgIndex = messages.findIndex(item => item.id === msg.id);
+    const previousQuestion = [...messages.slice(0, msgIndex)].reverse().find(item => item.role === 'user')?.content;
+    const front = previousQuestion?.trim() || '这段 AI 回答的关键内容是什么？';
+    await learningService.createFlashcardDeck(classId, {
+      name: `AI回答闪卡-${new Date().toISOString().slice(0, 10)}`,
+      cards: [{ front, back: msg.content }],
+    });
+    setToolNotice('已将当前问答保存为个人闪卡。');
+  };
 
   const resourceIcons: Record<string, { icon: string; color: string; bg: string }> = {
     material: { icon: 'ri-file-text-line', color: 'text-sky-600', bg: 'bg-sky-50' },
@@ -833,6 +893,13 @@ export default function AIAssistant() {
                             <i className="ri-thumb-down-fill text-xs"></i>已转交教师
                           </span>
                         )}
+                        <button
+                          onClick={() => { void saveAiAnswerAsFlashcard(msg); }}
+                          className="flex items-center gap-1 text-xs text-teal-600 hover:text-teal-700 cursor-pointer"
+                          title="将当前问答保存为个人闪卡"
+                        >
+                          <i className="ri-stack-line text-xs"></i>存为闪卡
+                        </button>
                       </>
                     )}
                   </div>
@@ -958,7 +1025,7 @@ export default function AIAssistant() {
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-gray-400 hidden sm:block">Enter 发送</span>
                   <button
-                    onClick={sendMessage}
+                    onClick={() => { void sendMessage(); }}
                     disabled={!canSend}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${canSend ? 'bg-teal-600 text-white hover:bg-teal-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}
                   >
@@ -1037,16 +1104,22 @@ export default function AIAssistant() {
                     {quickPrompts.map((item, i) => (
                       <button
                         key={i}
-                        onClick={() => { setInput(item.prompt); textareaRef.current?.focus(); }}
-                        className="flex flex-col items-center gap-1.5 px-2 py-3 text-xs font-medium text-gray-700 bg-gray-50 rounded-xl hover:bg-teal-50 hover:text-teal-700 transition-colors cursor-pointer border border-transparent hover:border-teal-100"
+                        onClick={() => { void runStudentTool(item.action, item.prompt); }}
+                        disabled={toolLoadingAction !== null || isTyping}
+                        className="flex flex-col items-center gap-1.5 px-2 py-3 text-xs font-medium text-gray-700 bg-gray-50 rounded-xl hover:bg-teal-50 hover:text-teal-700 transition-colors cursor-pointer border border-transparent hover:border-teal-100 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <div className="w-8 h-8 flex items-center justify-center">
-                          <i className={`${item.icon} ${item.color} text-lg`}></i>
+                          <i className={`${toolLoadingAction === item.action ? 'ri-loader-4-line animate-spin text-teal-600' : item.icon} ${toolLoadingAction === item.action ? '' : item.color} text-lg`}></i>
                         </div>
-                        <span className="text-center leading-tight">{item.label}</span>
+                        <span className="text-center leading-tight">{toolLoadingAction === item.action ? '执行中...' : item.label}</span>
                       </button>
                     ))}
                   </div>
+                  {toolNotice && (
+                    <div className="mt-3 rounded-lg border border-teal-100 bg-teal-50 px-3 py-2 text-xs text-teal-700">
+                      {toolNotice}
+                    </div>
+                  )}
                 </div>
 
                 {/* 对话风格 */}

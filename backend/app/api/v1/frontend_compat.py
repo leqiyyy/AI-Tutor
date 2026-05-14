@@ -3,6 +3,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import uuid
 from typing import Any
 from urllib.parse import quote
@@ -16,15 +17,18 @@ from app.api.v1 import kb as kb_api
 from app.core.deps import get_current_admin, get_current_student, get_current_teacher, get_current_user
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.core.response import ok
+from app.core.timezone import date_app_timezone, isoformat_app_timezone
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Submission, Task
 from app.models.chat import ChatMessage, ChatSession, ReviewItem
-from app.models.knowledge import KnowledgeEntity, KnowledgeRelation
+from app.models.knowledge import Flashcard, KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.personalization import LearningConcept, StudentConceptMastery
+from app.models.analytics import LearningRecord, StudyMistake
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
 from app.services import auth_service, course_service, kb_service, personalized_recommendation_service, task_service
+from app import storage
 
 router = APIRouter(tags=["frontend-compat"])
 
@@ -106,7 +110,7 @@ class TeacherHomeworkRequest(BaseModel):
     deadline: Any | None = None
     allowLate: bool = False
     questions: list[dict[str, Any]] = Field(default_factory=list)
-    attachments: list[str] = Field(default_factory=list)
+    attachments: list[Any] = Field(default_factory=list)
 
 
 class TeacherExamRequest(BaseModel):
@@ -116,7 +120,7 @@ class TeacherExamRequest(BaseModel):
     duration: int = 90
     totalScore: int = 100
     questions: list[dict[str, Any]] = Field(default_factory=list)
-    attachments: list[str] = Field(default_factory=list)
+    attachments: list[Any] = Field(default_factory=list)
 
 
 class TeacherTaskStatusRequest(BaseModel):
@@ -167,10 +171,13 @@ class CourseSubmissionRequest(BaseModel):
 class GradeSubmissionRequest(BaseModel):
     score: int
     feedback: str | None = None
+    questionGrades: list[dict[str, Any]] = Field(default_factory=list)
+    autoCreateMistakes: bool = True
 
 
 class TeacherToolRequest(BaseModel):
     prompt: str = ""
+    classId: str | None = None
 
 
 class TeacherAiQuestionReplyRequest(BaseModel):
@@ -178,20 +185,24 @@ class TeacherAiQuestionReplyRequest(BaseModel):
     reply: str
 
 
+class TeacherFlashcardDeckRequest(BaseModel):
+    name: str
+    content: str | None = None
+    cards: list[dict[str, Any]] = Field(default_factory=list)
+
+
 QUESTION_TITLE_PREFIX = "[student_question] "
 
 
 def _iso(value: Any) -> str:
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return isoformat_app_timezone(value)
     return ""
 
 
 def _date(value: Any) -> str:
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return date_app_timezone(value)
     return ""
 
 
@@ -253,9 +264,28 @@ def _material_preview_note(raw: dict[str, Any]) -> str:
     return "暂无可预览文本，可先下载原文件查看。"
 
 
+def _material_preview_status_payload(raw: dict[str, Any]) -> dict[str, bool]:
+    kb_status = str(raw.get("kb_status") or "").lower()
+    preview_text = str(raw.get("preview_text") or "")
+    return {
+        "downloadAvailable": True,
+        "textPreviewAvailable": bool(preview_text.strip()),
+        "retrievalAvailable": kb_status in {"indexed", "completed", "ready"},
+    }
+
+
 def _material_download_url(course_id: str, file_id: str, file_name: str | None = None) -> str:
     query = f"?filename={quote(file_name or '')}" if file_name else ""
     return f"/api/v1/courses/{course_id}/files/{file_id}/download{query}"
+
+
+def _task_attachment_scope(class_id: str) -> str:
+    return f"task-attachments/{class_id}"
+
+
+def _task_attachment_download_url(class_id: str, attachment_id: str, file_name: str | None = None) -> str:
+    query = f"?filename={quote(file_name or '')}" if file_name else ""
+    return f"/api/v1/courses/{class_id}/task-attachments/{attachment_id}/download{query}"
 
 
 def _course_image(seed: str) -> str:
@@ -729,7 +759,7 @@ def _extract_exam_start_time(task: Task) -> datetime | None:
     return _parse_datetime(match.group(1))
 
 
-def _task_questions_for_student(task: Task) -> list[dict[str, Any]]:
+def _task_questions_for_student(task: Task, *, include_solutions: bool = False) -> list[dict[str, Any]]:
     extra = _task_extra(task)
     structured_questions = extra.get("questions")
     if isinstance(structured_questions, list):
@@ -740,12 +770,21 @@ def _task_questions_for_student(task: Task) -> list[dict[str, Any]]:
             content = str(item.get("content") or item.get("description") or "").strip()
             if not content:
                 continue
-            questions.append({
+            question_payload = {
                 "id": int(item.get("id") or index),
                 "content": content,
                 "type": _normalize_frontend_question_type(str(item.get("type") or "")),
                 "answer": "",
-            })
+                "score": item.get("score"),
+                "maxScore": item.get("score"),
+            }
+            if include_solutions:
+                question_payload.update({
+                    "answer": str(item.get("answer") or item.get("correctAnswer") or "").strip(),
+                    "correctAnswer": str(item.get("answer") or item.get("correctAnswer") or "").strip(),
+                    "explanation": str(item.get("explanation") or item.get("analysis") or "").strip(),
+                })
+            questions.append(question_payload)
         if questions:
             return questions
 
@@ -769,6 +808,8 @@ def _task_questions_for_student(task: Task) -> list[dict[str, Any]]:
                 "content": content,
                 "type": question_type,
                 "answer": "",
+                "score": None,
+                "maxScore": None,
             })
     if not questions and description.strip():
         questions.append({
@@ -776,14 +817,321 @@ def _task_questions_for_student(task: Task) -> list[dict[str, Any]]:
             "content": description.strip(),
             "type": "text",
             "answer": "",
+            "score": None,
+            "maxScore": None,
         })
     return questions
 
 
+def _task_source_question_map(task: Task) -> dict[str, dict[str, Any]]:
+    source_questions = _task_extra(task).get("questions")
+    if not isinstance(source_questions, list):
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(source_questions, start=1):
+        if not isinstance(item, dict):
+            continue
+        question_id = str(item.get("id") or index)
+        result[question_id] = item
+    return result
+
+
+def _submission_extra(submission: Submission) -> dict[str, Any]:
+    return submission.extra_data if isinstance(submission.extra_data, dict) else {}
+
+
+def _submission_answers(submission: Submission) -> dict[str, Any]:
+    content = submission.content or ""
+    if not content.strip():
+        return {}
+    try:
+        parsed = json.loads(content)
+    except (TypeError, ValueError):
+        return {"1": content}
+    if isinstance(parsed, dict):
+        answers = parsed.get("answers")
+        if isinstance(answers, dict):
+            return answers
+    return {}
+
+
+def _normalize_question_grades(
+    task: Task,
+    submission: Submission,
+    raw_grades: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    question_map = {str(item["id"]): item for item in _task_questions_for_student(task)}
+    source_map = _task_source_question_map(task)
+    answers = _submission_answers(submission)
+    normalized: list[dict[str, Any]] = []
+
+    for raw in raw_grades:
+        if not isinstance(raw, dict):
+            continue
+        question_id = str(raw.get("questionId") or raw.get("id") or "").strip()
+        if not question_id:
+            continue
+        question = question_map.get(question_id, {})
+        source = source_map.get(question_id, {})
+        max_score = raw.get("maxScore", source.get("score"))
+        try:
+            max_score_value = float(max_score) if max_score not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            max_score_value = 0.0
+        try:
+            score_value = float(raw.get("score", 0) or 0)
+        except (TypeError, ValueError):
+            score_value = 0.0
+        correct = raw.get("correct")
+        if not isinstance(correct, bool):
+            correct = max_score_value <= 0 or score_value >= max_score_value
+        normalized.append({
+            "questionId": question_id,
+            "content": str(raw.get("content") or question.get("content") or source.get("content") or source.get("description") or "").strip(),
+            "answer": str(raw.get("answer") or answers.get(question_id) or "").strip(),
+            "correctAnswer": str(raw.get("correctAnswer") or source.get("answer") or "").strip(),
+            "score": round(score_value, 2),
+            "maxScore": round(max_score_value, 2),
+            "correct": correct,
+            "comment": str(raw.get("comment") or "").strip(),
+        })
+    return normalized
+
+
+def _normalize_objective_answer(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    normalized = (
+        text.replace("，", ",")
+        .replace("、", ",")
+        .replace("；", ",")
+        .replace(";", ",")
+        .replace(" ", "")
+        .upper()
+    )
+    if "," in normalized:
+        return sorted(item for item in normalized.split(",") if item)
+    if len(normalized) > 1 and all("A" <= char <= "H" for char in normalized):
+        return sorted(normalized)
+    return [normalized]
+
+
+def _auto_grade_submission(task: Task, submission: Submission) -> tuple[list[dict[str, Any]], bool, int]:
+    answers = _submission_answers(submission)
+    source_map = _task_source_question_map(task)
+    questions = _task_questions_for_student(task)
+    grades: list[dict[str, Any]] = []
+    all_auto_gradable = bool(questions)
+    total_score = 0.0
+
+    for question in questions:
+        question_id = str(question.get("id"))
+        source = source_map.get(question_id, {})
+        question_type = str(question.get("type") or source.get("type") or "text").lower()
+        max_score = float(question.get("score") or source.get("score") or 0)
+        student_answer = str(answers.get(question_id) or "").strip()
+        correct_answer = str(source.get("answer") or source.get("correctAnswer") or "").strip()
+        is_objective = question_type in {"single", "multiple", "judge"} and bool(correct_answer)
+
+        if is_objective:
+            correct = _normalize_objective_answer(student_answer) == _normalize_objective_answer(correct_answer)
+            score = max_score if correct else 0.0
+            total_score += score
+            comment = "自动批改：回答正确。" if correct else "自动批改：答案不匹配，请教师复核。"
+        else:
+            all_auto_gradable = False
+            correct = False
+            score = 0.0
+            comment = "待教师批改。"
+
+        grades.append({
+            "questionId": question_id,
+            "content": str(question.get("content") or source.get("content") or "").strip(),
+            "answer": student_answer,
+            "correctAnswer": correct_answer if is_objective else "",
+            "score": round(score, 2),
+            "maxScore": round(max_score, 2),
+            "correct": correct,
+            "comment": comment,
+            "autoGraded": is_objective,
+            "requiresManualReview": not is_objective,
+        })
+
+    return grades, all_auto_gradable, int(round(total_score))
+
+
+def _questions_with_submission_feedback(task: Task, submission: Submission | None) -> list[dict[str, Any]]:
+    questions = _task_questions_for_student(task)
+    if not submission:
+        return questions
+
+    answers = _submission_answers(submission)
+    is_graded = submission.status == "graded" or submission.score is not None
+    grades = {
+        str(item.get("questionId") or item.get("id")): item
+        for item in _submission_extra(submission).get("questionGrades", [])
+        if isinstance(item, dict)
+    }
+    enriched = []
+    for question in questions:
+        question_id = str(question.get("id"))
+        grade = grades.get(question_id) or {}
+        enriched_question = {
+            **question,
+            "answer": str(answers.get(question_id) or grade.get("answer") or ""),
+        }
+        if grade and is_graded:
+            enriched_question.update({
+                "correct": bool(grade.get("correct")),
+                "comment": grade.get("comment") or "",
+                "correctAnswer": grade.get("correctAnswer") or "",
+                "score": grade.get("score"),
+                "maxScore": grade.get("maxScore"),
+            })
+        enriched.append(enriched_question)
+    return enriched
+
+
+def _sync_submission_mistakes(
+    db: Session,
+    class_id: str,
+    task: Task,
+    submission: Submission,
+    question_grades: list[dict[str, Any]],
+) -> None:
+    now = datetime.now(timezone.utc)
+    for grade in question_grades:
+        is_wrong = grade.get("correct") is False
+        try:
+            max_score = float(grade.get("maxScore") or 0)
+            score = float(grade.get("score") or 0)
+        except (TypeError, ValueError):
+            max_score = 0
+            score = 0
+        if not is_wrong and max_score > 0:
+            is_wrong = score < max_score
+        if not is_wrong:
+            continue
+
+        question_text = str(grade.get("content") or "").strip()
+        if not question_text:
+            continue
+        mistake = db.query(StudyMistake).filter(
+            StudyMistake.user_id == submission.student_id,
+            StudyMistake.class_id == class_id,
+            StudyMistake.question == question_text,
+        ).first()
+        if mistake:
+            mistake.my_answer = grade.get("answer") or mistake.my_answer
+            mistake.correct_answer = grade.get("correctAnswer") or mistake.correct_answer
+            mistake.analysis = grade.get("comment") or submission.feedback or mistake.analysis
+            mistake.wrong_count = int(mistake.wrong_count or 0) + 1
+            mistake.mastered = 0
+            mistake.extra_data = {
+                **(mistake.extra_data or {}),
+                "source": "task_grading",
+                "task_id": task.id,
+                "task_title": task.title,
+                "task_type": task.task_type,
+                "submission_id": submission.id,
+                "question_id": grade.get("questionId") or grade.get("id"),
+                "synced_at": _iso(now),
+            }
+            mistake.updated_at = now
+        else:
+            db.add(StudyMistake(
+                user_id=submission.student_id,
+                class_id=class_id,
+                chapter=task.title,
+                question=question_text,
+                my_answer=grade.get("answer") or "",
+                correct_answer=grade.get("correctAnswer") or "",
+                analysis=grade.get("comment") or submission.feedback or "教师批改后自动加入错题本。",
+                wrong_count=1,
+                mastered=0,
+                extra_data={
+                    "source": "task_grading",
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "task_type": task.task_type,
+                    "submission_id": submission.id,
+                    "question_id": grade.get("questionId") or grade.get("id"),
+                    "synced_at": _iso(now),
+                },
+            ))
+
+
+def _task_question_stats(task: Task) -> list[dict[str, Any]]:
+    questions = _task_questions_for_student(task)
+    if not questions:
+        return []
+    stats = []
+    for question in questions:
+        question_id = str(question.get("id"))
+        submitted = 0
+        graded = 0
+        correct = 0
+        score_sum = 0.0
+        max_score = float(question.get("score") or 0)
+        for submission in task.submissions or []:
+            answers = _submission_answers(submission)
+            if str(question.get("id")) in answers:
+                submitted += 1
+            grade = next(
+                (
+                    item for item in (_submission_extra(submission).get("questionGrades") or [])
+                    if str(item.get("questionId") or item.get("id")) == question_id
+                ),
+                None,
+            )
+            if not isinstance(grade, dict):
+                continue
+            if grade.get("requiresManualReview") is True:
+                continue
+            graded += 1
+            try:
+                score = float(grade.get("score") or 0)
+                item_max_score = float(grade.get("maxScore") or max_score or 0)
+            except (TypeError, ValueError):
+                score = 0
+                item_max_score = max_score
+            max_score = max(max_score, item_max_score)
+            score_sum += score
+            is_correct = grade.get("correct") is True
+            if not is_correct and item_max_score > 0:
+                is_correct = score >= item_max_score
+            if is_correct:
+                correct += 1
+        stats.append({
+            "questionId": question.get("id"),
+            "title": f"第{question.get('id')}题",
+            "content": question.get("content") or "",
+            "type": question.get("type") or "text",
+            "maxScore": max_score,
+            "submittedCount": submitted,
+            "gradedCount": graded,
+            "correctCount": correct,
+            "wrongCount": max(0, graded - correct),
+            "correctRate": round(correct / graded * 100) if graded else 0,
+            "averageScore": round(score_sum / graded, 1) if graded else 0,
+        })
+    return stats
+
+
 def _normalize_frontend_question_type(value: str) -> str:
     normalized = value.strip().lower()
+    if any(token in normalized for token in ("single", "单选", "选择题", "单项选择")):
+        return "single"
+    if any(token in normalized for token in ("multiple", "多选", "多项选择")):
+        return "multiple"
+    if any(token in normalized for token in ("judge", "判断", "true", "false", "是非")):
+        return "judge"
     if any(token in normalized for token in ("code", "编程", "代码", "program")):
         return "code"
+    if any(token in normalized for token in ("short", "简答", "问答", "论述", "填空")):
+        return "text"
     return "text"
 
 
@@ -798,6 +1146,7 @@ def _homework_questions_payload(questions: list[dict[str, Any]]) -> list[dict[st
             "type": _normalize_frontend_question_type(str(question.get("type") or "")),
             "content": content,
             "answer": str(question.get("answer") or "").strip(),
+            "explanation": str(question.get("explanation") or question.get("analysis") or "").strip(),
             "score": question.get("score"),
         })
     return payload
@@ -813,9 +1162,98 @@ def _exam_questions_payload(questions: list[dict[str, Any]]) -> list[dict[str, A
             "id": index,
             "type": str(question.get("type") or "简答题").strip() or "简答题",
             "content": content,
+            "answer": str(question.get("answer") or question.get("correctAnswer") or "").strip(),
+            "explanation": str(question.get("explanation") or question.get("analysis") or "").strip(),
             "score": question.get("score"),
         })
     return payload
+
+
+def _task_attachments_payload(class_id: str, attachments: list[Any]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for item in attachments:
+        if isinstance(item, dict):
+            attachment_id = str(item.get("id") or item.get("storageKey") or item.get("storage_key") or "").strip()
+            file_name = str(item.get("fileName") or item.get("file_name") or item.get("name") or "").strip()
+            if not attachment_id or not file_name:
+                continue
+            payload.append({
+                "id": attachment_id,
+                "fileName": file_name,
+                "size": item.get("size"),
+                "mimeType": item.get("mimeType") or item.get("mime_type"),
+                "downloadUrl": item.get("downloadUrl") or _task_attachment_download_url(class_id, attachment_id, file_name),
+            })
+            continue
+        file_name = str(item or "").strip()
+        if file_name:
+            payload.append({
+                "id": "",
+                "fileName": file_name,
+                "size": None,
+                "mimeType": None,
+                "downloadUrl": "",
+            })
+    return payload
+
+
+def _teacher_student_payload(
+    db: Session,
+    *,
+    class_id: str,
+    membership: ClassMember,
+    user: User,
+    display_id: int,
+    task_total: int,
+    active_days: int,
+) -> dict[str, Any]:
+    submissions = (
+        db.query(Submission)
+        .join(Task, Task.id == Submission.task_id)
+        .filter(Task.class_id == class_id, Submission.student_id == user.id)
+        .all()
+    )
+    submitted_count = len({item.task_id for item in submissions})
+    graded_scores = [item.score for item in submissions if item.score is not None]
+    homework_percent = round((submitted_count / task_total) * 100) if task_total else 0
+
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+    records = (
+        db.query(LearningRecord)
+        .filter(
+            LearningRecord.class_id == class_id,
+            LearningRecord.user_id == user.id,
+            LearningRecord.created_at >= since,
+        )
+        .all()
+    )
+    active_day_count = len({item.created_at.date() for item in records if item.created_at})
+    attendance = round((active_day_count / active_days) * 100) if active_days else 100
+    progress = round((homework_percent * 0.65) + (attendance * 0.35))
+    status = "正常"
+    warning_reason = None
+    if task_total and submitted_count == 0:
+        status = "warning"
+        warning_reason = "尚未提交课程任务"
+    elif homework_percent < 60 or attendance < 40:
+        status = "warning"
+        warning_reason = "任务完成率或学习活跃度偏低"
+
+    return {
+        "id": display_id,
+        "name": user.real_name or user.email,
+        "studentId": user.student_id or user.id,
+        "group": membership.group_no or 1,
+        "progress": progress,
+        "homework": homework_percent,
+        "attendance": attendance,
+        "status": status,
+        "warningReason": warning_reason,
+        "averageScore": round(sum(graded_scores) / len(graded_scores), 1) if graded_scores else None,
+        "submittedTasks": submitted_count,
+        "totalTasks": task_total,
+        "activityCount30d": len(records),
+    }
 
 
 def _student_task_status(task: Task, submission: Submission | None) -> str:
@@ -872,6 +1310,7 @@ def _publish_class_notifications(
 
 def _teacher_task_item(task: Task, total: int) -> dict:
     extra = _task_extra(task)
+    attachments = _task_attachments_payload(task.class_id, extra.get("attachments") or [])
     return {
         "id": task.id,
         "type": task.task_type or "homework",
@@ -879,11 +1318,12 @@ def _teacher_task_item(task: Task, total: int) -> dict:
         "deadline": _iso(task.due_date),
         "startTime": extra.get("startTime") or extra.get("start_time"),
         "duration": extra.get("duration"),
+        "maxScore": task.max_score or 100,
         "submitted": len(task.submissions or []),
         "total": total,
         "status": _task_status(task),
         "publishDate": _date(task.created_at),
-        "attachments": extra.get("attachments") if isinstance(extra.get("attachments"), list) else [],
+        "attachments": attachments,
         "_sortAt": _iso(task.created_at),
     }
 
@@ -1601,6 +2041,7 @@ def student_course_material_preview(
         "previewSource": raw.get("preview_source"),
         "chunkCount": raw.get("chunk_count", 0),
         "pageCount": None,
+        **_material_preview_status_payload(raw),
         "raw": raw,
     })
 
@@ -1683,6 +2124,56 @@ async def teacher_upload_course_files(
         )
         results.append(response.get("data") if isinstance(response, dict) else response)
     return ok(data={"files": results}, message="Files uploaded")
+
+
+@router.post("/teacher/courses/{class_id}/task-attachments", response_model=None)
+async def teacher_upload_task_attachments(
+    class_id: str,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    _teacher_class_or_404(db, class_id, current_user)
+    attachments = []
+    for file in files:
+        suffix = os.path.splitext(file.filename or "")[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            storage_key, _ = storage.save_upload(_task_attachment_scope(class_id), file.filename or "file", tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        file_name = file.filename or "file"
+        attachments.append({
+            "id": storage_key,
+            "fileName": file_name,
+            "size": len(content),
+            "mimeType": file.content_type or "application/octet-stream",
+            "downloadUrl": _task_attachment_download_url(class_id, storage_key, file_name),
+        })
+    return ok(data={"attachments": attachments}, message="Task attachments uploaded")
+
+
+@router.get("/courses/{class_id}/task-attachments/{attachment_id}/download", response_class=FileResponse)
+def download_task_attachment(
+    class_id: str,
+    attachment_id: str,
+    filename: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _class_or_404_with_access(db, class_id, current_user)
+    file_path = storage.get_file_path(_task_attachment_scope(class_id), attachment_id)
+    if not file_path:
+        raise NotFoundException("Attachment not found")
+    return FileResponse(
+        path=file_path,
+        filename=filename or attachment_id,
+        media_type="application/octet-stream",
+    )
 
 
 @router.patch("/teacher/courses/{class_id}/files/{file_id}", response_model=None)
@@ -1893,6 +2384,7 @@ def teacher_course_material_preview(
         "textTruncated": bool(raw.get("preview_text_truncated")),
         "previewSource": raw.get("preview_source"),
         "chunkCount": raw.get("chunk_count", 0),
+        **_material_preview_status_payload(raw),
         "raw": raw,
     })
 
@@ -1945,10 +2437,14 @@ def student_course_tasks(
                 ),
                 "score": submissions.get(item["id"]).score if submissions.get(item["id"]) else None,
                 "urgent": bool(item.get("due_date") and not submissions.get(item["id"])),
-                "questions": _task_questions_for_student(task_by_id[item["id"]]),
+                "questions": _questions_with_submission_feedback(
+                    task_by_id[item["id"]],
+                    submissions.get(item["id"]),
+                ),
                 "isExam": item.get("task_type") == "exam",
                 "startTime": _task_extra(task_by_id[item["id"]]).get("startTime"),
                 "duration": _task_extra(task_by_id[item["id"]]).get("duration"),
+                "attachments": _task_attachments_payload(class_id, _task_extra(task_by_id[item["id"]]).get("attachments") or []),
                 "teacherComment": submissions.get(item["id"]).feedback if submissions.get(item["id"]) else None,
             }
             for item in tasks
@@ -1986,16 +2482,38 @@ def student_submit_course_task(
         content=content,
         file_path=file_path,
     )
+    question_grades, all_auto_gradable, auto_score = _auto_grade_submission(task, submission)
+    if question_grades:
+        submission.extra_data = {
+            **_submission_extra(submission),
+            "questionGrades": question_grades,
+            "autoGrading": {
+                "enabled": True,
+                "allAutoGradable": all_auto_gradable,
+                "gradedAt": _iso(datetime.now(timezone.utc)),
+            },
+        }
+        if all_auto_gradable:
+            submission.score = auto_score
+            submission.status = "graded"
+            submission.feedback = "客观题已由系统自动批改，教师仍可复核调整。"
+            submission.graded_at = datetime.now(timezone.utc)
+            _sync_submission_mistakes(db, class_id, task, submission, question_grades)
     db.add(Notification(
         user_id=cls.teacher_id,
         type="system",
-        title=f"作业提交：{task.title}",
-        content=f"{current_user.real_name or current_user.email} 已提交任务。",
+        title=f"{'考试' if task.task_type == 'exam' else '作业'}提交：{task.title}",
+        content=(
+            f"{current_user.real_name or current_user.email} 已提交任务。"
+            + ("客观题已自动批改。" if all_auto_gradable and question_grades else "")
+        ),
         extra_data={
             "class_id": class_id,
             "task_id": task.id,
             "submission_id": submission.id,
             "source": "task_submission",
+            "auto_graded": bool(question_grades),
+            "all_auto_gradable": all_auto_gradable,
         },
     ))
     db.commit()
@@ -2040,13 +2558,14 @@ def teacher_course_task_detail(
         return ok(data={
             **item,
             "description": task.description or "",
-            "questions": _task_questions_for_student(task),
+            "questions": _task_questions_for_student(task, include_solutions=True),
             "extraData": _task_extra(task),
             "requirements": [],
             "participantCount": total,
             "averageScore": round(sum(scores) / len(scores), 1) if scores else 0,
             "highestScore": max(scores) if scores else 0,
             "lowestScore": min(scores) if scores else 0,
+            "questionStats": _task_question_stats(task),
             "submissions": [
                 {
                     "id": submission.id,
@@ -2056,6 +2575,9 @@ def teacher_course_task_detail(
                     "status": "graded" if submission.score is not None else "submitted",
                     "submittedAt": _iso(submission.submitted_at),
                     "score": submission.score,
+                    "feedback": submission.feedback or "",
+                    "answers": _submission_answers(submission),
+                    "questionGrades": _submission_extra(submission).get("questionGrades", []),
                 }
                 for submission in task.submissions
             ],
@@ -2157,10 +2679,20 @@ def teacher_grade_course_submission(
     ).first()
     if not submission:
         raise NotFoundException("Submission not found")
+    question_grades = _normalize_question_grades(task, submission, body.questionGrades)
     submission.score = max(0, min(int(body.score), int(task.max_score or 100)))
     submission.feedback = body.feedback or ""
+    submission.extra_data = {
+        **_submission_extra(submission),
+        "questionGrades": question_grades,
+        "autoCreateMistakes": body.autoCreateMistakes,
+        "gradedBy": current_user.id,
+        "gradedAt": _iso(datetime.now(timezone.utc)),
+    }
     submission.status = "graded"
     submission.graded_at = datetime.now(timezone.utc)
+    if body.autoCreateMistakes and question_grades:
+        _sync_submission_mistakes(db, class_id, task, submission, question_grades)
     db.add(Notification(
         user_id=submission.student_id,
         type="system",
@@ -2181,6 +2713,7 @@ def teacher_grade_course_submission(
         "feedback": submission.feedback,
         "status": submission.status,
         "gradedAt": _iso(submission.graded_at),
+        "questionGrades": question_grades,
     }, message="Submission graded")
 
 
@@ -2237,6 +2770,7 @@ def teacher_create_homework(
 ):
     _teacher_class_or_404(db, class_id, current_user)
     structured_questions = _homework_questions_payload(body.questions)
+    attachments = _task_attachments_payload(class_id, body.attachments)
     question_text = "\n".join(
         f"{question['id']}. {question['content']}".strip()
         for question in structured_questions
@@ -2254,7 +2788,7 @@ def teacher_create_homework(
             "kind": "homework",
             "deadline": body.deadline,
             "allowLate": body.allowLate,
-            "attachments": body.attachments,
+            "attachments": attachments,
             "questions": structured_questions,
         },
     )
@@ -2270,7 +2804,7 @@ def teacher_create_homework(
             "source": "teacher_homework",
             "task_id": task.id,
             "allow_late": body.allowLate,
-            "attachments": body.attachments,
+            "attachments": attachments,
         },
     )
     db.commit()
@@ -2287,6 +2821,7 @@ def teacher_create_exam(
 ):
     _teacher_class_or_404(db, class_id, current_user)
     structured_questions = _exam_questions_payload(body.questions)
+    attachments = _task_attachments_payload(class_id, body.attachments)
     question_text = "\n".join(
         f"{question['id']}. [{question['type']}] {question['content']}".strip()
         for question in structured_questions
@@ -2312,7 +2847,7 @@ def teacher_create_exam(
             "endTime": body.endTime,
             "duration": body.duration,
             "totalScore": body.totalScore,
-            "attachments": body.attachments,
+            "attachments": attachments,
             "questions": structured_questions,
         },
     )
@@ -2328,7 +2863,7 @@ def teacher_create_exam(
             "source": "teacher_exam",
             "task_id": task.id,
             "duration": body.duration,
-            "attachments": body.attachments,
+            "attachments": attachments,
         },
     )
     db.commit()
@@ -3307,18 +3842,18 @@ def teacher_course_students(
     current_user: User = Depends(get_current_teacher),
 ):
     _class_or_404_with_access(db, class_id, current_user)
+    task_total = db.query(Task).filter(Task.class_id == class_id, Task.is_published == True).count()
     students = []
     for index, (membership, user) in enumerate(_student_members_with_users(db, class_id), start=1):
-        students.append({
-            "id": index,
-            "name": user.real_name,
-            "studentId": user.student_id or user.id,
-            "group": membership.group_no or 1,
-            "progress": 0,
-            "homework": 0,
-            "attendance": 100,
-            "status": "正常",
-        })
+        students.append(_teacher_student_payload(
+            db,
+            class_id=class_id,
+            membership=membership,
+            user=user,
+            display_id=index,
+            task_total=task_total,
+            active_days=30,
+        ))
     return ok(data={"students": students})
 
 
@@ -3387,19 +3922,20 @@ def teacher_export_students(
     current_user: User = Depends(get_current_teacher),
 ):
     _class_or_404_with_access(db, class_id, current_user)
+    task_total = db.query(Task).filter(Task.class_id == class_id, Task.is_published == True).count()
     students = []
     for index, (membership, user) in enumerate(_student_members_with_users(db, class_id), start=1):
-        students.append({
-            "id": index,
-            "name": user.real_name,
-            "studentId": user.student_id or user.id,
-            "email": user.email,
-            "group": membership.group_no or 1,
-            "progress": 0,
-            "homework": 0,
-            "attendance": 100,
-            "status": "正常",
-        })
+        payload = _teacher_student_payload(
+            db,
+            class_id=class_id,
+            membership=membership,
+            user=user,
+            display_id=index,
+            task_total=task_total,
+            active_days=30,
+        )
+        payload["email"] = user.email
+        students.append(payload)
     return ok(data={
         "format": body.format,
         "fields": body.fields,
@@ -3590,10 +4126,13 @@ def ai_style(current_user: User = Depends(get_current_user)):
 
 @router.get("/teacher/ai/questions", response_model=None)
 def teacher_ai_questions(
+    class_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
     class_ids = _teacher_active_class_ids(db, current_user)
+    if class_id:
+        class_ids = [item for item in class_ids if item == class_id]
     if not class_ids:
         return ok(data=[])
     rows = (
@@ -3784,7 +4323,7 @@ def teacher_ai_lesson_plan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    context = _teacher_tool_context(db, current_user)
+    context = _teacher_tool_context(db, current_user, body.classId)
     material_lines = "\n".join(f"- {item}" for item in context["materials"][:6]) or "- 暂无已上传资料"
     task_lines = "\n".join(f"- {item}" for item in context["tasks"][:4]) or "- 暂无近期任务"
     prompt = body.prompt.strip() or "请基于当前课程生成一份教学设计"
@@ -3813,7 +4352,7 @@ def teacher_ai_exam(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    context = _teacher_tool_context(db, current_user)
+    context = _teacher_tool_context(db, current_user, body.classId)
     concepts = context["concepts"][:6] or ["核心概念", "资料理解", "综合应用"]
     prompt = body.prompt.strip() or "请生成一份阶段测验"
     questions = []
@@ -3840,7 +4379,7 @@ def teacher_ai_learning_analysis(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    context = _teacher_tool_context(db, current_user)
+    context = _teacher_tool_context(db, current_user, body.classId)
     prompt = body.prompt.strip() or "请生成当前班级学情分析"
     return ok(data=(
         f"# 学情分析草稿\n\n"
@@ -3868,7 +4407,7 @@ def teacher_ai_flashcards(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
-    context = _teacher_tool_context(db, current_user)
+    context = _teacher_tool_context(db, current_user, body.classId)
     concepts = context["concepts"][:8] or ["课程核心概念", "关键步骤", "易错点"]
     cards = "\n".join(
         f"{index}. 正面：{concept} 是什么？\n   背面：请用课程资料中的定义、例子和常见误区进行回答。"
@@ -3886,11 +4425,79 @@ def teacher_ai_flashcards(
     ))
 
 
-def _teacher_tool_context(db: Session, teacher: User) -> dict[str, Any]:
+@router.post("/teacher/courses/{class_id}/flashcard-decks", response_model=None)
+def teacher_publish_flashcard_deck(
+    class_id: str,
+    body: TeacherFlashcardDeckRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    if cls.teacher_id != current_user.id:
+        raise ForbiddenException("Only the class teacher can publish flashcards")
+
+    cards = _normalize_teacher_flashcards(body.cards, body.content or "")
+    if not cards:
+        raise BadRequestException("No valid flashcards to publish")
+
+    students = (
+        db.query(ClassMember)
+        .filter(ClassMember.class_id == class_id, ClassMember.role == "student")
+        .all()
+    )
+    deck_name = (body.name or "").strip() or "教师发布闪卡"
+    created_count = 0
+    for member in students:
+        for card in cards:
+            db.add(Flashcard(
+                class_id=class_id,
+                user_id=member.user_id,
+                question=card["front"],
+                answer=card["back"],
+                tags=[deck_name, "teacher_published"],
+            ))
+            created_count += 1
+    db.commit()
+    return ok(data={
+        "deckName": deck_name,
+        "studentCount": len(students),
+        "cardCount": len(cards),
+        "createdCount": created_count,
+    }, message="Flashcard deck published")
+
+
+def _normalize_teacher_flashcards(cards: list[dict[str, Any]], content: str) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for item in cards or []:
+        front = str(item.get("front") or item.get("question") or "").strip()
+        back = str(item.get("back") or item.get("answer") or "").strip()
+        if front and back:
+            normalized.append({"front": front[:1000], "back": back[:4000]})
+    if normalized:
+        return normalized[:100]
+
+    text = (content or "").strip()
+    if not text:
+        return []
+    pattern = re.compile(
+        r"(?:^|\n)\s*\d+[\.\)、)]\s*正面[:：]\s*(?P<front>.+?)\n\s*背面[:：]\s*(?P<back>.+?)(?=\n\s*\d+[\.\)、)]\s*正面[:：]|\n\s*##|\Z)",
+        re.S,
+    )
+    for match in pattern.finditer(text):
+        front = re.sub(r"\s+", " ", match.group("front")).strip()
+        back = re.sub(r"\s+", " ", match.group("back")).strip()
+        if front and back:
+            normalized.append({"front": front[:1000], "back": back[:4000]})
+    return normalized[:100]
+
+
+def _teacher_tool_context(db: Session, teacher: User, class_id: str | None = None) -> dict[str, Any]:
     classes = db.query(Class).filter(
         Class.teacher_id == teacher.id,
         Class.is_active == True,
     ).order_by(Class.created_at.desc()).all()
+    if class_id:
+        classes = [cls for cls in classes if cls.id == class_id]
     class_ids = [cls.id for cls in classes]
     materials = (
         db.query(Material)

@@ -172,6 +172,31 @@ export const learningService = {
     );
   },
 
+  async generateSimilarMistakePractice(
+    courseId: string,
+    mistakeId: string | number,
+  ): Promise<MistakePracticeData> {
+    if (shouldUseMockApi) {
+      const data = await getMockMistakes();
+      const mistake = data.mistakes.find((item) => item.id === mistakeId) || data.mistakes[0];
+      return {
+        mistakeId,
+        prompt: `相似练习：请围绕同一知识点完成一道变式题，并说明理由。\n\n原错题：${mistake?.question || ""}`,
+        answerHint: mistake?.correctAnswer || "",
+        analysis: mistake?.analysis || "",
+        lastPracticeTime: new Date().toISOString().slice(0, 10),
+        mistake: mistake || data.mistakes[0],
+      };
+    }
+
+    return http<MistakePracticeData>(
+      `/student/courses/${courseId}/learning/mistakes/${mistakeId}/similar-practice`,
+      {
+        method: "POST",
+      },
+    );
+  },
+
   async getFlashcardDecks(courseId: string): Promise<FlashcardDecksData> {
     return shouldUseMockApi
       ? getMockFlashcardDecks()

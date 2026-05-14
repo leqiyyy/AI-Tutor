@@ -10,6 +10,7 @@ from time import perf_counter
 from typing import Any, Awaitable, Callable, List, Optional
 
 import httpx
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
 
 import app.storage as storage
@@ -32,6 +33,46 @@ from app.services.question_router import QuestionRoute, classify_direct_intent, 
 log = get_logger(__name__)
 _fallback_attachment_parser = SimpleParserProvider()
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+THINKING_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    if not text or not bool(getattr(settings, "STRIP_THINKING_BLOCKS", True)):
+        return text or ""
+    return THINKING_BLOCK_RE.sub("", text).strip()
+
+
+def _qwen_thinking_extra_body(
+    *,
+    model: str,
+    enable_thinking: bool | None,
+    thinking_budget: int | None,
+    top_k: int | None = None,
+    min_p: float | None = None,
+    repetition_penalty: float | None = None,
+) -> dict[str, Any] | None:
+    if "qwen" not in str(model or "").lower():
+        return None
+    body: dict[str, Any] = {}
+    if enable_thinking is not None:
+        body["enable_thinking"] = bool(enable_thinking)
+    if thinking_budget is not None and int(thinking_budget) > 0:
+        body["thinking_budget"] = int(thinking_budget)
+    if top_k is not None and int(top_k) > 0:
+        body["top_k"] = int(top_k)
+    if min_p is not None:
+        body["min_p"] = float(min_p)
+    if repetition_penalty is not None:
+        body["repetition_penalty"] = float(repetition_penalty)
+    return body or None
+
+
+def _looks_like_thinking_param_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        key in text
+        for key in ("enable_thinking", "thinking_budget", "top_k", "min_p", "repetition_penalty")
+    )
 
 
 async def _emit_progress(
@@ -953,6 +994,7 @@ async def _call_generation_llm(
             model=model,
             api_base=api_base,
             api_key=api_key,
+            generation_route=generation,
         )
         if answer:
             return answer
@@ -967,11 +1009,34 @@ async def _call_generation_llm(
 
     client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=60)
     chat_messages = _build_chat_completion_messages(messages=messages, attachments=attachments or [])
-    response = await client.chat.completions.create(
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": chat_messages,
+        "temperature": generation.get("temperature", settings.LLM_TEMPERATURE),
+        "top_p": generation.get("top_p", settings.LLM_TOP_P),
+        "max_tokens": generation.get("max_tokens", settings.LLM_MAX_TOKENS),
+        "presence_penalty": generation.get("presence_penalty", settings.LLM_PRESENCE_PENALTY),
+        "frequency_penalty": generation.get("frequency_penalty", settings.LLM_FREQUENCY_PENALTY),
+    }
+    extra_body = _qwen_thinking_extra_body(
         model=model,
-        messages=chat_messages,
+        enable_thinking=generation.get("enable_thinking", settings.LLM_ENABLE_THINKING),
+        thinking_budget=generation.get("thinking_budget", settings.LLM_THINKING_BUDGET),
+        top_k=generation.get("top_k", settings.LLM_TOP_K),
+        min_p=generation.get("min_p", settings.LLM_MIN_P),
+        repetition_penalty=generation.get("repetition_penalty", settings.LLM_REPETITION_PENALTY),
     )
-    return (response.choices[0].message.content or "").strip()
+    if extra_body:
+        request_kwargs["extra_body"] = extra_body
+    try:
+        response = await client.chat.completions.create(**request_kwargs)
+    except Exception as exc:
+        if extra_body and _looks_like_thinking_param_error(exc):
+            request_kwargs.pop("extra_body", None)
+            response = await client.chat.completions.create(**request_kwargs)
+        else:
+            raise
+    return _strip_thinking_blocks(response.choices[0].message.content or "")
 
 
 async def _call_responses_generation_api(
@@ -981,6 +1046,7 @@ async def _call_responses_generation_api(
     model: str,
     api_base: str,
     api_key: str,
+    generation_route: dict[str, Any] | None = None,
 ) -> str:
     input_items = _build_responses_input_items(messages=messages, attachments=attachments)
     endpoint = api_base.rstrip("/") + "/responses"
@@ -993,7 +1059,23 @@ async def _call_responses_generation_api(
     payload = {
         "model": model,
         "input": input_items,
+        "temperature": (generation_route or {}).get("temperature", settings.LLM_TEMPERATURE),
+        "top_p": (generation_route or {}).get("top_p", settings.LLM_TOP_P),
+        "max_tokens": (generation_route or {}).get("max_tokens", settings.LLM_MAX_TOKENS),
+        "presence_penalty": (generation_route or {}).get("presence_penalty", settings.LLM_PRESENCE_PENALTY),
+        "frequency_penalty": (generation_route or {}).get("frequency_penalty", settings.LLM_FREQUENCY_PENALTY),
     }
+    extra_body = _qwen_thinking_extra_body(
+        model=model,
+        enable_thinking=(generation_route or {}).get("enable_thinking", settings.LLM_ENABLE_THINKING),
+        thinking_budget=(generation_route or {}).get("thinking_budget", settings.LLM_THINKING_BUDGET),
+        top_k=(generation_route or {}).get("top_k", settings.LLM_TOP_K),
+        min_p=(generation_route or {}).get("min_p", settings.LLM_MIN_P),
+        repetition_penalty=(generation_route or {}).get("repetition_penalty", settings.LLM_REPETITION_PENALTY),
+    )
+    thinking_payload_keys = set(extra_body or {})
+    if extra_body:
+        payload.update(extra_body)
     last_error: Exception | None = None
     async with httpx.AsyncClient(timeout=120.0) as client:
         for attempt in range(3):
@@ -1004,6 +1086,18 @@ async def _call_responses_generation_api(
                 break
             except httpx.HTTPStatusError as exc:
                 last_error = exc
+                if (
+                    thinking_payload_keys
+                    and exc.response.status_code in {400, 422}
+                    and _looks_like_thinking_param_error(exc)
+                ):
+                    for key in thinking_payload_keys:
+                        payload.pop(key, None)
+                    thinking_payload_keys.clear()
+                    response = await client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    break
                 if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
                     raise
                 await asyncio.sleep(2 ** attempt)
@@ -1016,7 +1110,7 @@ async def _call_responses_generation_api(
             raise last_error or RuntimeError("quick LLM responses API failed")
 
     if data.get("output_text"):
-        return str(data["output_text"]).strip()
+        return _strip_thinking_blocks(str(data["output_text"]))
 
     texts: list[str] = []
     for item in data.get("output", []) or []:
@@ -1028,7 +1122,7 @@ async def _call_responses_generation_api(
             text = content.get("text")
             if text:
                 texts.append(str(text))
-    return "\n".join(texts).strip()
+    return _strip_thinking_blocks("\n".join(texts))
 
 
 def _build_responses_input_items(*, messages: list[LLMMessage], attachments: list[dict]) -> list[dict]:
@@ -1639,4 +1733,5 @@ def _sync_review_feedback_to_kb_space(db: Session, *, class_id: str, faq_entry: 
         "last_review_sync_at": faq_entry.get("reviewed_at"),
     }
     kb_space.extra_data = extra
+    flag_modified(kb_space, "extra_data")
     db.add(kb_space)

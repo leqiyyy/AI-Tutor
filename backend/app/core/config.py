@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     )
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
+    APP_TIMEZONE: str = "Asia/Shanghai"
     AUTO_CREATE_TABLES: bool = True
     SEED_DEMO_DATA: bool = False
 
@@ -61,12 +62,32 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_API_BASE: str = ""
     LLM_WIRE_API: str = "responses"
+    LLM_TEMPERATURE: float = 0.3
+    LLM_TOP_P: float = 0.8
+    LLM_TOP_K: int = 20
+    LLM_MIN_P: float = 0.0
+    LLM_MAX_TOKENS: int = 4096
+    LLM_PRESENCE_PENALTY: float = 0.0
+    LLM_FREQUENCY_PENALTY: float = 0.0
+    LLM_REPETITION_PENALTY: float = 1.0
+    LLM_ENABLE_THINKING: bool = False
+    LLM_THINKING_BUDGET: int = 4096
     LLM_BACKEND: str = "auto"  # auto | api | local | mock
     LLM_LOCAL_API_BASE: str = ""
     EXTRACT_MODEL: str = ""
     EXTRACT_API_KEY: str = ""
     EXTRACT_API_BASE: str = ""
     EXTRACT_WIRE_API: str = "chat_completions"
+    EXTRACT_TEMPERATURE: float = 0.0
+    EXTRACT_TOP_P: float = 0.8
+    EXTRACT_TOP_K: int = 20
+    EXTRACT_MIN_P: float = 0.0
+    EXTRACT_MAX_TOKENS: int = 4096
+    EXTRACT_PRESENCE_PENALTY: float = 0.0
+    EXTRACT_FREQUENCY_PENALTY: float = 0.0
+    EXTRACT_REPETITION_PENALTY: float = 1.0
+    EXTRACT_ENABLE_THINKING: bool = False
+    EXTRACT_THINKING_BUDGET: int = 512
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIM: int = 1536
     EMBEDDING_BACKEND: str = "auto"  # auto | api | local | mock
@@ -79,6 +100,17 @@ class Settings(BaseSettings):
     VLM_API_BASE: str = ""
     VLM_LOCAL_API_BASE: str = ""
     VLM_WIRE_API: str = "chat_completions"
+    VLM_TEMPERATURE: float = 0.1
+    VLM_TOP_P: float = 0.8
+    VLM_TOP_K: int = 20
+    VLM_MIN_P: float = 0.0
+    VLM_MAX_TOKENS: int = 2048
+    VLM_PRESENCE_PENALTY: float = 0.0
+    VLM_FREQUENCY_PENALTY: float = 0.0
+    VLM_REPETITION_PENALTY: float = 1.0
+    VLM_ENABLE_THINKING: bool = False
+    VLM_THINKING_BUDGET: int = 1024
+    STRIP_THINKING_BLOCKS: bool = True
     RAG_ENGINE: str = "raganything"
     RAGANYTHING_STRICT_MODE: bool = True
     RAGANYTHING_METADATA_FALLBACK_ENABLED: bool = False
@@ -216,6 +248,10 @@ class Settings(BaseSettings):
         "RAG_EDUCATION_FRAMEWORK_PROMPT_OVERRIDES_ENABLED",
         "MULTIMODAL_ALLOW_METADATA_ONLY_INDEX",
         "MULTIMODAL_AUTO_PREPROCESS_ENABLED",
+        "LLM_ENABLE_THINKING",
+        "EXTRACT_ENABLE_THINKING",
+        "VLM_ENABLE_THINKING",
+        "STRIP_THINKING_BLOCKS",
         mode="before",
     )
     @classmethod

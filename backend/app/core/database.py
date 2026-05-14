@@ -43,6 +43,12 @@ if settings.DATABASE_IS_SQLITE:
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
+else:
+    @event.listens_for(engine, "connect")
+    def _set_postgres_timezone(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("SET TIME ZONE %s", (settings.APP_TIMEZONE,))
+        cursor.close()
 
 
 SessionLocal = sessionmaker(

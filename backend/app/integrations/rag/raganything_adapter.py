@@ -23,6 +23,7 @@ from app.integrations.rag.education_prompts import (
     build_lightrag_addon_params,
     build_query_user_prompt,
 )
+from app.integrations.rag.graph_schema import graph_schema_signature, resolve_graph_schema
 from app.integrations.rag.query_rewrite import build_query_rewrite_bundle
 from app.integrations.rag.storage_config import (
     build_lightrag_storage_plan,
@@ -44,10 +45,50 @@ _INGEST_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextva
     default=None,
 )
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+THINKING_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    if not text or not bool(getattr(settings, "STRIP_THINKING_BLOCKS", True)):
+        return text or ""
+    return THINKING_BLOCK_RE.sub("", text).strip()
+
+
+def _qwen_thinking_extra_body(
+    *,
+    model: str,
+    enable_thinking: bool | None,
+    thinking_budget: int | None,
+    top_k: int | None = None,
+    min_p: float | None = None,
+    repetition_penalty: float | None = None,
+) -> dict[str, Any] | None:
+    if "qwen" not in str(model or "").lower():
+        return None
+    body: dict[str, Any] = {}
+    if enable_thinking is not None:
+        body["enable_thinking"] = bool(enable_thinking)
+    if thinking_budget is not None and int(thinking_budget) > 0:
+        body["thinking_budget"] = int(thinking_budget)
+    if top_k is not None and int(top_k) > 0:
+        body["top_k"] = int(top_k)
+    if min_p is not None:
+        body["min_p"] = float(min_p)
+    if repetition_penalty is not None:
+        body["repetition_penalty"] = float(repetition_penalty)
+    return body or None
+
+
+def _looks_like_thinking_param_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        key in text
+        for key in ("enable_thinking", "thinking_budget", "top_k", "min_p", "repetition_penalty")
+    )
 
 PROJECTION_FILE_LABEL_RE = re.compile(
     r"\.(?:txt|pdf|docx?|pptx?|xlsx?|csv|md|png|jpe?g|gif|webp|mp4|mov|avi|zip)$",
@@ -345,7 +386,9 @@ class RAGAnythingAdapter:
     def _record_embedding_trace(self, *, texts: list[str], model: str) -> dict[str, Any] | None:
         if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
             return None
-        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        trace = _QUERY_TRACE_CONTEXT.get()
+        if trace is None:
+            trace = _INGEST_TRACE_CONTEXT.get()
         if not isinstance(trace, dict):
             return None
         calls = trace.setdefault("embedding_calls", [])
@@ -384,7 +427,9 @@ class RAGAnythingAdapter:
         if error:
             call_trace["error"] = self._trace_preview(error, limit=500)
 
-        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        trace = _QUERY_TRACE_CONTEXT.get()
+        if trace is None:
+            trace = _INGEST_TRACE_CONTEXT.get()
         if not isinstance(trace, dict):
             return
         summary = trace.setdefault(
@@ -554,6 +599,16 @@ class RAGAnythingAdapter:
         base_url: str,
         api_key: str,
         wire_api: str,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        max_tokens: int | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        repetition_penalty: float | None = None,
+        enable_thinking: bool | None = None,
+        thinking_budget: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
         if wire_api == "responses":
             input_items = []
@@ -583,6 +638,27 @@ class RAGAnythingAdapter:
                 "model": model,
                 "input": input_items,
             }
+            if temperature is not None:
+                payload["temperature"] = temperature
+            if top_p is not None:
+                payload["top_p"] = top_p
+            if max_tokens is not None and int(max_tokens) > 0:
+                payload["max_tokens"] = int(max_tokens)
+            if presence_penalty is not None:
+                payload["presence_penalty"] = presence_penalty
+            if frequency_penalty is not None:
+                payload["frequency_penalty"] = frequency_penalty
+            extra_body = _qwen_thinking_extra_body(
+                model=model,
+                enable_thinking=enable_thinking,
+                thinking_budget=thinking_budget,
+                top_k=top_k,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+            )
+            thinking_payload_keys = set(extra_body or {})
+            if extra_body:
+                payload.update(extra_body)
             last_error = None
             async with httpx.AsyncClient(timeout=180.0) as client:
                 for attempt in range(3):
@@ -593,6 +669,18 @@ class RAGAnythingAdapter:
                         break
                     except httpx.HTTPStatusError as exc:
                         last_error = exc
+                        if (
+                            thinking_payload_keys
+                            and exc.response.status_code in {400, 422}
+                            and _looks_like_thinking_param_error(exc)
+                        ):
+                            for key in thinking_payload_keys:
+                                payload.pop(key, None)
+                            thinking_payload_keys.clear()
+                            response = await client.post(endpoint, headers=headers, json=payload)
+                            response.raise_for_status()
+                            data = response.json()
+                            break
                         if exc.response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
                             raise
                         await asyncio.sleep(2 ** attempt)
@@ -606,7 +694,7 @@ class RAGAnythingAdapter:
 
             usage = self._normalize_model_usage(data.get("usage"))
             if data.get("output_text"):
-                return data["output_text"], usage
+                return _strip_thinking_blocks(str(data["output_text"])), usage
 
             texts = []
             for item in data.get("output", []) or []:
@@ -614,7 +702,7 @@ class RAGAnythingAdapter:
                     text = content.get("text")
                     if text:
                         texts.append(text)
-            return "\n".join(texts), usage
+            return _strip_thinking_blocks("\n".join(texts)), usage
 
         openai_module = importlib.import_module("openai")
         AsyncOpenAI = getattr(openai_module, "AsyncOpenAI")
@@ -628,19 +716,48 @@ class RAGAnythingAdapter:
                 chat_messages.append({"role": "system", "content": system_prompt})
             chat_messages.extend(self._normalize_llm_history_messages(history_messages))
             chat_messages.append({"role": "user", "content": prompt})
-            response = await client.chat.completions.create(
+            request_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": chat_messages,
+            }
+            if temperature is not None:
+                request_kwargs["temperature"] = temperature
+            if top_p is not None:
+                request_kwargs["top_p"] = top_p
+            if max_tokens is not None and int(max_tokens) > 0:
+                request_kwargs["max_tokens"] = int(max_tokens)
+            if presence_penalty is not None:
+                request_kwargs["presence_penalty"] = presence_penalty
+            if frequency_penalty is not None:
+                request_kwargs["frequency_penalty"] = frequency_penalty
+            extra_body = _qwen_thinking_extra_body(
                 model=model,
-                messages=chat_messages,
+                enable_thinking=enable_thinking,
+                thinking_budget=thinking_budget,
+                top_k=top_k,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
             )
+            if extra_body:
+                request_kwargs["extra_body"] = extra_body
+            try:
+                response = await client.chat.completions.create(**request_kwargs)
+            except Exception as exc:
+                if extra_body and _looks_like_thinking_param_error(exc):
+                    request_kwargs.pop("extra_body", None)
+                    response = await client.chat.completions.create(**request_kwargs)
+                else:
+                    raise
             usage = self._normalize_model_usage(getattr(response, "usage", None))
-            return response.choices[0].message.content or "", usage
+            return _strip_thinking_blocks(response.choices[0].message.content or ""), usage
         finally:
             await client.close()
 
     def _build_llm_func(self, routing_snapshot: dict[str, Any]):
         generation = routing_snapshot.get("generation") or {}
-        extract_model = settings.EFFECTIVE_EXTRACT_MODEL
-        extract_base = settings.EFFECTIVE_EXTRACT_API_BASE
+        extraction = routing_snapshot.get("extraction") or {}
+        extract_model = str(extraction.get("model") or settings.EFFECTIVE_EXTRACT_MODEL)
+        extract_base = str(extraction.get("api_base") or settings.EFFECTIVE_EXTRACT_API_BASE)
         extract_api_key = settings.EFFECTIVE_EXTRACT_API_KEY
         generation_model = str(generation.get("model") or settings.LLM_MODEL)
         generation_base = str(generation.get("api_base") or settings.EFFECTIVE_LLM_API_BASE)
@@ -652,6 +769,38 @@ class RAGAnythingAdapter:
             base_url = generation_base if use_generation_model else extract_base
             api_key = generation_api_key if use_generation_model else extract_api_key
             wire_api = settings.LLM_WIRE_API if use_generation_model else settings.EXTRACT_WIRE_API
+            active_route = generation if use_generation_model else extraction
+            temperature = active_route.get(
+                "temperature",
+                settings.LLM_TEMPERATURE if use_generation_model else settings.EXTRACT_TEMPERATURE,
+            )
+            top_p = active_route.get("top_p", settings.LLM_TOP_P if use_generation_model else settings.EXTRACT_TOP_P)
+            top_k = active_route.get("top_k", settings.LLM_TOP_K if use_generation_model else settings.EXTRACT_TOP_K)
+            min_p = active_route.get("min_p", settings.LLM_MIN_P if use_generation_model else settings.EXTRACT_MIN_P)
+            max_tokens = active_route.get(
+                "max_tokens",
+                settings.LLM_MAX_TOKENS if use_generation_model else settings.EXTRACT_MAX_TOKENS,
+            )
+            presence_penalty = active_route.get(
+                "presence_penalty",
+                settings.LLM_PRESENCE_PENALTY if use_generation_model else settings.EXTRACT_PRESENCE_PENALTY,
+            )
+            frequency_penalty = active_route.get(
+                "frequency_penalty",
+                settings.LLM_FREQUENCY_PENALTY if use_generation_model else settings.EXTRACT_FREQUENCY_PENALTY,
+            )
+            repetition_penalty = active_route.get(
+                "repetition_penalty",
+                settings.LLM_REPETITION_PENALTY if use_generation_model else settings.EXTRACT_REPETITION_PENALTY,
+            )
+            enable_thinking = active_route.get(
+                "enable_thinking",
+                settings.LLM_ENABLE_THINKING if use_generation_model else settings.EXTRACT_ENABLE_THINKING,
+            )
+            thinking_budget = active_route.get(
+                "thinking_budget",
+                settings.LLM_THINKING_BUDGET if use_generation_model else settings.EXTRACT_THINKING_BUDGET,
+            )
             call_trace = self._record_llm_trace(
                 prompt=prompt,
                 system_prompt=system_prompt,
@@ -671,6 +820,16 @@ class RAGAnythingAdapter:
                     base_url=base_url,
                     api_key=api_key,
                     wire_api=wire_api,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    min_p=min_p,
+                    max_tokens=max_tokens,
+                    presence_penalty=presence_penalty,
+                    frequency_penalty=frequency_penalty,
+                    repetition_penalty=repetition_penalty,
+                    enable_thinking=enable_thinking,
+                    thinking_budget=thinking_budget,
                 )
                 if isinstance(llm_result, tuple):
                     response_text, usage = llm_result
@@ -708,7 +867,9 @@ class RAGAnythingAdapter:
     ) -> dict[str, Any] | None:
         if not bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)):
             return None
-        trace = _QUERY_TRACE_CONTEXT.get() or _INGEST_TRACE_CONTEXT.get()
+        trace = _QUERY_TRACE_CONTEXT.get()
+        if trace is None:
+            trace = _INGEST_TRACE_CONTEXT.get()
         if not isinstance(trace, dict):
             return None
 
@@ -1189,12 +1350,34 @@ class RAGAnythingAdapter:
                 else:
                     built_messages = messages
 
-                response = await client.chat.completions.create(
+                request_kwargs: dict[str, Any] = {
+                    "model": vlm_model,
+                    "messages": built_messages,
+                    "temperature": vlm.get("temperature", settings.VLM_TEMPERATURE),
+                    "top_p": vlm.get("top_p", settings.VLM_TOP_P),
+                    "max_tokens": vlm.get("max_tokens", settings.VLM_MAX_TOKENS),
+                    "presence_penalty": vlm.get("presence_penalty", settings.VLM_PRESENCE_PENALTY),
+                    "frequency_penalty": vlm.get("frequency_penalty", settings.VLM_FREQUENCY_PENALTY),
+                }
+                extra_body = _qwen_thinking_extra_body(
                     model=vlm_model,
-                    messages=built_messages,
-                    temperature=0.1,
+                    enable_thinking=vlm.get("enable_thinking", settings.VLM_ENABLE_THINKING),
+                    thinking_budget=vlm.get("thinking_budget", settings.VLM_THINKING_BUDGET),
+                    top_k=vlm.get("top_k", settings.VLM_TOP_K),
+                    min_p=vlm.get("min_p", settings.VLM_MIN_P),
+                    repetition_penalty=vlm.get("repetition_penalty", settings.VLM_REPETITION_PENALTY),
                 )
-                response_text = response.choices[0].message.content or ""
+                if extra_body:
+                    request_kwargs["extra_body"] = extra_body
+                try:
+                    response = await client.chat.completions.create(**request_kwargs)
+                except Exception as exc:
+                    if extra_body and _looks_like_thinking_param_error(exc):
+                        request_kwargs.pop("extra_body", None)
+                        response = await client.chat.completions.create(**request_kwargs)
+                    else:
+                        raise
+                response_text = _strip_thinking_blocks(response.choices[0].message.content or "")
                 usage = self._normalize_model_usage(getattr(response, "usage", None))
                 self._finish_vision_trace(
                     call_trace,
@@ -1647,7 +1830,8 @@ class RAGAnythingAdapter:
     def _get_instance(self, class_id: str):
         routing_snapshot = self._load_runtime_routing_snapshot()
         storage_plan = build_lightrag_storage_plan(class_id)
-        routing_signature = self._routing_signature(routing_snapshot, storage_plan)
+        graph_schema = self._load_graph_schema_for_class(class_id)
+        routing_signature = self._routing_signature(routing_snapshot, storage_plan, graph_schema)
         if class_id in self._instances and self._instance_route_signatures.get(class_id) == routing_signature:
             return self._instances[class_id]
         stale_instance = self._instances.get(class_id)
@@ -1691,7 +1875,7 @@ class RAGAnythingAdapter:
             "default_llm_timeout": settings.RAGANYTHING_DEFAULT_LLM_TIMEOUT_SECONDS,
         }
         lightrag_kwargs.update(storage_plan.get("lightrag_kwargs") or {})
-        self._attach_lightrag_addon_params(lightrag_kwargs)
+        self._attach_lightrag_addon_params(lightrag_kwargs, graph_schema=graph_schema)
         if rerank_func is not None:
             lightrag_kwargs["rerank_model_func"] = rerank_func
 
@@ -1713,13 +1897,19 @@ class RAGAnythingAdapter:
                 class_id=class_id,
                 status=prompt_override_status,
                 addon_params=bool(lightrag_kwargs.get("addon_params")),
+                graph_schema_domain=(graph_schema or {}).get("domain"),
             )
         if stale_instance is not None and stale_instance is not instance:
             self._schedule_close(stale_instance, class_id=class_id, reason="route_signature_changed")
         return instance
 
-    def _attach_lightrag_addon_params(self, lightrag_kwargs: dict[str, Any]) -> None:
-        addon_params = build_lightrag_addon_params(settings)
+    def _attach_lightrag_addon_params(
+        self,
+        lightrag_kwargs: dict[str, Any],
+        *,
+        graph_schema: dict[str, Any] | None = None,
+    ) -> None:
+        addon_params = build_lightrag_addon_params(settings, graph_schema=graph_schema)
         if not addon_params:
             return
         try:
@@ -1741,13 +1931,37 @@ class RAGAnythingAdapter:
             **addon_params,
         }
 
+    def _load_graph_schema_for_class(self, class_id: str) -> dict[str, Any] | None:
+        db = SessionLocal()
+        try:
+            cls = db.query(Class).filter(Class.id == class_id).first()
+            if not cls:
+                return None
+            course = db.query(Course).filter(Course.id == cls.course_id).first()
+            raw_schema = cls.graph_schema or (course.graph_schema if course else None)
+            return resolve_graph_schema(
+                raw_schema,
+                name=f"{course.name if course else ''} {cls.name or ''}".strip(),
+                description=(course.description if course else None),
+            )
+        except Exception as exc:
+            logger.warning("raganything_graph_schema_load_failed", class_id=class_id, reason=str(exc))
+            return None
+        finally:
+            db.close()
+
     def _load_runtime_routing_snapshot(self) -> dict[str, Any]:
         snapshot = model_routing_service.build_runtime_model_routing_snapshot()
         if snapshot:
             return snapshot
         return model_routing_service.build_model_routing_snapshot()
 
-    def _routing_signature(self, snapshot: dict[str, Any], storage_plan: dict[str, Any] | None = None) -> str:
+    def _routing_signature(
+        self,
+        snapshot: dict[str, Any],
+        storage_plan: dict[str, Any] | None = None,
+        graph_schema: dict[str, Any] | None = None,
+    ) -> str:
         generation = snapshot.get("generation") or {}
         embedding = snapshot.get("embedding") or {}
         vlm = snapshot.get("vlm") or {}
@@ -1778,6 +1992,8 @@ class RAGAnythingAdapter:
                 if any(token in key for token in {"KEY", "PASSWORD"}):
                     value = hashlib.sha256(str(value).encode("utf-8")).hexdigest()
                 parts.append(f"{key}={value}")
+        if graph_schema:
+            parts.append(json.dumps(graph_schema_signature(graph_schema), ensure_ascii=False, sort_keys=True))
         return "|".join(parts)
 
     async def _insert_preprocessed_content_list(

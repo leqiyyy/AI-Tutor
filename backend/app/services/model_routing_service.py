@@ -8,11 +8,13 @@ from app.models.admin import AdminSetting
 def build_model_routing_snapshot(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     config = dict(overrides or {})
     generation = _resolve_generation(config)
+    extraction = _resolve_extraction(config, generation)
     embedding = _resolve_embedding(config)
     vlm = _resolve_vlm(config)
     reranker = _resolve_reranker(config)
     return {
         "generation": generation,
+        "extraction": extraction,
         "embedding": embedding,
         "vlm": vlm,
         "reranker": reranker,
@@ -95,7 +97,47 @@ def _resolve_generation(config: Mapping[str, Any]) -> dict[str, Any]:
         "model": model,
         "api_base": effective_base,
         "api_key_configured": api_key_configured if effective == "api" else None,
+        "temperature": _float_cfg(config, "llm_temperature", settings.LLM_TEMPERATURE),
+        "top_p": _float_cfg(config, "llm_top_p", settings.LLM_TOP_P),
+        "top_k": _int_cfg(config, "llm_top_k", settings.LLM_TOP_K),
+        "min_p": _float_cfg(config, "llm_min_p", settings.LLM_MIN_P),
+        "max_tokens": _int_cfg(config, "llm_max_tokens", settings.LLM_MAX_TOKENS),
+        "presence_penalty": _float_cfg(config, "llm_presence_penalty", settings.LLM_PRESENCE_PENALTY),
+        "frequency_penalty": _float_cfg(config, "llm_frequency_penalty", settings.LLM_FREQUENCY_PENALTY),
+        "repetition_penalty": _float_cfg(config, "llm_repetition_penalty", settings.LLM_REPETITION_PENALTY),
+        "enable_thinking": _bool_cfg(config, "llm_enable_thinking", settings.LLM_ENABLE_THINKING),
+        "thinking_budget": _int_cfg(config, "llm_thinking_budget", settings.LLM_THINKING_BUDGET),
         "fallback_reason": fallback_reason,
+    }
+
+
+def _resolve_extraction(config: Mapping[str, Any], generation: Mapping[str, Any]) -> dict[str, Any]:
+    model = str(_cfg(config, "extract_model", settings.EFFECTIVE_EXTRACT_MODEL) or settings.EFFECTIVE_EXTRACT_MODEL)
+    api_base = _normalize_base(_cfg(config, "extract_api_base", settings.EFFECTIVE_EXTRACT_API_BASE))
+    api_key_configured = bool(settings.EFFECTIVE_EXTRACT_API_KEY)
+    if not api_base:
+        api_base = str(generation.get("api_base") or "")
+    if not api_key_configured:
+        api_key_configured = bool(generation.get("api_key_configured"))
+
+    return {
+        "requested_backend": "api",
+        "effective_backend": "api" if api_key_configured else "mock",
+        "provider": "openai-compatible-extraction" if api_key_configured else "mock",
+        "model": "mock-extraction-v1" if not api_key_configured else model,
+        "api_base": api_base if api_key_configured else None,
+        "api_key_configured": api_key_configured,
+        "temperature": _float_cfg(config, "extract_temperature", settings.EXTRACT_TEMPERATURE),
+        "top_p": _float_cfg(config, "extract_top_p", settings.EXTRACT_TOP_P),
+        "top_k": _int_cfg(config, "extract_top_k", settings.EXTRACT_TOP_K),
+        "min_p": _float_cfg(config, "extract_min_p", settings.EXTRACT_MIN_P),
+        "max_tokens": _int_cfg(config, "extract_max_tokens", settings.EXTRACT_MAX_TOKENS),
+        "presence_penalty": _float_cfg(config, "extract_presence_penalty", settings.EXTRACT_PRESENCE_PENALTY),
+        "frequency_penalty": _float_cfg(config, "extract_frequency_penalty", settings.EXTRACT_FREQUENCY_PENALTY),
+        "repetition_penalty": _float_cfg(config, "extract_repetition_penalty", settings.EXTRACT_REPETITION_PENALTY),
+        "enable_thinking": _bool_cfg(config, "extract_enable_thinking", settings.EXTRACT_ENABLE_THINKING),
+        "thinking_budget": _int_cfg(config, "extract_thinking_budget", settings.EXTRACT_THINKING_BUDGET),
+        "fallback_reason": None if api_key_configured else "missing_api_key",
     }
 
 
@@ -191,6 +233,16 @@ def _resolve_vlm(config: Mapping[str, Any]) -> dict[str, Any]:
         "model": "mock-vlm-v1" if effective == "mock" else model,
         "api_base": effective_base,
         "api_key_configured": api_key_configured if effective == "api" else None,
+        "temperature": _float_cfg(config, "vlm_temperature", settings.VLM_TEMPERATURE),
+        "top_p": _float_cfg(config, "vlm_top_p", settings.VLM_TOP_P),
+        "top_k": _int_cfg(config, "vlm_top_k", settings.VLM_TOP_K),
+        "min_p": _float_cfg(config, "vlm_min_p", settings.VLM_MIN_P),
+        "max_tokens": _int_cfg(config, "vlm_max_tokens", settings.VLM_MAX_TOKENS),
+        "presence_penalty": _float_cfg(config, "vlm_presence_penalty", settings.VLM_PRESENCE_PENALTY),
+        "frequency_penalty": _float_cfg(config, "vlm_frequency_penalty", settings.VLM_FREQUENCY_PENALTY),
+        "repetition_penalty": _float_cfg(config, "vlm_repetition_penalty", settings.VLM_REPETITION_PENALTY),
+        "enable_thinking": _bool_cfg(config, "vlm_enable_thinking", settings.VLM_ENABLE_THINKING),
+        "thinking_budget": _int_cfg(config, "vlm_thinking_budget", settings.VLM_THINKING_BUDGET),
         "fallback_reason": fallback_reason,
     }
 
@@ -244,3 +296,24 @@ def _cfg(config: Mapping[str, Any], key: str, default: Any) -> Any:
 def _normalize_base(value: Any) -> str:
     text = str(value or "").strip()
     return text.rstrip("/")
+
+
+def _float_cfg(config: Mapping[str, Any], key: str, default: float) -> float:
+    try:
+        return float(_cfg(config, key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _int_cfg(config: Mapping[str, Any], key: str, default: int) -> int:
+    try:
+        return int(_cfg(config, key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _bool_cfg(config: Mapping[str, Any], key: str, default: bool) -> bool:
+    value = _cfg(config, key, default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

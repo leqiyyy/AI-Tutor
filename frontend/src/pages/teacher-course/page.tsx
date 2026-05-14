@@ -13,6 +13,7 @@ import { aiService } from '@/services/ai';
 import { courseService, downloadCourseFileFromUrl } from '@/services/course';
 import type {
   CourseDiscussion,
+  CourseTaskAttachment,
   KnowledgeGraphEdge,
   KnowledgeGraphNode,
   TeacherCourseFile,
@@ -23,7 +24,9 @@ import type {
   TeacherCourseStudent,
   TeacherStudentExportRow,
   TeacherCourseTaskDetail,
+  TeacherCourseTaskSubmission,
   TeacherCourseTask,
+  TaskQuestionGrade,
 } from '@/types/course';
 import type { AiTeacherQuestion } from '@/types/ai';
 
@@ -72,7 +75,7 @@ function createEmptyExamForm() {
     duration: 90,
     totalScore: 100,
     questionCount: 10,
-    generatedQuestions: [] as { type: string; content: string; score: number }[],
+    generatedQuestions: [] as { type: string; content: string; score: number; answer?: string; explanation?: string }[],
     attachments: [] as File[],
   };
 }
@@ -92,27 +95,65 @@ function createEmptyExportForm() {
   };
 }
 
+const EXAM_QUESTION_TYPES = [
+  { value: 'single', label: '单选题' },
+  { value: 'multiple', label: '多选题' },
+  { value: 'judge', label: '判断题' },
+  { value: 'short', label: '简答题' },
+  { value: 'code', label: '编程题' },
+];
+
+function normalizeExamQuestionType(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (/(single|单选|选择题|单项选择)/.test(normalized)) return 'single';
+  if (/(multiple|多选|多项选择)/.test(normalized)) return 'multiple';
+  if (/(judge|判断|true|false|是非)/.test(normalized)) return 'judge';
+  if (/(code|编程|代码|program)/.test(normalized)) return 'code';
+  return 'short';
+}
+
 function parseExamDraftToQuestions(draft: string, totalScore: number, desiredCount: number) {
-  const lines = draft
+  const rawLines = draft
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
-  const numberedLines = lines.filter((line) => /^\d+[.、)]\s*/.test(line));
-  const bulletLines = lines.filter((line) => /^[-*]\s*/.test(line));
-  const candidates = numberedLines.length > 0 ? numberedLines : bulletLines;
+  const blocks: string[] = [];
+  let current: string[] = [];
+
+  rawLines.forEach((line) => {
+    const startsQuestion = /^\d+[.、)]\s*/.test(line) || /^[-*]\s*(?:[【[]|题型|题目|问题)/.test(line);
+    if (startsQuestion && current.length > 0) {
+      blocks.push(current.join('\n'));
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  });
+  if (current.length > 0) blocks.push(current.join('\n'));
+
+  const candidates = blocks.length > 0 ? blocks : [draft.trim() || '请结合课程资料回答本题。'];
   const count = Math.max(1, Math.min(desiredCount, candidates.length || 1));
   const baseScore = Math.floor(totalScore / count);
 
-  return (candidates.length > 0 ? candidates : [draft.trim() || '请结合课程资料回答本题。'])
+  return candidates
     .slice(0, count)
-    .map((line, index) => {
-      const content = line.replace(/^\d+[.、)]\s*/, '').replace(/^[-*]\s*/, '').trim();
+    .map((block, index) => {
+      const content = block.replace(/^\d+[.、)]\s*/, '').replace(/^[-*]\s*/, '').trim();
       const typeMatch = content.match(/[【[]([^】\]]+)[】\]]/);
 
+      const answerMatch = content.match(/(?:参考答案|答案)[:：]\s*([^\n]+)/);
+      const explanationMatch = content.match(/(?:解析|说明)[:：]\s*([^\n]+)/);
+      const cleanContent = content
+        .replace(/(?:参考答案|答案)[:：][^\n]+/u, '')
+        .replace(/(?:解析|说明)[:：][^\n]+/u, '')
+        .trim();
+
       return {
-        type: typeMatch?.[1] || '简答题',
-        content: content || `第${index + 1}题：请结合课程资料回答本题。`,
+        type: normalizeExamQuestionType(typeMatch?.[1] || content),
+        content: cleanContent || content || `第${index + 1}题：请结合课程资料回答本题。`,
         score: index === count - 1 ? totalScore - baseScore * (count - 1) : baseScore,
+        answer: answerMatch?.[1]?.trim() || '',
+        explanation: explanationMatch?.[1]?.trim() || '',
       };
     });
 }
@@ -166,6 +207,17 @@ function toStudentCsv(rows: TeacherStudentExportRow[], fields: string[]) {
 function csvCell(value: unknown) {
   const text = String(value ?? '');
   return `"${text.replace(/"/g, '""')}"`;
+}
+
+function getTaskAttachmentName(attachment: string | CourseTaskAttachment) {
+  return typeof attachment === 'string' ? attachment : attachment.fileName;
+}
+
+async function downloadTaskAttachment(attachment: string | CourseTaskAttachment) {
+  if (typeof attachment === 'string' || !attachment.downloadUrl) {
+    return;
+  }
+  await downloadCourseFileFromUrl(attachment.downloadUrl, attachment.fileName);
 }
 
 function createEmptyDiscussionForm() {
@@ -251,7 +303,72 @@ function buildTaskDetailFallback(task: TeacherCourseTask): TeacherCourseTaskDeta
     averageScore: task.type === 'notice' ? undefined : 0,
     highestScore: task.type === 'notice' ? undefined : 0,
     lowestScore: task.type === 'notice' ? undefined : 0,
+    questions: [],
+    extraData: {},
     submissions: [],
+  };
+}
+
+interface GradingFormState {
+  feedback: string;
+  questionGrades: TaskQuestionGrade[];
+}
+
+function getQuestionScore(question: { score?: number }, fallback: number) {
+  const score = Number(question.score);
+  return Number.isFinite(score) && score > 0 ? score : fallback;
+}
+
+function getTaskSourceQuestion(task: TeacherCourseTaskDetail, questionId: string) {
+  const questions = task.extraData?.questions;
+  if (!Array.isArray(questions)) return null;
+
+  return questions.find((item, index) => {
+    if (!item || typeof item !== 'object') return false;
+    const record = item as Record<string, unknown>;
+    return String(record.id ?? index + 1) === questionId;
+  }) as Record<string, unknown> | null;
+}
+
+function buildInitialGradingForm(
+  task: TeacherCourseTaskDetail,
+  submission: TeacherCourseTaskSubmission,
+): GradingFormState {
+  const questions = (task.questions && task.questions.length > 0)
+    ? task.questions
+    : [{
+        id: 1,
+        content: task.description || '学生提交内容',
+        type: 'text',
+        answer: '',
+      }];
+  const fallbackScore = questions.length > 0 ? Math.round(Number(task.maxScore || 100) / questions.length) : 0;
+  const gradeMap = new Map((submission.questionGrades || []).map((grade) => [String(grade.questionId), grade]));
+
+  return {
+    feedback: submission.feedback || '',
+    questionGrades: questions.map((question) => {
+      const questionId = String(question.id);
+      const existing = gradeMap.get(questionId);
+      const sourceQuestion = getTaskSourceQuestion(task, questionId);
+      const sourceScore = Number(sourceQuestion?.score);
+      const maxScore = Number(existing?.maxScore ?? (Number.isFinite(sourceScore) && sourceScore > 0 ? sourceScore : getQuestionScore(question, fallbackScore)));
+      const answer = submission.answers?.[questionId] || existing?.answer || question.answer || '';
+      const score = Number(existing?.score ?? 0);
+
+      return {
+        questionId,
+        content: question.content,
+        answer,
+        correctAnswer: existing?.correctAnswer || question.correctAnswer || String(sourceQuestion?.answer || ''),
+        score: Number.isFinite(score) ? score : 0,
+        maxScore: Number.isFinite(maxScore) ? maxScore : 0,
+        correct: existing?.correct ?? false,
+        comment: existing?.comment || String(sourceQuestion?.explanation || ''),
+        autoGraded: existing?.autoGraded,
+        requiresManualReview: existing?.requiresManualReview ?? !existing?.autoGraded,
+      };
+    }),
   };
 }
 
@@ -358,18 +475,23 @@ function buildMaterialPreviewFallback(
 }
 
 function buildAiAnswerFallback(question: TeacherCourseQuestion): AiTeacherQuestion {
+  const aiReply = question.replies.find((reply) => reply.author === 'AI助教' || reply.author.toLowerCase() === 'ai');
   return {
     id: question.id,
     student: question.student,
     avatar: question.student[0] ?? '学',
     question: question.question,
-    aiAnswer: '该问题的 AI 回答详情将在联调接口接入后返回，这里先保留弹窗结构和基础兜底文案。',
+    aiAnswer: aiReply?.content || '该课程提问当前暂无 AI 助教回答。教师可直接人工回复，或到 AI 助教页基于课程资料生成参考答案后再发布。',
     confidence: question.confidence === 'medium' ? 60 : 35,
     confidenceLevel: question.confidence === 'medium' ? 'medium' : 'low',
     sources: [],
     time: question.time,
     status: 'pending',
   };
+}
+
+function hasActionableAiAnswer(answer: AiTeacherQuestion | null) {
+  return Boolean(answer?.aiAnswer && !answer.aiAnswer.startsWith('该课程提问当前暂无 AI 助教回答'));
 }
 
 export default function TeacherCourse() {
@@ -443,6 +565,9 @@ export default function TeacherCourse() {
   const [isTaskDetailLoading, setIsTaskDetailLoading] = useState(false);
   const [taskDetailError, setTaskDetailError] = useState('');
   const [publishedTasks, setPublishedTasks] = useState<TeacherCourseTask[]>([]);
+  const [gradingSubmission, setGradingSubmission] = useState<TeacherCourseTaskSubmission | null>(null);
+  const [gradingForm, setGradingForm] = useState<GradingFormState | null>(null);
+  const [isSavingGrade, setIsSavingGrade] = useState(false);
 
   // 新增：互动空间相关状态
   const [expandedQuestions, setExpandedQuestions] = useState<number[]>([]);
@@ -535,26 +660,38 @@ export default function TeacherCourse() {
   const handleUpload = async () => {
     if (uploadFiles.length === 0) return;
     setIsUploading(true);
-    
-    for (const file of uploadFiles) {
-      const fileName = file.name;
-      setUploadProgress(prev => ({ ...prev, [fileName]: 0 }));
-      
-      // 模拟上传进度
-      for (let i = 0; i <= 100; i += 10) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        setUploadProgress(prev => ({ ...prev, [fileName]: i }));
+
+    try {
+      for (const file of uploadFiles) {
+        const fileName = file.name;
+        setUploadProgress(prev => ({ ...prev, [fileName]: 0 }));
+
+        for (let i = 0; i <= 90; i += 10) {
+          await new Promise(resolve => setTimeout(resolve, 80));
+          setUploadProgress(prev => ({ ...prev, [fileName]: i }));
+        }
       }
+
+      await courseService.uploadTeacherCourseFiles(courseId, uploadFiles);
+      setUploadProgress(prev => {
+        const next = { ...prev };
+        uploadFiles.forEach(file => {
+          next[file.name] = 100;
+        });
+        return next;
+      });
+      await refreshKnowledgeData();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      setUploadFiles([]);
+      setUploadProgress({});
+      setShowUploadModal(false);
+      alert('资料上传成功！');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '资料上传失败，请稍后重试';
+      alert(`资料上传失败：${message}`);
+    } finally {
+      setIsUploading(false);
     }
-    
-    await courseService.uploadTeacherCourseFiles(courseId, uploadFiles);
-    await refreshKnowledgeData();
-    await new Promise(resolve => setTimeout(resolve, 500));
-    setIsUploading(false);
-    setUploadFiles([]);
-    setUploadProgress({});
-    setShowUploadModal(false);
-    alert('资料上传成功！');
   };
 
   useEffect(() => {
@@ -769,12 +906,13 @@ export default function TeacherCourse() {
 
     setIsPublishingHomework(true);
     try {
+      const attachmentData = await courseService.uploadTeacherTaskAttachments(courseId, homeworkForm.attachments);
       await courseService.createHomework(courseId, {
         title: homeworkForm.title,
         deadline: homeworkForm.deadline,
         allowLate: homeworkForm.allowLate,
         questions: homeworkForm.questions,
-        attachments: homeworkForm.attachments.map(f => f.name),
+        attachments: attachmentData.attachments,
       });
       const tasksData = await courseService.getTeacherCourseTasks(courseId);
       setPublishedTasks(tasksData.tasks);
@@ -816,8 +954,10 @@ export default function TeacherCourse() {
         `题目数量：${examForm.questionCount}。`,
         `总分：${examForm.totalScore}。`,
         '请优先结合当前班级课程资料、知识图谱概念和学生常见问题。',
+        '题型可包含单选题、多选题、判断题、简答题、编程题。',
+        '每道题请用独立编号输出，包含【题型】、题干、必要选项、参考答案和解析，便于教师二次编辑。',
       ].join('\n');
-      const draft = await aiService.generateExam({ prompt });
+      const draft = await aiService.generateExam({ prompt, classId: courseId });
       const generated = parseExamDraftToQuestions(draft, examForm.totalScore, examForm.questionCount);
       setExamForm(prev => ({ ...prev, generatedQuestions: generated }));
     } catch (error) {
@@ -842,6 +982,7 @@ export default function TeacherCourse() {
 
     setIsPublishingExam(true);
     try {
+      const attachmentData = await courseService.uploadTeacherTaskAttachments(courseId, examForm.attachments);
       await courseService.createExam(courseId, {
         name: examForm.name,
         startTime: examForm.startTime,
@@ -849,7 +990,7 @@ export default function TeacherCourse() {
         duration: examForm.duration,
         totalScore: examForm.totalScore,
         questions: examForm.generatedQuestions,
-        attachments: examForm.attachments.map(f => f.name),
+        attachments: attachmentData.attachments,
       });
       const tasksData = await courseService.getTeacherCourseTasks(courseId);
       setPublishedTasks(tasksData.tasks);
@@ -863,6 +1004,42 @@ export default function TeacherCourse() {
     } finally {
       setIsPublishingExam(false);
     }
+  };
+
+  const updateGeneratedExamQuestion = (
+    index: number,
+    patch: Partial<{ type: string; content: string; score: number; answer: string; explanation: string }>,
+  ) => {
+    setExamForm(prev => ({
+      ...prev,
+      generatedQuestions: prev.generatedQuestions.map((question, questionIndex) =>
+        questionIndex === index ? { ...question, ...patch } : question,
+      ),
+    }));
+  };
+
+  const addGeneratedExamQuestion = () => {
+    const nextCount = examForm.generatedQuestions.length + 1;
+    setExamForm(prev => ({
+      ...prev,
+      generatedQuestions: [
+        ...prev.generatedQuestions,
+        {
+          type: 'short',
+          content: `第${nextCount}题：请结合课程资料回答本题。`,
+          score: Math.max(1, Math.round(prev.totalScore / Math.max(1, nextCount))),
+          answer: '',
+          explanation: '',
+        },
+      ],
+    }));
+  };
+
+  const removeGeneratedExamQuestion = (index: number) => {
+    setExamForm(prev => ({
+      ...prev,
+      generatedQuestions: prev.generatedQuestions.filter((_, questionIndex) => questionIndex !== index),
+    }));
   };
 
   // 新增：获取过滤后的任务列表
@@ -922,30 +1099,85 @@ export default function TeacherCourse() {
 
   const handleGradeSubmission = async (submissionId: string | number) => {
     if (!currentTask || currentTask.type === 'notice') return;
-    const scoreInput = prompt('请输入分数');
-    if (scoreInput === null) return;
-    const score = Number(scoreInput);
-    if (!Number.isFinite(score) || score < 0) {
-      alert('请输入有效分数');
-      return;
-    }
-    const feedback = prompt('请输入评语（可选）') || '';
-    await courseService.gradeTeacherCourseSubmission(courseId, currentTask.id, submissionId, {
-      score,
-      feedback,
-    });
-    setCurrentTask(prev => {
+    const submission = currentTask.submissions.find((item) => item.id === submissionId);
+    if (!submission) return;
+    setGradingSubmission(submission);
+    setGradingForm(buildInitialGradingForm(currentTask, submission));
+  };
+
+  const updateQuestionGrade = (index: number, patch: Partial<TaskQuestionGrade>) => {
+    setGradingForm(prev => {
       if (!prev) return prev;
       return {
         ...prev,
-        submissions: prev.submissions.map(submission =>
-          submission.id === submissionId
-            ? { ...submission, score, status: 'graded' as const }
-            : submission,
+        questionGrades: prev.questionGrades.map((grade, gradeIndex) =>
+          gradeIndex === index ? { ...grade, ...patch } : grade,
         ),
       };
     });
-    alert('批改已保存');
+  };
+
+  const setQuestionGradeResult = (index: number, correct: boolean) => {
+    setGradingForm(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        questionGrades: prev.questionGrades.map((grade, gradeIndex) =>
+          gradeIndex === index
+            ? {
+                ...grade,
+                correct,
+                score: correct ? Number(grade.maxScore) || 0 : 0,
+                requiresManualReview: false,
+                comment: grade.comment || (correct ? '教师复核：回答正确。' : '教师复核：回答有误。'),
+              }
+            : grade,
+        ),
+      };
+    });
+  };
+
+  const acceptAutoGradedQuestions = () => {
+    setGradingForm(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        questionGrades: prev.questionGrades.map((grade) =>
+          grade.autoGraded
+            ? { ...grade, requiresManualReview: false, comment: grade.comment || '已接受系统自动批改结果。' }
+            : grade,
+        ),
+      };
+    });
+  };
+
+  const submitGrading = async () => {
+    if (!currentTask || !gradingSubmission || !gradingForm || isSavingGrade) return;
+    const questionGrades = gradingForm.questionGrades.map((grade) => ({
+      ...grade,
+      score: Math.max(0, Math.min(Number(grade.score) || 0, Number(grade.maxScore) || 0)),
+      maxScore: Math.max(0, Number(grade.maxScore) || 0),
+    }));
+    const score = Math.round(questionGrades.reduce((sum, grade) => sum + grade.score, 0));
+    setIsSavingGrade(true);
+    try {
+      await courseService.gradeTeacherCourseSubmission(courseId, currentTask.id, gradingSubmission.id, {
+        score,
+        feedback: gradingForm.feedback,
+        questionGrades,
+        autoCreateMistakes: true,
+      });
+      const detail = await courseService.getTeacherCourseTaskDetail(courseId, currentTask.id);
+      setCurrentTask(detail);
+      setGradingSubmission(null);
+      setGradingForm(null);
+      alert('批改已保存，错误小题已同步到学生错题本');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '批改保存失败，请稍后重试';
+      alert(`批改失败：${message}`);
+    } finally {
+      setIsSavingGrade(false);
+    }
   };
 
   // 新增：切换问题展开/收起
@@ -994,14 +1226,7 @@ export default function TeacherCourse() {
     setIsAIAnswerLoading(true);
     setShowAIAnswerModal(true);
 
-    try {
-      const aiAnswerDetail = await aiService.getTeacherAiQuestionDetail(question.id);
-      setCurrentAIAnswer(aiAnswerDetail);
-    } catch {
-      setAiAnswerError('AI 回答加载失败，当前先展示基础占位数据。');
-    } finally {
-      setIsAIAnswerLoading(false);
-    }
+    setIsAIAnswerLoading(false);
   };
 
   // 新增：采纳AI回答
@@ -2504,7 +2729,8 @@ export default function TeacherCourse() {
                   </button>
                   <button
                     onClick={() => { void adoptAIAnswer(); }}
-                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
+                    disabled={!hasActionableAiAnswer(currentAIAnswer)}
+                    className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     采纳AI回答并发布
                   </button>
@@ -3029,21 +3255,29 @@ export default function TeacherCourse() {
                     <div>
                       <div className="flex items-center justify-between mb-3">
                         <label className="block text-sm font-medium text-gray-700">AI智能组卷</label>
-                        <button
-                          onClick={handleGenerateQuestions}
-                          disabled={isGeneratingQuestions}
-                          className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {isGeneratingQuestions ? (
-                            <>
-                              <i className="ri-loader-4-line animate-spin mr-1"></i>生成中...
-                            </>
-                          ) : (
-                            <>
-                              <i className="ri-ai-generate mr-1"></i>生成试卷
-                            </>
-                          )}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={addGeneratedExamQuestion}
+                            className="px-3 py-2 bg-white text-gray-700 border border-gray-200 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors cursor-pointer whitespace-nowrap"
+                          >
+                            <i className="ri-add-line mr-1"></i>手动加题
+                          </button>
+                          <button
+                            onClick={handleGenerateQuestions}
+                            disabled={isGeneratingQuestions}
+                            className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isGeneratingQuestions ? (
+                              <>
+                                <i className="ri-loader-4-line animate-spin mr-1"></i>生成中...
+                              </>
+                            ) : (
+                              <>
+                                <i className="ri-ai-generate mr-1"></i>生成试卷
+                              </>
+                            )}
+                          </button>
+                        </div>
                       </div>
                       
                       {examForm.generatedQuestions.length > 0 && (
@@ -3056,14 +3290,55 @@ export default function TeacherCourse() {
                                     {index + 1}
                                   </span>
                                 </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2 mb-1">
-                                    <span className="px-2 py-0.5 text-xs font-medium text-purple-600 bg-purple-50 rounded">
-                                      {q.type}
-                                    </span>
-                                    <span className="text-xs text-gray-500">{q.score}分</span>
+                                <div className="flex-1 min-w-0 space-y-2">
+                                  <div className="grid grid-cols-[1fr_96px_auto] gap-2">
+                                    <select
+                                      value={q.type}
+                                      onChange={(event) => updateGeneratedExamQuestion(index, { type: event.target.value })}
+                                      className="px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-purple-200"
+                                      aria-label={`第${index + 1}题题型`}
+                                    >
+                                      {EXAM_QUESTION_TYPES.map((item) => (
+                                        <option key={item.value} value={item.value}>{item.label}</option>
+                                      ))}
+                                    </select>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={q.score}
+                                      onChange={(event) => updateGeneratedExamQuestion(index, { score: Math.max(1, parseInt(event.target.value) || 1) })}
+                                      className="px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-purple-200"
+                                      aria-label={`第${index + 1}题分值`}
+                                    />
+                                    <button
+                                      onClick={() => removeGeneratedExamQuestion(index)}
+                                      className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 cursor-pointer"
+                                      title="删除题目"
+                                    >
+                                      <i className="ri-delete-bin-line text-sm"></i>
+                                    </button>
                                   </div>
-                                  <div className="text-sm text-gray-700">{q.content}</div>
+                                  <textarea
+                                    value={q.content}
+                                    onChange={(event) => updateGeneratedExamQuestion(index, { content: event.target.value })}
+                                    rows={3}
+                                    className="w-full px-2.5 py-2 text-sm text-gray-700 border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-purple-200 resize-none"
+                                    placeholder="请输入题目内容"
+                                  />
+                                  <textarea
+                                    value={q.answer || ''}
+                                    onChange={(event) => updateGeneratedExamQuestion(index, { answer: event.target.value })}
+                                    rows={2}
+                                    className="w-full px-2.5 py-2 text-sm text-green-700 border border-green-100 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-green-100 resize-none"
+                                    placeholder="参考答案（会进入教师批改界面的标准答案）"
+                                  />
+                                  <textarea
+                                    value={q.explanation || ''}
+                                    onChange={(event) => updateGeneratedExamQuestion(index, { explanation: event.target.value })}
+                                    rows={2}
+                                    className="w-full px-2.5 py-2 text-sm text-blue-700 border border-blue-100 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-100 resize-none"
+                                    placeholder="解析/评分要点（可选，会辅助教师批改和错题解析）"
+                                  />
                                 </div>
                               </div>
                             ))}
@@ -3075,6 +3350,12 @@ export default function TeacherCourse() {
                         <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
                           <i className="ri-file-list-3-line text-4xl text-gray-300 mb-2"></i>
                           <p className="text-sm text-gray-500">点击"生成试卷"按钮，AI将根据课程知识库智能组卷</p>
+                          <button
+                            onClick={addGeneratedExamQuestion}
+                            className="mt-3 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 rounded-lg hover:bg-purple-100 cursor-pointer"
+                          >
+                            手动添加第一题
+                          </button>
                         </div>
                       )}
                     </div>
@@ -3256,11 +3537,15 @@ export default function TeacherCourse() {
                       <div>
                         <div className="text-sm font-semibold text-gray-900 mb-2">附件</div>
                         <div className="space-y-2">
-                          {currentTask.attachments.map((filename: string, index: number) => (
+                          {currentTask.attachments.map((attachment, index: number) => (
                             <div key={index} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
                               <i className="ri-file-line text-gray-400 text-lg"></i>
-                              <span className="flex-1 text-sm text-gray-700">{filename}</span>
-                              <button className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap">
+                              <span className="flex-1 text-sm text-gray-700">{getTaskAttachmentName(attachment)}</span>
+                              <button
+                                onClick={() => { void downloadTaskAttachment(attachment); }}
+                                disabled={typeof attachment === 'string' || !attachment.downloadUrl}
+                                className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap disabled:text-gray-400 disabled:cursor-not-allowed"
+                              >
                                 <i className="ri-download-line mr-1"></i>下载
                               </button>
                             </div>
@@ -3287,6 +3572,55 @@ export default function TeacherCourse() {
                               {Math.round((currentTask.submitted / currentTask.total) * 100)}%
                             </div>
                           </div>
+                        </div>
+                        {(currentTask.averageScore !== undefined || currentTask.highestScore !== undefined || currentTask.lowestScore !== undefined) && (
+                          <div className="mt-3 grid grid-cols-3 gap-3">
+                            <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                              <div className="text-xs text-blue-600 mb-1">平均分</div>
+                              <div className="text-lg font-bold text-blue-700">{currentTask.averageScore ?? 0}</div>
+                            </div>
+                            <div className="p-3 bg-purple-50 rounded-lg border border-purple-100">
+                              <div className="text-xs text-purple-600 mb-1">最高分</div>
+                              <div className="text-lg font-bold text-purple-700">{currentTask.highestScore ?? 0}</div>
+                            </div>
+                            <div className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                              <div className="text-xs text-gray-600 mb-1">最低分</div>
+                              <div className="text-lg font-bold text-gray-900">{currentTask.lowestScore ?? 0}</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {currentTask.type !== 'notice' && currentTask.questionStats && currentTask.questionStats.length > 0 && (
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-sm font-semibold text-gray-900">按小题统计</div>
+                          <div className="text-xs text-gray-400">基于已批改提交计算</div>
+                        </div>
+                        <div className="space-y-2">
+                          {currentTask.questionStats.map((stat, index) => (
+                            <div key={`${stat.questionId}-${index}`} className="rounded-lg border border-gray-200 bg-white p-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs font-semibold text-gray-500 mb-1">{stat.title} · {stat.maxScore} 分</div>
+                                  <div className="text-sm text-gray-800 line-clamp-2">{stat.content}</div>
+                                </div>
+                                <div className="text-right">
+                                  <div className={`text-lg font-bold ${stat.correctRate >= 70 ? 'text-green-600' : stat.correctRate >= 40 ? 'text-amber-600' : 'text-red-500'}`}>
+                                    {stat.correctRate}%
+                                  </div>
+                                  <div className="text-xs text-gray-400">正确率</div>
+                                </div>
+                              </div>
+                              <div className="mt-2 grid grid-cols-4 gap-2 text-xs">
+                                <div className="rounded bg-gray-50 px-2 py-1 text-gray-600">已答 {stat.submittedCount}</div>
+                                <div className="rounded bg-gray-50 px-2 py-1 text-gray-600">已批 {stat.gradedCount}</div>
+                                <div className="rounded bg-green-50 px-2 py-1 text-green-700">正确 {stat.correctCount}</div>
+                                <div className="rounded bg-blue-50 px-2 py-1 text-blue-700">均分 {stat.averageScore}</div>
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     )}
@@ -3394,6 +3728,173 @@ export default function TeacherCourse() {
                     className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
                   >
                     关闭
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {gradingSubmission && gradingForm && currentTask && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-900">批改：{gradingSubmission.studentName}</h2>
+                    <div className="text-sm text-gray-500 mt-1">
+                      总分 {Math.round(gradingForm.questionGrades.reduce((sum, grade) => sum + (Number(grade.score) || 0), 0))} / {gradingForm.questionGrades.reduce((sum, grade) => sum + (Number(grade.maxScore) || 0), 0)}
+                      <span className="ml-3">
+                        自动批改 {gradingForm.questionGrades.filter(grade => grade.autoGraded).length} 题 · 待人工 {gradingForm.questionGrades.filter(grade => grade.requiresManualReview).length} 题
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {gradingForm.questionGrades.some(grade => grade.autoGraded) && (
+                      <button
+                        onClick={acceptAutoGradedQuestions}
+                        disabled={isSavingGrade}
+                        className="px-3 py-1.5 text-xs font-medium text-teal-700 bg-teal-50 rounded-lg hover:bg-teal-100 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        接受自动批改
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        if (isSavingGrade) return;
+                        setGradingSubmission(null);
+                        setGradingForm(null);
+                      }}
+                      disabled={isSavingGrade}
+                      className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <i className="ri-close-line text-xl"></i>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                  {gradingForm.questionGrades.map((grade, index) => (
+                    <div key={grade.questionId} className={`border rounded-lg p-4 ${grade.requiresManualReview ? 'border-amber-200 bg-amber-50/20' : grade.autoGraded ? 'border-teal-200 bg-teal-50/20' : 'border-gray-200'}`}>
+                      <div className="flex items-start justify-between gap-4 mb-3">
+                        <div className="flex-1">
+                          <div className="mb-1 flex flex-wrap items-center gap-2">
+                            <span className="text-xs text-gray-500">第 {index + 1} 题</span>
+                            {grade.autoGraded && (
+                              <span className="rounded bg-teal-100 px-2 py-0.5 text-xs font-medium text-teal-700">系统已批</span>
+                            )}
+                            {grade.requiresManualReview && (
+                              <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">待人工复核</span>
+                            )}
+                          </div>
+                          <div className="text-sm font-medium text-gray-900 leading-6">{grade.content}</div>
+                        </div>
+                        <div className="flex flex-shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setQuestionGradeResult(index, true)}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-lg border ${grade.correct ? 'border-green-200 bg-green-50 text-green-700' : 'border-gray-200 bg-white text-gray-600 hover:border-green-200'}`}
+                          >
+                            正确
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setQuestionGradeResult(index, false)}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-lg border ${!grade.correct ? 'border-red-200 bg-red-50 text-red-700' : 'border-gray-200 bg-white text-gray-600 hover:border-red-200'}`}
+                          >
+                            错误
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div>
+                          <div className="text-xs font-medium text-gray-500 mb-1">学生答案</div>
+                          <div className="min-h-20 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-sm text-gray-700 whitespace-pre-wrap">
+                            {grade.answer || '未填写'}
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">参考答案</label>
+                          <textarea
+                            rows={3}
+                            value={grade.correctAnswer || ''}
+                            onChange={(event) => updateQuestionGrade(index, { correctAnswer: event.target.value })}
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-[140px_140px_1fr] gap-4 mt-4">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">得分</label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={grade.maxScore}
+                            value={grade.score}
+                            onChange={(event) => {
+                              const score = Number(event.target.value);
+                              updateQuestionGrade(index, {
+                                score,
+                                correct: score >= (Number(grade.maxScore) || 0) && (Number(grade.maxScore) || 0) > 0,
+                                requiresManualReview: false,
+                              });
+                            }}
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">满分</label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={grade.maxScore}
+                            onChange={(event) => updateQuestionGrade(index, { maxScore: Number(event.target.value) })}
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 mb-1">本题评语</label>
+                          <input
+                            value={grade.comment || ''}
+                            onChange={(event) => updateQuestionGrade(index, { comment: event.target.value })}
+                            placeholder="指出错误原因或改进建议"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-900 mb-2">教师总评</label>
+                    <textarea
+                      rows={3}
+                      value={gradingForm.feedback}
+                      onChange={(event) => setGradingForm(prev => prev ? { ...prev, feedback: event.target.value } : prev)}
+                      placeholder="填写整体反馈，学生端批改详情会展示"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3 flex-shrink-0">
+                  <button
+                    onClick={() => {
+                      if (isSavingGrade) return;
+                      setGradingSubmission(null);
+                      setGradingForm(null);
+                    }}
+                    disabled={isSavingGrade}
+                    className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={() => { void submitGrading(); }}
+                    disabled={isSavingGrade}
+                    className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {isSavingGrade ? '保存中...' : '保存批改'}
                   </button>
                 </div>
               </div>
@@ -3675,6 +4176,21 @@ export default function TeacherCourse() {
                         <div className="text-xs text-gray-500 mb-1">下载次数</div>
                         <div className="text-sm font-medium text-gray-900">{currentFile.downloads} 次</div>
                       </div>
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      {[
+                        { label: '原文件下载', ok: currentFilePreview.downloadAvailable !== false, hint: '上传后即可下载' },
+                        { label: '文本预览', ok: Boolean(currentFilePreview.textPreviewAvailable), hint: '解析后显示正文' },
+                        { label: 'AI 检索', ok: Boolean(currentFilePreview.retrievalAvailable), hint: '索引完成后可用于问答' },
+                      ].map(item => (
+                        <div key={item.label} className={`rounded-lg border px-3 py-2 ${item.ok ? 'border-teal-100 bg-teal-50' : 'border-gray-200 bg-gray-50'}`}>
+                          <div className={`text-xs font-semibold ${item.ok ? 'text-teal-700' : 'text-gray-500'}`}>
+                            <i className={`${item.ok ? 'ri-checkbox-circle-fill' : 'ri-time-line'} mr-1`}></i>{item.label}
+                          </div>
+                          <div className="mt-0.5 text-xs text-gray-500">{item.hint}</div>
+                        </div>
+                      ))}
                     </div>
 
                     {currentFilePreview.previewType === 'video' && currentFilePreview.previewUrl ? (

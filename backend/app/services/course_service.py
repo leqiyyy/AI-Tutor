@@ -5,6 +5,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.integrations.rag.graph_schema import resolve_graph_schema
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Submission, Task
 from app.models.user import User
 from app.services import audit_service
@@ -15,11 +16,17 @@ def _random_invite_code(length: int = 8) -> str:
 
 
 def create_course(db: Session, created_by: str, data: dict) -> Course:
+    graph_schema = resolve_graph_schema(
+        data.get("graph_schema"),
+        name=data.get("name"),
+        description=data.get("description"),
+    )
     course = Course(
         name=data["name"],
         code=data.get("code"),
         description=data.get("description"),
         cover_color=data.get("cover_color") or "#3b82f6",
+        graph_schema=graph_schema,
         created_by=created_by,
     )
     db.add(course)
@@ -67,6 +74,7 @@ def list_courses_for_user(db: Session, user: User) -> List[dict]:
             "code": course.code if course else None,
             "description": course.description if course else None,
             "cover_color": course.cover_color if course else "#3b82f6",
+            "graph_schema": cls.graph_schema or (course.graph_schema if course else None),
             "semester": cls.semester,
             "teacher_id": cls.teacher_id,
             "teacher_name": teacher.real_name if teacher else None,
@@ -119,6 +127,7 @@ def get_course_detail_for_user(db: Session, course_id: str, user: User) -> dict:
             "created_at": cls.created_at,
             "student_count": student_count,
             "course_name": course.name,
+            "graph_schema": cls.graph_schema or course.graph_schema,
         })
 
     return {
@@ -127,6 +136,7 @@ def get_course_detail_for_user(db: Session, course_id: str, user: User) -> dict:
         "code": course.code,
         "description": course.description,
         "cover_color": course.cover_color,
+        "graph_schema": course.graph_schema,
         "created_by": course.created_by,
         "created_at": course.created_at,
         "classes": class_items,
@@ -140,15 +150,26 @@ def create_class(db: Session, teacher_id: str, data: dict) -> Class:
         if not course:
             raise NotFoundException("Course not found")
     if not course:
+        course_graph_schema = resolve_graph_schema(
+            data.get("graph_schema"),
+            name=data.get("name"),
+            description=data.get("description"),
+        )
         course = Course(
             name=data["name"],
             code=data.get("code"),
             description=data.get("description"),
             cover_color=data.get("cover_color", "#3b82f6"),
+            graph_schema=course_graph_schema,
             created_by=teacher_id,
         )
         db.add(course)
         db.flush()
+    class_graph_schema = resolve_graph_schema(
+        data.get("graph_schema") or course.graph_schema,
+        name=f"{course.name or ''} {data.get('name') or ''}".strip(),
+        description=data.get("description") or course.description,
+    )
     invite_code = _random_invite_code()
     while db.query(Class).filter(Class.invite_code == invite_code).first():
         invite_code = _random_invite_code()
@@ -158,6 +179,7 @@ def create_class(db: Session, teacher_id: str, data: dict) -> Class:
         name=data["name"],
         semester=data.get("semester"),
         invite_code=invite_code,
+        graph_schema=class_graph_schema,
     )
     db.add(cls)
     db.flush()
@@ -211,6 +233,7 @@ def get_teacher_classes(db: Session, teacher_id: str) -> List[dict]:
             "is_active": cls.is_active,
             "created_at": cls.created_at,
             "student_count": student_count,
+            "graph_schema": cls.graph_schema or (course.graph_schema if course else None),
         })
     return result
 
@@ -239,6 +262,7 @@ def get_student_classes(db: Session, student_id: str) -> List[dict]:
             "announcement": cls.announcement,
             "is_active": cls.is_active,
             "created_at": cls.created_at,
+            "graph_schema": cls.graph_schema or (course.graph_schema if course else None),
         })
     return result
 

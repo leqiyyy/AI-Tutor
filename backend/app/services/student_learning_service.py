@@ -11,6 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import NotFoundException
+from app.core.timezone import date_app_timezone, isoformat_app_timezone
 from app.models.analytics import LearningRecord, StudyMistake
 from app.models.chat import ChatMessage, ChatSession, ReviewItem
 from app.models.course import Class, ClassMember, Material, Submission, Task
@@ -231,6 +232,7 @@ def create_learning_mistake(db: Session, student: User, course_or_class_id: str,
         correct_answer=payload.get("correctAnswer") or payload.get("correct_answer"),
         analysis=payload.get("analysis"),
         wrong_count=1,
+        extra_data={"source": "manual"},
     )
     db.add(mistake)
     db.commit()
@@ -281,28 +283,88 @@ def practice_learning_mistake(db: Session, student: User, course_or_class_id: st
     }
 
 
+def generate_similar_mistake_practice(db: Session, student: User, course_or_class_id: str, mistake_id: str) -> dict:
+    cls = resolve_learning_class(db, student, course_or_class_id)
+    mistake = db.query(StudyMistake).filter(
+        StudyMistake.id == mistake_id,
+        StudyMistake.user_id == student.id,
+        StudyMistake.class_id == cls.id,
+    ).first()
+    if not mistake:
+        raise NotFoundException("Mistake not found")
+    mistake.last_practice_at = datetime.now(timezone.utc)
+    chapter = mistake.chapter or "当前知识点"
+    prompt = (
+        f"相似练习（{chapter}）：\n"
+        f"请围绕原错题考查的同一知识点，完成一道变式题，并写出关键步骤。\n\n"
+        f"原错题：{mistake.question}\n\n"
+        f"变式题：请换一个场景或参数，重新判断并说明理由。"
+    )
+    db.add(LearningRecord(
+        user_id=student.id,
+        class_id=cls.id,
+        activity_type="mistake_similar_practice",
+        ref_id=mistake.id,
+        extra_data={
+            "chapter": chapter,
+            "source_question": mistake.question[:300],
+        },
+    ))
+    db.commit()
+    db.refresh(mistake)
+    return {
+        "mistakeId": mistake.id,
+        "prompt": prompt,
+        "answerHint": mistake.correct_answer or "",
+        "analysis": mistake.analysis or "",
+        "lastPracticeTime": _date_text(mistake.last_practice_at),
+        "mistake": _mistake_to_frontend(mistake),
+    }
+
+
 def list_learning_flashcard_decks(db: Session, student: User, course_or_class_id: str) -> dict:
     cls = resolve_learning_class(db, student, course_or_class_id)
     cards = _flashcards(db, student.id, cls.id)
     if not cards:
         return {"decks": []}
+    grouped: dict[str, list[Flashcard]] = {}
+    for card in cards:
+        deck_name = _flashcard_deck_name(card, cls.name)
+        grouped.setdefault(deck_name, []).append(card)
+
+    decks = [
+        _flashcard_deck_to_frontend(cls.id, deck_name, deck_cards)
+        for deck_name, deck_cards in grouped.items()
+    ]
+    decks.sort(key=lambda item: (0 if item["dueCount"] else 1, item["name"]))
+    return {"decks": decks}
+
+
+def _flashcard_deck_name(card: Flashcard, class_name: str) -> str:
+    tags = card.tags if isinstance(card.tags, list) else []
+    for tag in tags:
+        text = str(tag or "").strip()
+        if text:
+            return text
+    return f"{class_name} · 我的闪卡"
+
+
+def _flashcard_deck_to_frontend(class_id: str, deck_name: str, cards: list[Flashcard]) -> dict:
     mastered = sum(1 for card in cards if (card.review_count or 0) > 0 and (card.interval_days or 0) >= 7)
     learning = sum(1 for card in cards if (card.review_count or 0) > 0 and (card.interval_days or 0) < 7)
     new = sum(1 for card in cards if not card.review_count)
     next_review = min([card.next_review_at for card in cards if card.next_review_at] or [None])
     due_count = sum(1 for card in cards if _flashcard_due(card))
     return {
-        "decks": [{
-            "id": f"class:{cls.id}",
-            "name": f"{cls.name} · 我的闪卡",
-            "cards": len(cards),
-            "mastered": mastered,
-            "learning": learning,
-            "new": new,
-            "dueCount": due_count,
-            "nextReview": "今天" if due_count else (_date_text(next_review) if next_review else "暂无复习计划"),
-            "cardList": [_flashcard_to_frontend(card) for card in cards],
-        }]
+        "id": f"deck:{class_id}:{deck_name}",
+        "name": deck_name,
+        "cards": len(cards),
+        "mastered": mastered,
+        "learning": learning,
+        "new": new,
+        "dueCount": due_count,
+        "nextReview": "今天" if due_count else (_date_text(next_review) if next_review else "暂无复习计划"),
+        "cardList": [_flashcard_to_frontend(card) for card in cards],
     }
 
 
@@ -325,7 +387,11 @@ def create_learning_flashcard_deck(db: Session, student: User, course_or_class_i
         db.add(row)
         created.append(row)
     db.commit()
-    return list_learning_flashcard_decks(db, student, cls.id)["decks"][0] if created else {
+    if created:
+        for card in created:
+            db.refresh(card)
+        return _flashcard_deck_to_frontend(cls.id, payload.get("name") or "自建卡组", created)
+    return {
         "id": f"class:{cls.id}",
         "name": payload.get("name") or "新卡组",
         "cards": 0,
@@ -747,6 +813,7 @@ def _is_good_keyword(keyword: str) -> bool:
 
 
 def _mistake_to_frontend(item: StudyMistake) -> dict:
+    extra = item.extra_data if isinstance(item.extra_data, dict) else {}
     return {
         "id": item.id,
         "question": item.question,
@@ -758,6 +825,12 @@ def _mistake_to_frontend(item: StudyMistake) -> dict:
         "addTime": _date_text(item.created_at),
         "lastPracticeTime": _date_text(item.last_practice_at),
         "mastered": bool(item.mastered),
+        "source": extra.get("source"),
+        "sourceTaskId": extra.get("task_id"),
+        "sourceTaskTitle": extra.get("task_title"),
+        "sourceTaskType": extra.get("task_type"),
+        "sourceSubmissionId": extra.get("submission_id"),
+        "sourceQuestionId": extra.get("question_id"),
     }
 
 
@@ -768,11 +841,11 @@ def _range_label(start_at: datetime, now: datetime, period: str) -> str:
 
 
 def _date_text(value: Optional[datetime]) -> str:
-    return _aware(value).date().isoformat() if value else ""
+    return date_app_timezone(_aware(value)) if value else ""
 
 
 def _iso(value: Optional[datetime]) -> str:
-    return _aware(value).isoformat().replace("+00:00", "Z") if value else ""
+    return isoformat_app_timezone(_aware(value)) if value else ""
 
 
 def _aware(value: Optional[datetime]) -> datetime:

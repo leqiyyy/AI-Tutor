@@ -165,4 +165,5 @@ export interface ReplyAiQuestionPayload {
 
 export interface GenerateTeacherToolPayload {
   prompt: string;
+  classId?: string;
 }

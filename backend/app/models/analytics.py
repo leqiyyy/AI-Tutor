@@ -70,6 +70,7 @@ class StudyMistake(Base):
     analysis = Column(Text, nullable=True)
     wrong_count = Column(Integer, default=1)
     mastered = Column(Integer, default=0)
+    extra_data = Column(JSON, nullable=True)
     last_practice_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),

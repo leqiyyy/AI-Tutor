@@ -28,6 +28,7 @@ import {
 import type {
   CourseFaqsData,
   CourseSearchResult,
+  CourseTaskAttachmentsUploadData,
   CreateCourseRequest,
   CreateCourseResult,
   CourseDiscussionsData,
@@ -357,6 +358,20 @@ export const courseService = {
     });
   },
 
+  async uploadTeacherTaskAttachments(
+    courseId: string,
+    files: File[],
+  ): Promise<CourseTaskAttachmentsUploadData> {
+    if (shouldUseMockApi || files.length === 0) {
+      return { attachments: files.map((file) => ({ id: "", fileName: file.name, size: file.size, mimeType: file.type })) };
+    }
+
+    return http<CourseTaskAttachmentsUploadData>(`/teacher/courses/${courseId}/task-attachments`, {
+      method: "POST",
+      body: buildFormData(files),
+    });
+  },
+
   async renameTeacherCourseFile(
     courseId: string,
     fileId: string | number,
@@ -436,6 +451,18 @@ export const courseService = {
     if (shouldUseMockApi) return {};
 
     return http<CourseMutationResult>(`/teacher/courses/${courseId}/exams`, {
+      method: "POST",
+      body: payload,
+    });
+  },
+
+  async publishTeacherFlashcardDeck(
+    courseId: string,
+    payload: CoursePayload,
+  ): Promise<CourseMutationResult> {
+    if (shouldUseMockApi) return {};
+
+    return http<CourseMutationResult>(`/teacher/courses/${courseId}/flashcard-decks`, {
       method: "POST",
       body: payload,
     });

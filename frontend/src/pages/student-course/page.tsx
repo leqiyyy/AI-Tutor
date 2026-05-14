@@ -16,6 +16,7 @@ import type {
   CourseDiscussion,
   CourseFaq,
   CourseSearchResult,
+  CourseTaskAttachment,
   KnowledgeGraphEdge,
   KnowledgeGraphNode,
   StudentCourseMaterial,
@@ -80,6 +81,35 @@ function isIndexedMaterialStatus(status?: string | null) {
   return ['indexed', 'completed', 'complete', 'success', 'ready', '已解析', '解析完成'].includes(normalized);
 }
 
+function parseQuestionOptions(content: string) {
+  const lines = content.split('\n').map((line) => line.trim()).filter(Boolean);
+  const options: Array<{ key: string; text: string }> = [];
+  const stemLines: string[] = [];
+
+  lines.forEach((line) => {
+    const match = line.match(/^([A-H])[\s.、．:：]\s*(.+)$/i);
+    if (match) {
+      options.push({ key: match[1].toUpperCase(), text: match[2].trim() });
+    } else {
+      stemLines.push(line);
+    }
+  });
+
+  return {
+    stem: stemLines.join('\n') || content,
+    options,
+  };
+}
+
+function getQuestionTypeLabel(type?: string) {
+  const normalized = (type || '').toLowerCase();
+  if (normalized === 'single') return '单选题';
+  if (normalized === 'multiple') return '多选题';
+  if (normalized === 'judge') return '判断题';
+  if (normalized === 'code') return '编程题';
+  return '简答题';
+}
+
 function isMaterialIndexingStatus(status?: string | null) {
   const normalized = normalizeMaterialStatus(status);
   return ['pending', 'queued', 'processing', 'running', '待解析', '解析中'].includes(normalized);
@@ -100,6 +130,17 @@ function getMaterialStatusMeta(status?: string | null) {
     return { label: '解析中', className: 'bg-yellow-50 text-yellow-600' };
   }
   return { label: status || '待解析', className: 'bg-gray-100 text-gray-600' };
+}
+
+function getTaskAttachmentName(attachment: string | CourseTaskAttachment) {
+  return typeof attachment === 'string' ? attachment : attachment.fileName;
+}
+
+async function downloadTaskAttachment(attachment: string | CourseTaskAttachment) {
+  if (typeof attachment === 'string' || !attachment.downloadUrl) {
+    return;
+  }
+  await downloadCourseFileFromUrl(attachment.downloadUrl, attachment.fileName);
 }
 
 function createEmptyMistakeForm() {
@@ -502,8 +543,23 @@ export default function StudentCourse() {
     return homeworks;
   };
 
+  const getExamStartTime = (homework: StudentCourseTask) => {
+    if (!homework.isExam || !homework.startTime) return null;
+    const startAt = new Date(homework.startTime).getTime();
+    return Number.isFinite(startAt) ? startAt : null;
+  };
+
+  const isExamNotStarted = (homework: StudentCourseTask) => {
+    const startAt = getExamStartTime(homework);
+    return startAt !== null && Date.now() < startAt;
+  };
+
   // 新增：开始作业
-  const handleStartHomework = (homework: any) => {
+  const handleStartHomework = (homework: StudentCourseTask) => {
+    if (isExamNotStarted(homework)) {
+      alert(`考试尚未开始。开放时间：${homework.startTime}`);
+      return;
+    }
     setCurrentHomework(homework);
     setHomeworkAnswers({});
     setShowHomeworkModal(true);
@@ -525,6 +581,21 @@ export default function StudentCourse() {
     } else {
       setExamCountdown(null);
     }
+  };
+
+  const updateHomeworkAnswer = (questionId: number | string, value: string) => {
+    setHomeworkAnswers(prev => ({ ...prev, [String(questionId)]: value }));
+  };
+
+  const toggleMultipleChoiceAnswer = (questionId: number | string, optionKey: string) => {
+    const id = String(questionId);
+    const selected = new Set((homeworkAnswers[id] || '').split(',').map(item => item.trim()).filter(Boolean));
+    if (selected.has(optionKey)) {
+      selected.delete(optionKey);
+    } else {
+      selected.add(optionKey);
+    }
+    updateHomeworkAnswer(id, Array.from(selected).sort().join(','));
   };
 
   // 新增：提交作业
@@ -603,6 +674,16 @@ export default function StudentCourse() {
     setCurrentMistakePractice(practice);
     setCurrentMistake(practice.mistake);
     setMistakes(prev => prev.map(item => 
+      item.id === mistake.id ? { ...practice.mistake } : item
+    ));
+    setShowMistakeDetailModal(true);
+  };
+
+  const handleSimilarPracticeMistake = async (mistake: LearningMistake) => {
+    const practice = await learningService.generateSimilarMistakePractice(courseId, mistake.id);
+    setCurrentMistakePractice(practice);
+    setCurrentMistake(practice.mistake);
+    setMistakes(prev => prev.map(item =>
       item.id === mistake.id ? { ...practice.mistake } : item
     ));
     setShowMistakeDetailModal(true);
@@ -795,16 +876,23 @@ export default function StudentCourse() {
       return;
     }
 
-    await courseService.requestTeacherHelp(courseId, {
-      title: aiToTeacherForm.title,
-      content: aiToTeacherForm.content,
-      aiAnswer: aiToTeacherForm.aiAnswer,
-      reason: aiToTeacherForm.reason,
-    });
+    try {
+      await courseService.requestTeacherHelp(courseId, {
+        title: aiToTeacherForm.title,
+        content: aiToTeacherForm.content,
+        aiAnswer: aiToTeacherForm.aiAnswer,
+        reason: aiToTeacherForm.reason,
+      });
+      const questionsData = await courseService.getStudentCourseQuestions(courseId);
+      setMyQuestions(questionsData.questions);
 
-    alert('申请已提交！教师将尽快为您解答。');
-    setShowAIToTeacherModal(false);
-    setAiToTeacherForm(createEmptyAiToTeacherForm());
+      alert('申请已提交！教师将尽快为您解答。');
+      setShowAIToTeacherModal(false);
+      setAiToTeacherForm(createEmptyAiToTeacherForm());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '申请提交失败，请稍后重试';
+      alert(`申请提交失败：${message}`);
+    }
   };
 
   // 新增：开始今日复习
@@ -883,12 +971,12 @@ export default function StudentCourse() {
       return;
     }
 
-    const newDeck = await learningService.createFlashcardDeck(courseId, {
+    await learningService.createFlashcardDeck(courseId, {
       name: newDeckForm.name,
       cards: validCards,
     });
-
-    setDecks([newDeck, ...decks]);
+    const decksData = await learningService.getFlashcardDecks(courseId);
+    setDecks(decksData.decks);
 
     alert('卡组创建成功！');
     setShowCreateDeckModal(false);
@@ -1548,9 +1636,14 @@ export default function StudentCourse() {
                       {homework.status === 'pending' && (
                         <button 
                           onClick={() => handleStartHomework(homework)}
-                          className="px-3 py-1.5 text-xs font-medium text-white bg-teal-600 rounded-md hover:bg-teal-700 cursor-pointer whitespace-nowrap"
+                          disabled={isExamNotStarted(homework)}
+                          className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap ${
+                            isExamNotStarted(homework)
+                              ? 'text-gray-500 bg-gray-100 cursor-not-allowed'
+                              : 'text-white bg-teal-600 hover:bg-teal-700 cursor-pointer'
+                          }`}
                         >
-                          {homework.isExam ? '开始考试' : '开始作业'}
+                          {homework.isExam ? (isExamNotStarted(homework) ? '未开始' : '开始考试') : '开始作业'}
                         </button>
                       )}
                       {homework.status === 'submitted' && (
@@ -2167,6 +2260,22 @@ export default function StudentCourse() {
               </div>
               
               <div className="flex-1 overflow-y-auto p-6">
+                {currentFilePreview && !isFilePreviewLoading && (
+                  <div className="mb-4 grid gap-2 sm:grid-cols-3">
+                    {[
+                      { label: '原文件下载', ok: currentFilePreview.downloadAvailable !== false, hint: '上传后即可下载' },
+                      { label: '文本预览', ok: Boolean(currentFilePreview.textPreviewAvailable), hint: '解析后显示正文' },
+                      { label: 'AI 检索', ok: Boolean(currentFilePreview.retrievalAvailable), hint: '索引完成后可用于问答' },
+                    ].map(item => (
+                      <div key={item.label} className={`rounded-lg border px-3 py-2 ${item.ok ? 'border-teal-100 bg-teal-50' : 'border-gray-200 bg-gray-50'}`}>
+                        <div className={`text-xs font-semibold ${item.ok ? 'text-teal-700' : 'text-gray-500'}`}>
+                          <i className={`${item.ok ? 'ri-checkbox-circle-fill' : 'ri-time-line'} mr-1`}></i>{item.label}
+                        </div>
+                        <div className="mt-0.5 text-xs text-gray-500">{item.hint}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {isFilePreviewLoading ? (
                   <div className="min-h-[420px] flex items-center justify-center text-sm text-gray-500">
                     正在加载预览...
@@ -2457,35 +2566,117 @@ export default function StudentCourse() {
               
               <div className="flex-1 overflow-y-auto p-6">
                 <div className="space-y-6">
-                  {currentHomework.questions.map((question: any, index: number) => (
+                  {(currentHomework.attachments || []).length > 0 && (
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 mb-2">附件</div>
+                      <div className="space-y-2">
+                        {currentHomework.attachments.map((attachment: string | CourseTaskAttachment, index: number) => (
+                          <div key={index} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                            <i className="ri-file-line text-gray-400 text-lg"></i>
+                            <span className="flex-1 text-sm text-gray-700">{getTaskAttachmentName(attachment)}</span>
+                            <button
+                              onClick={() => { void downloadTaskAttachment(attachment); }}
+                              disabled={typeof attachment === 'string' || !attachment.downloadUrl}
+                              className="text-xs text-teal-600 hover:text-teal-700 cursor-pointer whitespace-nowrap disabled:text-gray-400 disabled:cursor-not-allowed"
+                            >
+                              <i className="ri-download-line mr-1"></i>下载
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {currentHomework.questions.map((question: any, index: number) => {
+                    const questionType = String(question.type || 'text').toLowerCase();
+                    const { stem, options } = parseQuestionOptions(question.content || '');
+                    const answerValue = homeworkAnswers[String(question.id)] || '';
+                    const choiceOptions = questionType === 'judge'
+                      ? [{ key: '正确', text: '正确' }, { key: '错误', text: '错误' }]
+                      : options;
+
+                    return (
                     <div key={question.id} className="p-4 border border-gray-200 rounded-lg">
                       <div className="flex items-start gap-3 mb-3">
                         <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full bg-teal-100 text-teal-600 text-xs font-semibold">
                           {index + 1}
                         </span>
-                        <div className="flex-1">
-                          <div className="text-sm font-medium text-gray-900 mb-2">{question.content}</div>
-                          {question.type === 'text' ? (
-                            <textarea
-                              rows={4}
-                              value={homeworkAnswers[question.id] || ''}
-                              onChange={(e) => setHomeworkAnswers({ ...homeworkAnswers, [question.id]: e.target.value })}
-                              placeholder="请输入您的答案..."
-                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
-                            ></textarea>
+                        <div className="flex-1 min-w-0">
+                          <div className="mb-2 flex flex-wrap items-center gap-2">
+                            <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                              {getQuestionTypeLabel(questionType)}
+                            </span>
+                            {question.maxScore !== undefined && question.maxScore !== null && (
+                              <span className="text-xs text-gray-400">{question.maxScore} 分</span>
+                            )}
+                          </div>
+                          <div className="text-sm font-medium text-gray-900 mb-3 whitespace-pre-wrap">{stem}</div>
+
+                          {questionType === 'single' && choiceOptions.length > 0 ? (
+                            <div className="space-y-2">
+                              {choiceOptions.map((option) => (
+                                <label key={option.key} className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 hover:border-teal-200 cursor-pointer">
+                                  <input
+                                    type="radio"
+                                    name={`question-${question.id}`}
+                                    checked={answerValue === option.key}
+                                    onChange={() => updateHomeworkAnswer(question.id, option.key)}
+                                    className="mt-1 text-teal-600 focus:ring-teal-500"
+                                  />
+                                  <span><span className="font-semibold">{option.key}.</span> {option.text}</span>
+                                </label>
+                              ))}
+                            </div>
+                          ) : questionType === 'multiple' && choiceOptions.length > 0 ? (
+                            <div className="space-y-2">
+                              {choiceOptions.map((option) => {
+                                const selected = answerValue.split(',').map(item => item.trim()).includes(option.key);
+                                return (
+                                  <label key={option.key} className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 hover:border-teal-200 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={selected}
+                                      onChange={() => toggleMultipleChoiceAnswer(question.id, option.key)}
+                                      className="mt-1 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                                    />
+                                    <span><span className="font-semibold">{option.key}.</span> {option.text}</span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          ) : questionType === 'judge' ? (
+                            <div className="flex flex-wrap gap-2">
+                              {choiceOptions.map((option) => (
+                                <button
+                                  key={option.key}
+                                  type="button"
+                                  onClick={() => updateHomeworkAnswer(question.id, option.key)}
+                                  className={`px-4 py-2 rounded-lg border text-sm font-medium ${
+                                    answerValue === option.key
+                                      ? 'border-teal-500 bg-teal-50 text-teal-700'
+                                      : 'border-gray-200 bg-white text-gray-700 hover:border-teal-200'
+                                  }`}
+                                >
+                                  {option.text}
+                                </button>
+                              ))}
+                            </div>
                           ) : (
                             <textarea
-                              rows={8}
-                              value={homeworkAnswers[question.id] || ''}
-                              onChange={(e) => setHomeworkAnswers({ ...homeworkAnswers, [question.id]: e.target.value })}
-                              placeholder="请输入您的代码..."
-                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
+                              rows={questionType === 'code' ? 8 : 4}
+                              value={answerValue}
+                              onChange={(e) => updateHomeworkAnswer(question.id, e.target.value)}
+                              placeholder={questionType === 'code' ? '请输入您的代码...' : '请输入您的答案...'}
+                              className={`w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 ${
+                                questionType === 'code' ? 'font-mono' : ''
+                              }`}
                             ></textarea>
                           )}
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
@@ -2542,20 +2733,26 @@ export default function StudentCourse() {
               
               <div className="flex-1 overflow-y-auto p-6">
                 <div className="space-y-6">
-                  {currentHomework.questions.map((question: any, index: number) => (
+                  {currentHomework.questions.map((question: any, index: number) => {
+                    const hasQuestionGrade = typeof question.correct === 'boolean';
+                    const isCorrect = question.correct === true;
+
+                    return (
                     <div key={question.id} className={`p-4 border rounded-lg ${
-                      question.correct ? 'border-green-200 bg-green-50/30' : 'border-red-200 bg-red-50/30'
+                      !hasQuestionGrade ? 'border-gray-200 bg-gray-50/30' : isCorrect ? 'border-green-200 bg-green-50/30' : 'border-red-200 bg-red-50/30'
                     }`}>
                       <div className="flex items-start gap-3 mb-3">
                         <span className={`flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full text-xs font-semibold ${
-                          question.correct ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
+                          !hasQuestionGrade ? 'bg-gray-100 text-gray-600' : isCorrect ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
                         }`}>
                           {index + 1}
                         </span>
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-2">
                             <div className="text-sm font-medium text-gray-900">{question.content}</div>
-                            {question.correct ? (
+                            {!hasQuestionGrade ? (
+                              <span className="px-2 py-0.5 text-xs font-medium text-gray-600 bg-gray-100 rounded">未逐题批改</span>
+                            ) : isCorrect ? (
                               <span className="px-2 py-0.5 text-xs font-medium text-green-600 bg-green-100 rounded">正确</span>
                             ) : (
                               <span className="px-2 py-0.5 text-xs font-medium text-red-600 bg-red-100 rounded">错误</span>
@@ -2571,6 +2768,15 @@ export default function StudentCourse() {
                             </div>
                           </div>
 
+                          {question.correctAnswer && (
+                            <div className="mb-3">
+                              <div className="text-xs text-gray-500 mb-1">参考答案：</div>
+                              <div className="text-sm p-3 rounded-lg bg-green-50 border border-green-100 text-gray-700 whitespace-pre-wrap">
+                                {question.correctAnswer}
+                              </div>
+                            </div>
+                          )}
+
                           {question.comment && (
                             <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg">
                               <div className="text-xs text-blue-600 font-medium mb-1">教师评语：</div>
@@ -2580,7 +2786,8 @@ export default function StudentCourse() {
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
 
                   {currentHomework.teacherComment && (
                     <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -2650,6 +2857,27 @@ export default function StudentCourse() {
                     <div className="text-sm text-gray-700">{currentMistake.chapter}</div>
                   </div>
 
+                  {(currentMistake.sourceTaskTitle || currentMistake.source === 'task_grading') && (
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 mb-2">错题来源</div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                        <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-100">
+                          {currentMistake.sourceTaskType === 'exam' ? '考试批改同步' : '作业批改同步'}
+                        </span>
+                        {currentMistake.sourceTaskTitle && (
+                          <span className="px-2.5 py-1 rounded-full bg-gray-50 border border-gray-200">
+                            {currentMistake.sourceTaskTitle}
+                          </span>
+                        )}
+                        {currentMistake.sourceQuestionId && (
+                          <span className="px-2.5 py-1 rounded-full bg-gray-50 border border-gray-200">
+                            小题 {currentMistake.sourceQuestionId}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <div>
                     <div className="text-sm font-semibold text-gray-900 mb-2">我的答案</div>
                     <div className="text-sm text-red-600 p-3 bg-red-50 border border-red-100 rounded-lg">
@@ -2704,6 +2932,12 @@ export default function StudentCourse() {
                   className="px-6 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   重新练习
+                </button>
+                <button
+                  onClick={() => handleSimilarPracticeMistake(currentMistake)}
+                  className="px-6 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  生成相似练习
                 </button>
               </div>
             </div>

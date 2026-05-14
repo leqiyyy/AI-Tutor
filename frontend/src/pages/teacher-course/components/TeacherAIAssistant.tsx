@@ -6,6 +6,7 @@ import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } 
 import { getNameInitial } from '@/lib/display';
 import { useAuth } from '@/hooks/use-auth';
 import { aiService } from '@/services/ai';
+import { courseService } from '@/services/course';
 import type {
   AiAttachment as AttachedFile,
   AiAnswerMode,
@@ -477,8 +478,10 @@ export default function TeacherAIAssistant() {
   const [currentSources, setCurrentSources] = useState<AiMessageSource[]>([]);
   const [showConvList, setShowConvList] = useState(true);
   const [toolLoadingAction, setToolLoadingAction] = useState<TeacherToolAction | null>(null);
-  const [toolResult, setToolResult] = useState<{ title: string; content: string } | null>(null);
+  const [toolResult, setToolResult] = useState<{ title: string; content: string; action: TeacherToolAction } | null>(null);
   const [toolError, setToolError] = useState('');
+  const [isPublishingToolResult, setIsPublishingToolResult] = useState(false);
+  const [isPublishingFlashcards, setIsPublishingFlashcards] = useState(false);
 
   // Right panel tab
   const [rightTab, setRightTab] = useState<'feedback' | 'aiQuestions' | 'tools' | 'sources'>('aiQuestions');
@@ -502,7 +505,7 @@ export default function TeacherAIAssistant() {
         const [loadedConversations, loadedFeedbacks, loadedQuestions] = await Promise.all([
           aiService.getTeacherConversations(),
           aiService.getFeedbackQueue(classId),
-          aiService.getTeacherAiQuestions(),
+          aiService.getTeacherAiQuestions(classId),
         ]);
 
         if (!mounted) {
@@ -698,18 +701,52 @@ export default function TeacherAIAssistant() {
 
     try {
       const result = action === 'lessonPlan'
-        ? await aiService.generateLessonPlan({ prompt })
+        ? await aiService.generateLessonPlan({ prompt, classId })
         : action === 'exam'
-          ? await aiService.generateExam({ prompt })
+          ? await aiService.generateExam({ prompt, classId })
           : action === 'learningAnalysis'
-            ? await aiService.generateLearningAnalysis({ prompt })
-            : await aiService.generateFlashcards({ prompt });
+            ? await aiService.generateLearningAnalysis({ prompt, classId })
+            : await aiService.generateFlashcards({ prompt, classId });
 
-      setToolResult({ title, content: result });
+      setToolResult({ title, content: result, action });
     } catch {
       setToolError('工具结果生成失败，请稍后重试。');
     } finally {
       setToolLoadingAction(null);
+    }
+  };
+
+  const publishToolResultToDiscussion = async () => {
+    if (!classId || !toolResult || isPublishingToolResult) return;
+    setIsPublishingToolResult(true);
+    setToolError('');
+    try {
+      await courseService.createDiscussion('teacher', classId, {
+        title: `AI生成：${toolResult.title}`,
+        content: toolResult.content,
+      });
+      setToolError('已发布到当前班级讨论区，学生端刷新后可查看。');
+    } catch {
+      setToolError('发布到班级讨论区失败，请稍后重试。');
+    } finally {
+      setIsPublishingToolResult(false);
+    }
+  };
+
+  const publishFlashcardsToClass = async () => {
+    if (!classId || !toolResult || toolResult.action !== 'flashcards' || isPublishingFlashcards) return;
+    setIsPublishingFlashcards(true);
+    setToolError('');
+    try {
+      await courseService.publishTeacherFlashcardDeck(classId, {
+        name: `AI生成：${toolResult.title}`,
+        content: toolResult.content,
+      });
+      setToolError('已发布为班级闪卡，学生端学习闪卡列表刷新后可复习。');
+    } catch {
+      setToolError('发布班级闪卡失败，请检查草稿是否包含“正面/背面”格式。');
+    } finally {
+      setIsPublishingFlashcards(false);
     }
   };
 
@@ -1234,6 +1271,22 @@ export default function TeacherAIAssistant() {
                         >
                           <i className="ri-edit-line"></i>写入输入框
                         </button>
+                        <button
+                          onClick={() => { void publishToolResultToDiscussion(); }}
+                          disabled={isPublishingToolResult}
+                          className="mt-3 ml-2 inline-flex items-center gap-1 rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-700 cursor-pointer whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <i className="ri-send-plane-line"></i>{isPublishingToolResult ? '发布中...' : '发布到讨论区'}
+                        </button>
+                        {toolResult.action === 'flashcards' && (
+                          <button
+                            onClick={() => { void publishFlashcardsToClass(); }}
+                            disabled={isPublishingFlashcards}
+                            className="mt-3 ml-2 inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 cursor-pointer whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            <i className="ri-stack-line"></i>{isPublishingFlashcards ? '发布中...' : '发布为班级卡组'}
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

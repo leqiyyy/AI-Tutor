@@ -146,6 +146,9 @@ export interface TeacherCourseMaterialPreviewData {
   textTruncated?: boolean;
   previewSource?: string;
   chunkCount?: number;
+  downloadAvailable?: boolean;
+  textPreviewAvailable?: boolean;
+  retrievalAvailable?: boolean;
   pageCount?: number;
   durationText?: string;
 }
@@ -154,6 +157,18 @@ export interface TeacherCourseMaterialDownloadData {
   fileId: string | number;
   fileName: string;
   downloadUrl: string;
+}
+
+export interface CourseTaskAttachment {
+  id: string;
+  fileName: string;
+  size?: number | null;
+  mimeType?: string | null;
+  downloadUrl?: string;
+}
+
+export interface CourseTaskAttachmentsUploadData {
+  attachments: CourseTaskAttachment[];
 }
 
 export interface TeacherCourseTask {
@@ -165,14 +180,28 @@ export interface TeacherCourseTask {
   total: number;
   status: string;
   publishDate: string;
-  attachments: string[];
+  attachments: Array<string | CourseTaskAttachment>;
   startTime?: string;
   duration?: number;
+  maxScore?: number;
   description?: string;
 }
 
 export interface TeacherCourseTasksData {
   tasks: TeacherCourseTask[];
+}
+
+export interface TaskQuestionGrade {
+  questionId: string;
+  content?: string;
+  answer?: string;
+  correctAnswer?: string;
+  score: number;
+  maxScore: number;
+  correct: boolean;
+  comment?: string;
+  autoGraded?: boolean;
+  requiresManualReview?: boolean;
 }
 
 export interface TeacherCourseTaskSubmission {
@@ -184,15 +213,33 @@ export interface TeacherCourseTaskSubmission {
   submittedAt: string;
   score?: number;
   durationMinutes?: number;
+  feedback?: string;
+  answers?: Record<string, string>;
+  questionGrades?: TaskQuestionGrade[];
 }
 
 export interface TeacherCourseTaskDetail extends TeacherCourseTask {
   description: string;
+  questions?: StudentHomeworkQuestion[];
+  extraData?: Record<string, unknown>;
   requirements: string[];
   participantCount: number;
   averageScore?: number;
   highestScore?: number;
   lowestScore?: number;
+  questionStats?: Array<{
+    questionId: string | number;
+    title: string;
+    content: string;
+    type: string;
+    maxScore: number;
+    submittedCount: number;
+    gradedCount: number;
+    correctCount: number;
+    wrongCount: number;
+    correctRate: number;
+    averageScore: number;
+  }>;
   submissions: TeacherCourseTaskSubmission[];
 }
 
@@ -292,6 +339,10 @@ export interface TeacherCourseStudent {
   attendance: number;
   status: string;
   warningReason?: string;
+  averageScore?: number | null;
+  submittedTasks?: number;
+  totalTasks?: number;
+  activityCount30d?: number;
 }
 
 export interface TeacherCourseStudentsData {
@@ -377,8 +428,12 @@ export interface StudentHomeworkQuestion {
   content: string;
   type: string;
   answer: string;
+  explanation?: string;
   correct?: boolean;
   comment?: string;
+  correctAnswer?: string;
+  score?: number;
+  maxScore?: number;
 }
 
 export interface StudentCourseTask {
@@ -389,6 +444,7 @@ export interface StudentCourseTask {
   score: number | null;
   urgent: boolean;
   questions: StudentHomeworkQuestion[];
+  attachments?: Array<string | CourseTaskAttachment>;
   startTime?: string;
   duration?: number;
   isExam?: boolean;

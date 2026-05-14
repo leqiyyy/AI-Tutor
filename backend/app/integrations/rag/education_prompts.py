@@ -4,39 +4,13 @@ import importlib
 from typing import Any
 
 from app.core.logging import get_logger
+from app.integrations.rag.graph_schema import COMMON_ENTITY_TYPES, COMMON_RELATION_TYPES, resolve_graph_schema
 
 logger = get_logger(__name__)
 
 
-DEFAULT_ENTITY_TYPES = [
-    "course_concept",
-    "prerequisite",
-    "learning_objective",
-    "formula",
-    "theorem",
-    "algorithm",
-    "example",
-    "exercise",
-    "misconception",
-    "experiment_step",
-    "tool",
-    "dataset",
-    "assessment_point",
-]
-
-DEFAULT_RELATION_TYPES = [
-    "prerequisite_of",
-    "part_of",
-    "explains",
-    "uses_formula",
-    "applies_algorithm",
-    "example_of",
-    "tests",
-    "causes",
-    "contrasts_with",
-    "equivalent_to",
-    "related_to",
-]
+DEFAULT_ENTITY_TYPES = list(COMMON_ENTITY_TYPES)
+DEFAULT_RELATION_TYPES = list(COMMON_RELATION_TYPES)
 
 _APPLIED_SIGNATURE: tuple[Any, ...] | None = None
 
@@ -56,7 +30,7 @@ def parse_entity_types(raw: str | list[str] | tuple[str, ...] | None) -> list[st
     return normalized or list(DEFAULT_ENTITY_TYPES)
 
 
-def build_lightrag_addon_params(settings: Any) -> dict[str, Any]:
+def build_lightrag_addon_params(settings: Any, graph_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     if not bool(getattr(settings, "RAG_EDUCATION_PROMPTS_ENABLED", True)):
         return {}
     params: dict[str, Any] = {}
@@ -64,9 +38,12 @@ def build_lightrag_addon_params(settings: Any) -> dict[str, Any]:
     if language:
         params["language"] = language
     if bool(getattr(settings, "RAG_EDUCATION_ENTITY_TYPES_ENABLED", True)):
-        params["entity_types"] = parse_entity_types(
-            getattr(settings, "RAG_EDUCATION_ENTITY_TYPES_RAW", "")
-        )
+        if graph_schema:
+            params["entity_types"] = resolve_graph_schema(graph_schema).get("entity_types") or list(DEFAULT_ENTITY_TYPES)
+        else:
+            params["entity_types"] = parse_entity_types(
+                getattr(settings, "RAG_EDUCATION_ENTITY_TYPES_RAW", "")
+            )
     return params
 
 
@@ -123,11 +100,15 @@ def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
 
     patched: dict[str, list[str]] = {"lightrag": [], "raganything": []}
     subject = str(getattr(settings, "RAG_EDUCATION_SUBJECT", "课程学习") or "课程学习").strip()
+    language = str(getattr(settings, "RAG_EDUCATION_LANGUAGE", "简体中文") or "简体中文").strip()
     entity_types = parse_entity_types(getattr(settings, "RAG_EDUCATION_ENTITY_TYPES_RAW", ""))
+    raganything_prompt_language = _apply_raganything_prompt_language(language)
 
     lightrag_guidance = (
         "[AI Tutor education response guidance]\n"
         f"- Domain: {subject}.\n"
+        f"- Output language: use {language} unless the user explicitly asks for another language. Preserve standard "
+        "technical acronyms, code, formulas, file names, and quoted source text in their original form.\n"
         "- Prefer course-grounded answers with concise conclusion, step-by-step explanation, citations/evidence cues, "
         "and explicit uncertainty when retrieved evidence is insufficient.\n"
         "- For students, emphasize reasoning and learning support rather than replacing their own work.\n"
@@ -136,15 +117,21 @@ def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
     raganything_guidance = (
         "[AI Tutor multimodal education guidance]\n"
         f"- Domain: {subject}.\n"
+        f"- Output JSON field values in {language}. Preserve exact visible text in its original language/script, "
+        "including English acronyms, formulas, code, and labels.\n"
         "- When describing images, tables, formulas, charts, slides, or screenshots, extract visible text, title, "
         "axes, legends, variables, units, steps, and learning-relevant relationships.\n"
+        "- Preserve exact visible text as much as possible. If small text, symbols, or relationships are unclear, "
+        "state that they are unclear instead of guessing.\n"
+        "- For diagrams and flowcharts, describe node labels, arrow directions, and conditional branches explicitly. "
+        "For tables, preserve row/column headers and key values.\n"
         "- Highlight concepts, prerequisites, formulas, examples, exercises, misconceptions, and experiment steps "
         "when they are visible or inferable from the multimodal content.\n"
         "- Preserve the original output format requirements above."
     )
     graph_extraction_guidance = build_course_graph_extraction_guidance(
         subject=subject,
-        language=str(getattr(settings, "RAG_EDUCATION_LANGUAGE", "简体中文") or "简体中文").strip(),
+        language=language,
         entity_types=entity_types,
     )
 
@@ -168,18 +155,39 @@ def apply_framework_prompt_overrides(settings: Any) -> dict[str, Any]:
         module_name="raganything.prompt",
         keys=(
             "vision_prompt",
+            "vision_prompt_with_context",
             "image_prompt",
             "table_prompt",
+            "table_prompt_with_context",
             "equation_prompt",
+            "equation_prompt_with_context",
             "figure_prompt",
             "generic_prompt",
+            "generic_prompt_with_context",
         ),
         guidance=raganything_guidance,
     )
+    if raganything_prompt_language:
+        patched["raganything_prompt_language"] = [raganything_prompt_language]
 
     _APPLIED_SIGNATURE = signature
     logger.info("education_prompt_overrides_applied", patched=patched)
     return {"enabled": True, "patched": patched}
+
+
+def _apply_raganything_prompt_language(language: str) -> str | None:
+    normalized = str(language or "").strip().lower()
+    if normalized not in {"zh", "zh-cn", "zh_hans", "zh-hans", "chinese", "中文", "简体中文"}:
+        return None
+    try:
+        from raganything.prompt_manager import get_prompt_language, set_prompt_language
+
+        if get_prompt_language() != "zh":
+            set_prompt_language("zh")
+        return "zh"
+    except Exception as exc:  # pragma: no cover - optional package/version behavior
+        logger.debug("raganything_prompt_language_switch_failed", language=language, reason=str(exc))
+        return None
 
 
 def build_course_graph_extraction_guidance(
@@ -192,21 +200,32 @@ def build_course_graph_extraction_guidance(
     relation_type_text = ", ".join(DEFAULT_RELATION_TYPES)
     return (
         "[AI Tutor course knowledge graph extraction guidance]\n"
-        f"- Domain: {subject or '课程学习'}; output language for names/descriptions/evidence: {language or '简体中文'}.\n"
-        "- Build a high-quality course knowledge graph, not a file/material graph. Extract stable teaching concepts, "
-        "learning objectives, formulas, theorems, algorithms, examples, exercises, misconceptions, tools, datasets, "
-        "and assessment points that are explicitly supported by the source text.\n"
-        f"- Prefer these entity types when the original template asks for entity types: {entity_type_text}.\n"
-        f"- Prefer these relationship meanings when the original template asks for relationships: {relation_type_text}.\n"
-        "- Entity names should be short canonical terms. For Chinese course material, use concise Simplified Chinese names "
-        "unless the term is a standard English acronym or symbol. Merge obvious aliases instead of creating duplicates.\n"
+        f"- Domain: {subject or '课程学习'}. Output entity names, relationship keywords, descriptions, and evidence in "
+        f"{language or '简体中文'} unless the source uses a standard acronym, formula, code symbol, command, file extension, "
+        "or widely accepted proper noun.\n"
+        "- Extract a course knowledge graph, not a file/material graph. Prefer stable, teachable items that students need "
+        "to understand, apply, compare, remember, or avoid misunderstanding.\n"
+        f"- Use the entity types provided by the current extraction task. Common/preferred labels include: {entity_type_text}. "
+        "If the source contains important people, places, organizations, events, attacks, protocols, vulnerabilities, "
+        "defenses, tools, or cases that do not fit these labels, use the "
+        "closest existing type or `Other` rather than inventing a new type.\n"
+        f"- Preferred relationship meanings: {relation_type_text}. Express these meanings through the original "
+        "`relationship_keywords` and `relationship_description` fields; do not add extra fields.\n"
+        "- Entity names must be short, canonical, and reusable across chunks. For Chinese material, use concise "
+        "Simplified Chinese names; preserve standard English acronyms such as TCP, DNS, CVSS, SQL, XSS, and IPSec. "
+        "Merge obvious aliases and avoid near-duplicate entities.\n"
+        "- Extract relationships only when the source text supports a clear semantic link, such as definition, component, "
+        "cause-effect, prerequisite, contrast, example, method, protection, attack-target, or protocol-layer relation. "
+        "Do not create relationships based only on co-occurrence.\n"
+        "- For `part_of`, keep the direction from whole/container to part/member when possible "
+        "(for example, TCP/IP协议族 -> HTTP). For attributes or traits, prefer `has_property` over `has_field`; "
+        "reserve `has_field` for concrete packet/header/record fields.\n"
         "- Do not extract filenames, file paths, parser chunk IDs, UUIDs, hashes, page numbers alone, dates alone, "
-        "generic words, or upload/indexing artifacts as entities. Do not create relationships whose only evidence is "
-        "co-occurrence in the same file name or metadata.\n"
-        "- Keep evidence grounded: descriptions and relation rationales should be concise and traceable to the source. "
-        "When evidence is weak, lower confidence or omit the entity/relation.\n"
-        "- Preserve the original output format exactly, including delimiters, tuple labels, JSON keys, record separators, "
-        "and continuation/loop semantics required above."
+        "generic layout words, table row/column artifacts, upload/indexing metadata, or vague labels as entities.\n"
+        "- Keep descriptions concise and evidence-grounded. If the text does not provide enough support for an entity or "
+        "relationship, omit it instead of guessing.\n"
+        "- Preserve the upstream output format exactly: tuple labels, field order, delimiters, completion markers, JSON "
+        "keys, record separators, and continuation semantics must remain unchanged."
     )
 
 
@@ -226,6 +245,8 @@ def _patch_prompt_module(
     containers: list[Any] = []
     prompt_dict = getattr(module, "PROMPTS", None)
     if isinstance(prompt_dict, dict):
+        containers.append(prompt_dict)
+    elif all(hasattr(prompt_dict, attr) for attr in ("get", "items", "__setitem__")):
         containers.append(prompt_dict)
 
     registry = getattr(module, "PromptRegistry", None)
@@ -267,4 +288,9 @@ def _append_guidance_once(prompt: str, guidance: str) -> str:
     marker = guidance.split("\n", 1)[0]
     if marker in prompt:
         return prompt
+    insertion_markers = ("\n<Output>\n", "\n<Output>", "\n---Output---\n", "\n---Output---")
+    for output_marker in insertion_markers:
+        index = prompt.rfind(output_marker)
+        if index >= 0:
+            return f"{prompt[:index].rstrip()}\n\n{guidance}\n{prompt[index:]}"
     return f"{prompt.rstrip()}\n\n{guidance}"

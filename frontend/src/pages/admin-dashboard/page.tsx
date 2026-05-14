@@ -4,7 +4,7 @@ import ProductSidePanel from '../../components/ProductSidePanel';
 import { useAuth } from '@/hooks/use-auth';
 import { authService } from '@/services/auth';
 import { adminService } from '@/services/admin';
-import type { AdminAuditEvent } from '@/services/admin';
+import type { AdminAuditEvent, AdminModelConfig, AdminRagStorageConfig } from '@/services/admin';
 import { dashboardService } from '@/services/dashboard';
 import type {
   AdminAuditAnswer,
@@ -36,6 +36,9 @@ export default function AdminDashboard() {
   const [auditEventType, setAuditEventType] = useState('');
   const [sensitiveWords, setSensitiveWords] = useState<string[]>([]);
   const [newSensitiveWord, setNewSensitiveWord] = useState('');
+  const [modelConfig, setModelConfig] = useState<AdminModelConfig>({});
+  const [ragStorageConfig, setRagStorageConfig] = useState<AdminRagStorageConfig>({});
+  const [configLoading, setConfigLoading] = useState(false);
   const [systemSettings, setSystemSettings] = useState({
     maintenanceMode: false,
     examWeekLimit: true,
@@ -112,6 +115,35 @@ export default function AdminDashboard() {
       mounted = false;
     };
   }, [activeTab, auditEventStatus, auditEventType, auditEventsRefreshKey]);
+
+  useEffect(() => {
+    if (activeTab !== 'settings') {
+      return;
+    }
+
+    let mounted = true;
+    setConfigLoading(true);
+    Promise.all([
+      adminService.getModelConfig(),
+      adminService.getRagStorageConfig(),
+    ])
+      .then(([model, rag]) => {
+        if (!mounted) return;
+        setModelConfig(model);
+        setRagStorageConfig(rag);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setDashboardError(error instanceof Error ? error.message : '系统配置加载失败');
+      })
+      .finally(() => {
+        if (mounted) setConfigLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [activeTab]);
 
   const handleLogout = () => {
     authService.logout();
@@ -259,6 +291,34 @@ export default function AdminDashboard() {
         }));
       },
       '系统公告已发布',
+    );
+  };
+
+  const updateModelConfigField = (key: keyof AdminModelConfig, value: string | boolean | number) => {
+    setModelConfig((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateRagStorageField = (key: keyof AdminRagStorageConfig, value: string) => {
+    setRagStorageConfig((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSaveModelConfig = async () => {
+    await runAdminAction(
+      async () => {
+        const saved = await adminService.updateModelConfig(modelConfig);
+        setModelConfig(saved);
+      },
+      '模型配置已保存',
+    );
+  };
+
+  const handleSaveRagStorageConfig = async () => {
+    await runAdminAction(
+      async () => {
+        const saved = await adminService.updateRagStorageConfig(ragStorageConfig);
+        setRagStorageConfig(saved);
+      },
+      'RAG 存储配置已保存',
     );
   };
 
@@ -961,6 +1021,195 @@ export default function AdminDashboard() {
                     </select>
                   </div>
                   <button onClick={handlePublishAnnouncement} disabled={actionPending} className="w-full px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">发布公告</button>
+                </div>
+              </div>
+
+              {/* 模型配置 */}
+              <div className="bg-white rounded-lg p-5 border border-gray-200">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-gray-900">模型配置</h2>
+                    <div className="mt-1 text-xs text-gray-500">保存到后端持久化配置，供 AI 助教、RAG 检索和教师工具链读取</div>
+                  </div>
+                  {configLoading && <span className="text-xs text-gray-400">加载中...</span>}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LLM 提供方</label>
+                    <select value={modelConfig.llm_provider || ''} onChange={(e) => updateModelConfigField('llm_provider', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="siliconflow">SiliconFlow</option>
+                      <option value="openai">OpenAI兼容</option>
+                      <option value="mock">Mock</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LLM 后端</label>
+                    <select value={modelConfig.llm_backend || ''} onChange={(e) => updateModelConfigField('llm_backend', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="api">API</option>
+                      <option value="local">本地服务</option>
+                      <option value="mock">Mock</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LLM 模型</label>
+                    <input value={modelConfig.llm_model || ''} onChange={(e) => updateModelConfigField('llm_model', e.target.value)} placeholder="例如 Qwen/Qwen3.5-122B-A10B" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LLM 本地 API Base</label>
+                    <input value={modelConfig.llm_local_api_base || ''} onChange={(e) => updateModelConfigField('llm_local_api_base', e.target.value)} placeholder="http://host.docker.internal:8001/v1" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LLM temperature</label>
+                    <input type="number" min="0" max="2" step="0.1" value={modelConfig.llm_temperature ?? ''} onChange={(e) => updateModelConfigField('llm_temperature', e.target.value)} placeholder="0.3" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LLM top_p</label>
+                    <input type="number" min="0" max="1" step="0.05" value={modelConfig.llm_top_p ?? ''} onChange={(e) => updateModelConfigField('llm_top_p', e.target.value)} placeholder="0.8" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">抽取模型</label>
+                    <input value={modelConfig.extract_model || ''} onChange={(e) => updateModelConfigField('extract_model', e.target.value)} placeholder="索引实体/关系抽取模型" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">抽取 temperature</label>
+                    <input type="number" min="0" max="2" step="0.1" value={modelConfig.extract_temperature ?? ''} onChange={(e) => updateModelConfigField('extract_temperature', e.target.value)} placeholder="0" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">抽取 top_p</label>
+                    <input type="number" min="0" max="1" step="0.05" value={modelConfig.extract_top_p ?? ''} onChange={(e) => updateModelConfigField('extract_top_p', e.target.value)} placeholder="0.8" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div className="flex items-end gap-6">
+                    <label className="inline-flex items-center gap-2 text-sm text-gray-700 pb-2">
+                      <input type="checkbox" checked={Boolean(modelConfig.llm_enable_thinking)} onChange={(e) => updateModelConfigField('llm_enable_thinking', e.target.checked)} className="rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
+                      LLM Thinking
+                    </label>
+                    <label className="inline-flex items-center gap-2 text-sm text-gray-700 pb-2">
+                      <input type="checkbox" checked={Boolean(modelConfig.extract_enable_thinking)} onChange={(e) => updateModelConfigField('extract_enable_thinking', e.target.checked)} className="rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
+                      抽取 Thinking
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Embedding 后端</label>
+                    <select value={modelConfig.embedding_backend || ''} onChange={(e) => updateModelConfigField('embedding_backend', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="api">API</option>
+                      <option value="local">本地服务</option>
+                      <option value="mock">Mock</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Embedding 模型</label>
+                    <input value={modelConfig.embedding_model || ''} onChange={(e) => updateModelConfigField('embedding_model', e.target.value)} placeholder="例如 BAAI/bge-m3" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">VLM 后端</label>
+                    <select value={modelConfig.vlm_backend || ''} onChange={(e) => updateModelConfigField('vlm_backend', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="api">API</option>
+                      <option value="local">本地服务</option>
+                      <option value="mock">Mock</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">VLM 模型</label>
+                    <input value={modelConfig.vlm_model || ''} onChange={(e) => updateModelConfigField('vlm_model', e.target.value)} placeholder="用于图片/表格/公式理解" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">VLM temperature</label>
+                    <input type="number" min="0" max="2" step="0.1" value={modelConfig.vlm_temperature ?? ''} onChange={(e) => updateModelConfigField('vlm_temperature', e.target.value)} placeholder="0.1" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div className="flex items-end">
+                    <label className="inline-flex items-center gap-2 text-sm text-gray-700 pb-2">
+                      <input type="checkbox" checked={Boolean(modelConfig.vlm_enable_thinking)} onChange={(e) => updateModelConfigField('vlm_enable_thinking', e.target.checked)} className="rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
+                      VLM Thinking
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Reranker 提供方</label>
+                    <select value={modelConfig.reranker_provider || ''} onChange={(e) => updateModelConfigField('reranker_provider', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="api">API</option>
+                      <option value="local">本地模型</option>
+                      <option value="none">关闭</option>
+                      <option value="mock">Mock</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">RAG 引擎</label>
+                    <select value={modelConfig.rag_engine || ''} onChange={(e) => updateModelConfigField('rag_engine', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="raganything">RAG-Anything</option>
+                      <option value="lightrag">LightRAG</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-100 pt-4">
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" checked={Boolean(modelConfig.email_dev_mode)} onChange={(e) => updateModelConfigField('email_dev_mode', e.target.checked)} className="rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
+                    邮件开发模式
+                  </label>
+                  <button onClick={handleSaveModelConfig} disabled={actionPending || configLoading} className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">保存模型配置</button>
+                </div>
+              </div>
+
+              {/* RAG 存储配置 */}
+              <div className="bg-white rounded-lg p-5 border border-gray-200">
+                <div className="mb-4">
+                  <h2 className="text-base font-semibold text-gray-900">RAG 存储配置</h2>
+                  <div className="mt-1 text-xs text-gray-500">用于声明向量库、图库等 RAG-Anything/LightRAG 后端存储连接</div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">RAG 存储后端</label>
+                    <select value={ragStorageConfig.rag_storage_backend || ''} onChange={(e) => updateRagStorageField('rag_storage_backend', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="external">外部存储</option>
+                      <option value="local">本地文件</option>
+                      <option value="auto">自动</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">向量库提供方</label>
+                    <select value={ragStorageConfig.vector_db_provider || ''} onChange={(e) => updateRagStorageField('vector_db_provider', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="qdrant">Qdrant</option>
+                      <option value="milvus">Milvus</option>
+                      <option value="auto">自动</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">向量库 URL</label>
+                    <input value={ragStorageConfig.vector_db_url || ''} onChange={(e) => updateRagStorageField('vector_db_url', e.target.value)} placeholder="http://qdrant:6333" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">向量集合名</label>
+                    <input value={ragStorageConfig.vector_db_collection || ''} onChange={(e) => updateRagStorageField('vector_db_collection', e.target.value)} placeholder="raganything_chunks" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">图库提供方</label>
+                    <select value={ragStorageConfig.graph_db_provider || ''} onChange={(e) => updateRagStorageField('graph_db_provider', e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">使用环境默认值</option>
+                      <option value="neo4j">Neo4j</option>
+                      <option value="auto">自动</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">图库 URL</label>
+                    <input value={ragStorageConfig.graph_db_url || ''} onChange={(e) => updateRagStorageField('graph_db_url', e.target.value)} placeholder="bolt://neo4j:7687" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">图库数据库</label>
+                    <input value={ragStorageConfig.graph_db_database || ''} onChange={(e) => updateRagStorageField('graph_db_database', e.target.value)} placeholder="neo4j" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">图库用户名</label>
+                    <input value={ragStorageConfig.graph_db_username || ''} onChange={(e) => updateRagStorageField('graph_db_username', e.target.value)} placeholder="neo4j" className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                </div>
+                <div className="mt-4 flex justify-end border-t border-gray-100 pt-4">
+                  <button onClick={handleSaveRagStorageConfig} disabled={actionPending || configLoading} className="px-4 py-2 bg-teal-600 text-white text-sm font-medium rounded-lg hover:bg-teal-700 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">保存 RAG 存储配置</button>
                 </div>
               </div>
 

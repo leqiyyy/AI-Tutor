@@ -37,6 +37,7 @@ def create_class(
             "course_id": cls.course_id,
             "name": cls.name,
             "invite_code": cls.invite_code,
+            "graph_schema": cls.graph_schema,
             "created_at": cls.created_at,
         }
     )
@@ -85,6 +86,7 @@ def get_class(
         "is_active": cls.is_active,
         "created_at": cls.created_at,
         "student_count": student_count,
+        "graph_schema": cls.graph_schema or (course.graph_schema if course else None),
     })
 
 

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -11,6 +13,7 @@ class CreateCourseRequest(BaseModel):
     code: Optional[str] = None
     description: Optional[str] = None
     cover_color: Optional[str] = Field(default="#3b82f6", validation_alias=AliasChoices("cover_color", "coverColor"))
+    graph_schema: Optional[dict[str, Any]] = Field(default=None, validation_alias=AliasChoices("graph_schema", "graphSchema"))
 
 
 class CreateClassRequest(BaseModel):
@@ -22,6 +25,7 @@ class CreateClassRequest(BaseModel):
     semester: Optional[str] = None
     description: Optional[str] = None
     cover_color: Optional[str] = Field(default="#3b82f6", validation_alias=AliasChoices("cover_color", "coverColor"))
+    graph_schema: Optional[dict[str, Any]] = Field(default=None, validation_alias=AliasChoices("graph_schema", "graphSchema"))
 
 
 class CourseOut(BaseModel):
@@ -30,6 +34,7 @@ class CourseOut(BaseModel):
     code: Optional[str] = None
     description: Optional[str] = None
     cover_color: str
+    graph_schema: Optional[dict[str, Any]] = None
     created_by: str
     created_at: datetime
     model_config = {"from_attributes": True}
@@ -48,6 +53,7 @@ class CourseCardOut(BaseModel):
     student_count: Optional[int] = None
     invite_code: Optional[str] = None
     unread: int = 0
+    graph_schema: Optional[dict[str, Any]] = None
 
 
 class ClassOut(BaseModel):
@@ -63,6 +69,7 @@ class ClassOut(BaseModel):
     student_count: Optional[int] = None
     teacher_name: Optional[str] = None
     course_name: Optional[str] = None
+    graph_schema: Optional[dict[str, Any]] = None
     model_config = {"from_attributes": True}
 
 

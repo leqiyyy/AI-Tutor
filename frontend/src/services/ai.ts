@@ -711,10 +711,12 @@ export const aiService = {
     });
   },
 
-  async getTeacherAiQuestions(): Promise<AiTeacherQuestion[]> {
+  async getTeacherAiQuestions(classId?: string): Promise<AiTeacherQuestion[]> {
     return shouldUseMockApi
       ? getMockTeacherAiQuestions()
-      : http<AiTeacherQuestion[]>("/teacher/ai/questions");
+      : http<AiTeacherQuestion[]>("/teacher/ai/questions", {
+          query: { class_id: classId },
+        });
   },
 
   async getTeacherAiQuestionDetail(questionId: string | number): Promise<AiTeacherQuestion> {

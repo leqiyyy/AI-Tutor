@@ -9,6 +9,12 @@ export interface LearningMistake {
   addTime: string;
   lastPracticeTime: string;
   mastered: boolean;
+  source?: string;
+  sourceTaskId?: string | number;
+  sourceTaskTitle?: string;
+  sourceTaskType?: string;
+  sourceSubmissionId?: string | number;
+  sourceQuestionId?: string | number;
 }
 
 export interface LearningMistakesData {

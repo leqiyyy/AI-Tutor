@@ -23,6 +23,8 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend/.env.server
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -57,6 +59,8 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ./backend/.env.server
+    environment:
+      TZ: Asia/Shanghai
     depends_on:
       db:
         condition: service_healthy
@@ -74,6 +78,8 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend/.env.server
+    environment:
+      TZ: Asia/Shanghai
     depends_on:
       backend-migrate:
         condition: service_completed_successfully
@@ -98,9 +104,12 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
       POSTGRES_DB: ${POSTGRES_DB:-ai_tutor}
       POSTGRES_USER: ${POSTGRES_USER:-ai_tutor}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_tutor}
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
