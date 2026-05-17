@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { AiMarkdownContent } from '@/components/AiMarkdownContent';
 import { AiProgressTimeline } from '@/components/AiProgressTimeline';
+import { AiSourceEvidenceList } from '@/components/AiSourceEvidenceList';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
 import { getNameInitial } from '@/lib/display';
 import { useAuth } from '@/hooks/use-auth';
@@ -69,6 +70,94 @@ function formatFileSize(bytes: number): string {
 function generateTitle(firstMessage: string): string {
   if (firstMessage.length <= 20) return firstMessage;
   return firstMessage.slice(0, 18) + '…';
+}
+
+function numericMeta(value: unknown): number | null {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function reviewReasonLabels(question: AIQuestion): string[] {
+  const context = question.reviewContext || question.review_context || {};
+  const reasonMap: Record<string, string> = {
+    confidence_below_threshold: '回答估计分低于审核阈值',
+    no_supporting_sources: '没有检索到可用课程依据',
+    limited_source_coverage: '仅有少量来源支撑',
+    low_evidence_score: '综合证据分偏低',
+    weak_grounding: '检索依据较弱',
+    negative_user_feedback: '学生反馈不满意',
+  };
+  const reasons = context.review_reasons;
+  if (Array.isArray(reasons)) {
+    return reasons.map(item => reasonMap[String(item)] || String(item));
+  }
+  const labels = context.review_reason_labels;
+  if (Array.isArray(labels)) return labels.map(item => String(item)).filter(Boolean);
+  return [];
+}
+
+function evidenceSupportMeta(question: AIQuestion) {
+  const quality = question.quality || {};
+  const evidenceScore = numericMeta(quality.evidence_score);
+  const support = typeof question.evidenceSupport === 'number'
+    ? question.evidenceSupport
+    : evidenceScore !== null
+      ? Math.round(evidenceScore * 100)
+      : Math.max(0, Math.min(100, question.confidence || 0));
+  const groundingLevel = String(question.groundingLevel || quality.grounding_level || '').toLowerCase();
+  const sourceCount = numericMeta(question.sourceCount ?? quality.source_count);
+  const avgSourceScore = numericMeta(quality.avg_source_score);
+  const isFallback = evidenceScore === null && !question.quality;
+  if (groundingLevel === 'strong') {
+    return {
+      value: support,
+      label: '较强',
+      detail: '多条课程资料提供了较明确支撑',
+      color: 'text-green-600',
+      bg: 'bg-green-50',
+      bar: 'bg-green-500',
+      sourceCount,
+      avgSourceScore,
+      isFallback,
+    };
+  }
+  if (groundingLevel === 'adequate') {
+    return {
+      value: support,
+      label: '一般',
+      detail: '有课程资料支撑，但仍建议教师核验',
+      color: 'text-amber-600',
+      bg: 'bg-amber-50',
+      bar: 'bg-amber-400',
+      sourceCount,
+      avgSourceScore,
+      isFallback,
+    };
+  }
+  if (groundingLevel === 'ungrounded' || sourceCount === 0) {
+    return {
+      value: support,
+      label: '无依据',
+      detail: '未检索到可用课程来源，建议人工处理',
+      color: 'text-red-500',
+      bg: 'bg-red-50',
+      bar: 'bg-red-400',
+      sourceCount,
+      avgSourceScore,
+      isFallback,
+    };
+  }
+  return {
+    value: support,
+    label: isFallback ? '待核验' : '不足',
+    detail: isFallback ? '当前记录缺少证据质量字段，只能按旧分数提示' : '检索依据较弱，建议人工介入',
+    color: 'text-red-500',
+    bg: 'bg-red-50',
+    bar: 'bg-red-400',
+    sourceCount,
+    avgSourceScore,
+    isFallback,
+  };
 }
 
 const TEACHER_RECOMMENDATIONS: TeacherRecommendation[] = [
@@ -310,12 +399,6 @@ function AIQuestionsPanel({ questions, onUpdate, onAdopt, onReply, isWide = fals
     setReplyText('');
   };
 
-  const confidenceMeta = (level: AIQuestion['confidenceLevel']) => {
-    if (level === 'high') return { label: '高', color: 'text-green-600', bg: 'bg-green-50', bar: 'bg-green-500' };
-    if (level === 'medium') return { label: '中', color: 'text-amber-600', bg: 'bg-amber-50', bar: 'bg-amber-400' };
-    return { label: '低', color: 'text-red-500', bg: 'bg-red-50', bar: 'bg-red-400' };
-  };
-
   return (
     <div className="flex flex-col h-full">
       {/* Filter bar */}
@@ -344,7 +427,8 @@ function AIQuestionsPanel({ questions, onUpdate, onAdopt, onReply, isWide = fals
           </div>
         )}
         {filtered.map(q => {
-          const meta = confidenceMeta(q.confidenceLevel);
+          const meta = evidenceSupportMeta(q);
+          const reasons = reviewReasonLabels(q);
           const isExpanded = expandedId === q.id;
           return (
             <div key={q.id} className={`rounded-xl border transition-colors ${isWide ? 'shadow-sm' : ''} ${
@@ -359,7 +443,7 @@ function AIQuestionsPanel({ questions, onUpdate, onAdopt, onReply, isWide = fals
                   <div className="flex items-center gap-2">
                     <div className="w-6 h-6 rounded-full bg-teal-500 flex items-center justify-center text-white text-xs flex-shrink-0">{q.avatar}</div>
                     <span className="text-xs font-semibold text-gray-800">{q.student}</span>
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full ${meta.bg} ${meta.color}`}>AI置信度{meta.label}</span>
+                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full ${meta.bg} ${meta.color}`}>证据支撑{meta.label}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     {q.status === 'pending' && <span className="w-1.5 h-1.5 rounded-full bg-orange-500 flex-shrink-0"></span>}
@@ -375,18 +459,32 @@ function AIQuestionsPanel({ questions, onUpdate, onAdopt, onReply, isWide = fals
               {/* Expanded content */}
               {isExpanded && (
                 <div className={`border-t border-gray-100 px-3 py-3 ${isWide ? 'space-y-4' : 'space-y-3'}`}>
-                  {/* Confidence bar */}
+                  {/* Evidence support */}
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-gray-500">AI置信度</span>
-                      <span className="text-xs font-semibold text-gray-700">{q.confidence}%</span>
+                      <span className="text-xs text-gray-500">证据支撑度</span>
+                      <span className="text-xs font-semibold text-gray-700">{meta.value}%</span>
                     </div>
                     <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                      <div className={`h-full rounded-full ${meta.bar}`} style={{ width: `${q.confidence}%` }}></div>
+                      <div className={`h-full rounded-full ${meta.bar}`} style={{ width: `${meta.value}%` }}></div>
                     </div>
                     <div className="text-xs text-gray-400 mt-1">
-                      {q.confidenceLevel === 'low' ? '置信度低，建议人工介入' : q.confidenceLevel === 'medium' ? '置信度中等，建议审核后采纳' : '置信度高，可直接采纳'}
+                      {meta.detail}
                     </div>
+                    <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-gray-500">
+                      {typeof meta.sourceCount === 'number' && <span>来源数：{meta.sourceCount}</span>}
+                      {typeof meta.avgSourceScore === 'number' && <span>平均来源分：{Math.round(meta.avgSourceScore * 100)}%</span>}
+                      <span>旧模型分：{q.confidence}%</span>
+                    </div>
+                    {reasons.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {reasons.slice(0, 3).map(reason => (
+                          <span key={reason} className="rounded-full bg-white px-2 py-0.5 text-[11px] text-gray-500 border border-gray-100">
+                            {reason}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* AI Answer */}
@@ -498,12 +596,19 @@ export default function TeacherAIAssistant() {
   const pendingQuestionCount = aiQuestions.filter(q => q.status === 'pending').length;
 
   useEffect(() => {
+    setActiveConvId(0);
+    setMessages([{ ...INIT_WELCOME }]);
+    setCurrentSources([]);
+    setRightTab('aiQuestions');
+  }, [classId]);
+
+  useEffect(() => {
     let mounted = true;
 
     const loadAiData = async () => {
       try {
         const [loadedConversations, loadedFeedbacks, loadedQuestions] = await Promise.all([
-          aiService.getTeacherConversations(),
+          aiService.getTeacherConversations(classId),
           aiService.getFeedbackQueue(classId),
           aiService.getTeacherAiQuestions(classId),
         ]);
@@ -1347,23 +1452,8 @@ export default function TeacherAIAssistant() {
                   </div>
                 ) : (
                   <div>
-                    <div className="mb-2 text-xs text-gray-500">最新回答引用了以下文件：</div>
-                    <div className={isRightPanelWide ? 'grid grid-cols-1 gap-3 xl:grid-cols-2' : 'space-y-2'}>
-                      {summarizeSourcesByFile(currentSources).map(source => (
-                        <div key={source.key} className="flex min-w-0 items-start gap-2 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50 cursor-pointer">
-                          <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-                            <i className={`text-lg ${getSourceIconClass(source.type)}`}></i>
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="break-words text-xs font-medium leading-snug text-gray-800">{source.name}</div>
-                            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                              {formatSourceFilePages(source.pages) && <span className="text-teal-600">{formatSourceFilePages(source.pages)}</span>}
-                              <span className="text-gray-500">引用 {source.count} 处</span>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                    <div className="mb-2 text-xs text-gray-500">最新回答引用了以下证据：</div>
+                    <AiSourceEvidenceList sources={currentSources} wide={isRightPanelWide} courseId={classId} role="teacher" />
                   </div>
                 )}
               </div>

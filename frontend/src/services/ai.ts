@@ -95,6 +95,20 @@ type BackendMessage = {
     snippet?: string;
     raw_text?: string;
     rawText?: string;
+    metadata?: Record<string, unknown>;
+    modality?: string;
+    bbox?: unknown;
+    image_path?: string;
+    imagePath?: string;
+    source_path?: string;
+    sourcePath?: string;
+    table_markdown?: string;
+    tableMarkdown?: string;
+    formula_latex?: string;
+    formulaLatex?: string;
+    ocr_text?: string;
+    ocrText?: string;
+    raw?: Record<string, unknown>;
   }>;
   confidence?: number;
   quality?: Record<string, unknown>;
@@ -202,22 +216,55 @@ function numericConversationId(backendId: string) {
 }
 
 function normalizeSource(source: NonNullable<BackendMessage["sources"]>[number]): AiMessageSource {
+  const raw = source.raw && typeof source.raw === "object" ? source.raw : {};
+  const rawMetadata = raw.metadata;
+  const metadata = source.metadata && typeof source.metadata === "object"
+    ? source.metadata
+    : (rawMetadata && typeof rawMetadata === "object" ? rawMetadata as Record<string, unknown> : {});
+  const valueFrom = (...values: unknown[]) => {
+    for (const value of values) {
+      if (typeof value === "string" && value.trim()) return value;
+    }
+    return undefined;
+  };
+  const numberFrom = (...values: unknown[]) => {
+    for (const value of values) {
+      const numberValue = Number(value || 0);
+      if (Number.isFinite(numberValue) && numberValue > 0) return numberValue;
+    }
+    return 0;
+  };
+  const numericValueFrom = (...values: unknown[]) => {
+    for (const value of values) {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+    }
+    return undefined;
+  };
+
   return {
-    name: source.name || source.file_name || source.fileName || "课程资料",
-    page: Number(source.page || 0),
-    type: source.type || source.source_type || source.sourceType || "document",
-    score: source.score,
-    retrievalScore: source.retrieval_score ?? source.retrievalScore,
-    rerankScore: source.rerank_score ?? source.rerankScore,
-    relevanceScore: source.relevance_score ?? source.relevanceScore,
-    confidence: source.confidence,
-    chunkId: source.chunk_id ?? source.chunkId,
-    materialId: source.material_id ?? source.materialId,
-    citationIndex: source.citation_index ?? source.citationIndex,
-    citationLabel: source.citation_label ?? source.citationLabel,
-    citationPath: source.citation_path ?? source.citationPath,
-    snippet: source.snippet,
-    rawText: source.raw_text ?? source.rawText,
+    name: valueFrom(source.name, source.file_name, source.fileName, raw.name, raw.file_name, raw.fileName) || "课程资料",
+    page: numberFrom(source.page, raw.page),
+    type: valueFrom(source.type, source.source_type, source.sourceType, raw.type, raw.source_type, raw.sourceType) || "document",
+    score: numericValueFrom(source.score, raw.score),
+    retrievalScore: numericValueFrom(source.retrieval_score, source.retrievalScore, raw.retrieval_score, raw.retrievalScore),
+    rerankScore: numericValueFrom(source.rerank_score, source.rerankScore, raw.rerank_score, raw.rerankScore),
+    relevanceScore: numericValueFrom(source.relevance_score, source.relevanceScore, raw.relevance_score, raw.relevanceScore),
+    confidence: numericValueFrom(source.confidence, raw.confidence),
+    chunkId: valueFrom(source.chunk_id, source.chunkId, raw.chunk_id, raw.chunkId),
+    materialId: valueFrom(source.material_id, source.materialId, raw.material_id, raw.materialId),
+    citationIndex: numberFrom(source.citation_index, source.citationIndex, raw.citation_index, raw.citationIndex) || undefined,
+    citationLabel: valueFrom(source.citation_label, source.citationLabel, raw.citation_label, raw.citationLabel),
+    citationPath: valueFrom(source.citation_path, source.citationPath, raw.citation_path, raw.citationPath),
+    snippet: valueFrom(source.snippet, raw.snippet),
+    rawText: valueFrom(source.raw_text, source.rawText, raw.raw_text, raw.rawText),
+    metadata,
+    modality: valueFrom(source.modality, metadata.modality, raw.modality),
+    bbox: source.bbox ?? metadata.bbox ?? raw.bbox,
+    imagePath: valueFrom(source.image_path, source.imagePath, metadata.image_path, metadata.img_path, raw.image_path, raw.img_path),
+    sourcePath: valueFrom(source.source_path, source.sourcePath, metadata.source_path, raw.source_path),
+    tableMarkdown: valueFrom(source.table_markdown, source.tableMarkdown, metadata.table_markdown, raw.table_markdown),
+    formulaLatex: valueFrom(source.formula_latex, source.formulaLatex, metadata.formula_latex, raw.formula_latex),
+    ocrText: valueFrom(source.ocr_text, source.ocrText, metadata.ocr_text, raw.ocr_text),
   };
 }
 
@@ -481,18 +528,22 @@ async function streamChatQuery(
 }
 
 export const aiService = {
-  async getStudentConversations(): Promise<AiConversation[]> {
+  async getStudentConversations(classId?: string): Promise<AiConversation[]> {
     return shouldUseMockApi
       ? getMockConversations("student")
-      : (await http<BackendSession[]>("/chat/sessions")).map((item) =>
+      : (await http<BackendSession[]>("/chat/sessions", {
+          query: classId ? { class_id: classId } : undefined,
+        })).map((item) =>
           normalizeConversation(item),
         );
   },
 
-  async getTeacherConversations(): Promise<AiConversation[]> {
+  async getTeacherConversations(classId?: string): Promise<AiConversation[]> {
     return shouldUseMockApi
       ? getMockConversations("teacher")
-      : (await http<BackendSession[]>("/chat/sessions")).map((item) =>
+      : (await http<BackendSession[]>("/chat/sessions", {
+          query: classId ? { class_id: classId } : undefined,
+        })).map((item) =>
           normalizeConversation(item),
         );
   },

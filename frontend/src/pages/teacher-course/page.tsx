@@ -1674,6 +1674,10 @@ export default function TeacherCourse() {
     });
   };
 
+  const pendingInteractionQuestionCount = questions.filter(q => q.status === 'pending').length;
+  const answeredInteractionQuestionCount = questions.filter(q => q.status === 'answered').length;
+  const discussionPostCount = discussions.length;
+
   const averageStudentProgress =
     students.length > 0
       ? Math.round(students.reduce((sum, s) => sum + s.progress, 0) / students.length)
@@ -2215,6 +2219,8 @@ export default function TeacherCourse() {
                 </div>
               </div>
               <KnowledgeGraphViewer
+                courseId={courseId}
+                role="teacher"
                 nodes={graphNodes}
                 edges={graphEdges}
                 rootIds={graphRootIds}
@@ -2341,21 +2347,21 @@ export default function TeacherCourse() {
                     <span className="text-sm text-gray-600">待审核疑问</span>
                     <i className="ri-question-line text-orange-600 text-lg"></i>
                   </div>
-                  <div className="text-2xl font-bold text-gray-900">{questions.filter(q => q.status === 'pending').length}</div>
+                  <div className="text-2xl font-bold text-gray-900">{pendingInteractionQuestionCount}</div>
                 </div>
                 <div className="bg-white rounded-lg p-4 border border-gray-200">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm text-gray-600">相似问题</span>
-                    <i className="ri-file-copy-line text-blue-600 text-lg"></i>
+                    <span className="text-sm text-gray-600">已回复疑问</span>
+                    <i className="ri-chat-check-line text-blue-600 text-lg"></i>
                   </div>
-                  <div className="text-2xl font-bold text-gray-900">12</div>
+                  <div className="text-2xl font-bold text-gray-900">{answeredInteractionQuestionCount}</div>
                 </div>
                 <div className="bg-white rounded-lg p-4 border border-gray-200">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm text-gray-600">讨论帖</span>
                     <i className="ri-chat-3-line text-green-600 text-lg"></i>
                   </div>
-                  <div className="text-2xl font-bold text-gray-900">28</div>
+                  <div className="text-2xl font-bold text-gray-900">{discussionPostCount}</div>
                 </div>
               </div>
               <div className="bg-white rounded-lg border border-gray-200 mb-5">

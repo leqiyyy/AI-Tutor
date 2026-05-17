@@ -33,6 +33,12 @@ from app.integrations.reranker import get_reranker
 from app.models.course import Class, Course, Material
 from app.models.knowledge import FileParseTask, KBSpace, KnowledgeEntity, KnowledgeRelation
 from app.services import model_routing_service
+from app.services.knowledge_normalization import (
+    canonical_entity_key,
+    canonicalize_entity_name,
+    merge_aliases,
+    normalize_relation_type,
+)
 
 logger = get_logger(__name__)
 
@@ -2785,6 +2791,11 @@ class RAGAnythingAdapter:
         """
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        projection_cleanup = self._remove_existing_material_projection(
+            db,
+            class_id=class_id,
+            material_id=material_id,
+        )
         source_span_seed = self._build_source_span_seed(
             material_id=material_id,
             chunks=parsed.get("chunks") or [],
@@ -2818,7 +2829,8 @@ class RAGAnythingAdapter:
         )
         explicit_entities = self._extract_graph_entities(status) or storage_graph.get("entities", [])
         explicit_relations = self._extract_graph_relations(status) or storage_graph.get("relations", [])
-        entity_by_name: dict[str, KnowledgeEntity] = {material_entity.name.lower(): material_entity}
+        entity_by_name: dict[str, KnowledgeEntity] = {}
+        self._remember_graph_entity(entity_by_name, material_entity)
         projectable_explicit_entities = [
             item for item in explicit_entities[:48]
             if self._is_projection_course_entity(
@@ -2839,7 +2851,7 @@ class RAGAnythingAdapter:
                 source_span={**source_span_seed, **(item.get("source_span") or {}), "kind": "raganything_entity"},
                 provenance={**provenance_base, "raganything_entity": item},
             )
-            entity_by_name[entity.name.lower()] = entity
+            self._remember_graph_entity(entity_by_name, entity)
             entity_count += 1
             if self._upsert_graph_relation(
                 db,
@@ -2891,7 +2903,7 @@ class RAGAnythingAdapter:
                     source_span={**source_span_seed, "kind": "candidate_concept", "keyword": normalized_keyword},
                     provenance={**provenance_payload, "fallback": fallback_reason},
                 )
-                entity_by_name[entity.name.lower()] = entity
+                self._remember_graph_entity(entity_by_name, entity)
                 entity_count += 1
                 if self._upsert_graph_relation(
                     db,
@@ -2909,13 +2921,14 @@ class RAGAnythingAdapter:
                 normalized_keyword = str(keyword or "").strip()[:300]
                 if (
                     not self._is_projection_candidate_concept(normalized_keyword)
-                    or normalized_keyword.lower() in entity_by_name
+                    or self._graph_entity_from_lookup(entity_by_name, normalized_keyword)
                 ):
                     continue
-                existing_entity = db.query(KnowledgeEntity).filter(
-                    KnowledgeEntity.class_id == class_id,
-                    KnowledgeEntity.name == normalized_keyword,
-                ).first()
+                existing_entity = self._find_graph_entity_by_name(
+                    db,
+                    class_id=class_id,
+                    name=normalized_keyword,
+                )
                 is_identifier_keyword = self._is_projection_identifier_keyword(normalized_keyword)
                 if not existing_entity and not is_identifier_keyword:
                     continue
@@ -2960,7 +2973,7 @@ class RAGAnythingAdapter:
                         ),
                     },
                 )
-                entity_by_name[entity.name.lower()] = entity
+                self._remember_graph_entity(entity_by_name, entity)
                 entity_count += 1
                 if self._upsert_graph_relation(
                     db,
@@ -2984,7 +2997,7 @@ class RAGAnythingAdapter:
                 and self._is_projection_course_entity(target_name)
             ):
                 continue
-            source = entity_by_name.get(str(source_name).lower()) or self._upsert_graph_entity(
+            source = self._graph_entity_from_lookup(entity_by_name, source_name) or self._upsert_graph_entity(
                 db,
                 class_id=class_id,
                 name=str(source_name),
@@ -2995,7 +3008,7 @@ class RAGAnythingAdapter:
                 source_span={**source_span_seed, "kind": "relation_endpoint"},
                 provenance=provenance_base,
             )
-            target = entity_by_name.get(str(target_name).lower()) or self._upsert_graph_entity(
+            target = self._graph_entity_from_lookup(entity_by_name, target_name) or self._upsert_graph_entity(
                 db,
                 class_id=class_id,
                 name=str(target_name),
@@ -3030,7 +3043,43 @@ class RAGAnythingAdapter:
             "used_explicit_raganything_graph": bool(projectable_explicit_entities),
             "filtered_explicit_entity_count": max(0, len(explicit_entities[:48]) - len(projectable_explicit_entities)),
             "explicit_graph_source": storage_graph.get("source") if storage_graph.get("entities") else "raganything_status",
+            "projection_cleanup": projection_cleanup,
         }
+
+    def _remove_existing_material_projection(self, db, *, class_id: str, material_id: str) -> dict[str, Any]:
+        """Make app-level graph projection idempotent for one material.
+
+        RAG ingestion can be retried by queue workers. Without this guard, the
+        same projected relation can be merged repeatedly and inflate edge
+        weights. The lower-level LightRAG index remains managed by
+        `delete_material_index`; this only cleans the business projection layer.
+        """
+
+        try:
+            from app.services.kb_service import remove_material_graph_contributions
+
+            return {
+                "attempted": True,
+                "layer": "app_projection",
+                **remove_material_graph_contributions(
+                    db,
+                    class_id=class_id,
+                    material_id=material_id,
+                    commit=False,
+                ),
+            }
+        except Exception as exc:
+            logger.warning(
+                "raganything_projection_cleanup_failed",
+                class_id=class_id,
+                material_id=material_id,
+                error=str(exc),
+            )
+            return {
+                "attempted": True,
+                "layer": "app_projection",
+                "error": str(exc),
+            }
 
     def _projection_candidate_keywords(self, parsed: dict[str, Any], *, limit: int = 80) -> list[str]:
         values: list[str] = []
@@ -3453,6 +3502,51 @@ class RAGAnythingAdapter:
             )
             return {"available": False, "entities": {}, "relations": {}}
 
+    def _graph_entity_lookup_keys(self, value: Any) -> list[str]:
+        keys = []
+        for item in merge_aliases(value, canonicalize_entity_name(value)[0]):
+            key = canonical_entity_key(item)
+            if key and key not in keys:
+                keys.append(key)
+            surface_key = str(item or "").strip().lower()
+            if surface_key and surface_key not in keys:
+                keys.append(surface_key)
+        return keys
+
+    def _remember_graph_entity(self, lookup: dict[str, KnowledgeEntity], entity: KnowledgeEntity) -> None:
+        for key in self._graph_entity_lookup_keys(entity.name):
+            lookup[key] = entity
+        for alias in entity.aliases or []:
+            for key in self._graph_entity_lookup_keys(alias):
+                lookup[key] = entity
+        if entity.canonical_name:
+            for key in self._graph_entity_lookup_keys(entity.canonical_name):
+                lookup[key] = entity
+
+    def _graph_entity_from_lookup(self, lookup: dict[str, KnowledgeEntity], value: Any) -> KnowledgeEntity | None:
+        for key in self._graph_entity_lookup_keys(value):
+            entity = lookup.get(key)
+            if entity:
+                return entity
+        return None
+
+    def _find_graph_entity_by_name(self, db, *, class_id: str, name: Any) -> KnowledgeEntity | None:
+        surface = str(name or "").strip()[:300]
+        canonical_name, _aliases = canonicalize_entity_name(surface)
+        if canonical_name:
+            entity = db.query(KnowledgeEntity).filter(
+                KnowledgeEntity.class_id == class_id,
+                KnowledgeEntity.canonical_name == canonical_name,
+            ).first()
+            if entity:
+                return entity
+        if surface:
+            return db.query(KnowledgeEntity).filter(
+                KnowledgeEntity.class_id == class_id,
+                KnowledgeEntity.name == surface,
+            ).first()
+        return None
+
     def _upsert_graph_entity(
         self,
         db,
@@ -3467,14 +3561,19 @@ class RAGAnythingAdapter:
         provenance: dict[str, Any],
     ) -> KnowledgeEntity:
         normalized_name = str(name or "").strip()[:300]
-        entity = db.query(KnowledgeEntity).filter(
-            KnowledgeEntity.class_id == class_id,
-            KnowledgeEntity.name == normalized_name,
-        ).first()
+        if str(entity_type or "").strip().lower() in {"material", "document", "file", "page", "chunk"}:
+            canonical_name, aliases = normalized_name, [normalized_name]
+        else:
+            canonical_name, aliases = canonicalize_entity_name(normalized_name)
+        display_name = canonical_name or normalized_name
+        aliases = merge_aliases(aliases, normalized_name, display_name)
+        entity = self._find_graph_entity_by_name(db, class_id=class_id, name=normalized_name)
         if not entity:
             entity = KnowledgeEntity(
                 class_id=class_id,
-                name=normalized_name,
+                name=display_name,
+                canonical_name=canonical_name or display_name,
+                aliases=aliases,
                 entity_type=entity_type,
                 description=description,
                 source_material_id=material_id,
@@ -3487,8 +3586,27 @@ class RAGAnythingAdapter:
             db.flush()
             return entity
 
+        entity.canonical_name = entity.canonical_name or canonical_name or entity.name
+        entity.aliases = merge_aliases(entity.aliases, aliases, entity.name, normalized_name)
         entity.entity_type = entity.entity_type or entity_type
-        entity.description = entity.description or description
+        existing_description = str(entity.description or "").strip()
+        incoming_description = str(description or "").strip()
+        generated_prefixes = (
+            "Candidate concept projected from RAG-Anything metadata",
+            "RAG-Anything relation endpoint from",
+            "LightRAG extracted entity:",
+        )
+        if incoming_description and not entity.reviewed_by:
+            should_refresh_description = (
+                not existing_description
+                or any(existing_description.startswith(prefix) for prefix in generated_prefixes)
+                or (
+                    len(incoming_description) > len(existing_description) * 1.35
+                    and float(confidence or 0.0) >= float(entity.confidence or 0.0)
+                )
+            )
+            if should_refresh_description:
+                entity.description = incoming_description
         entity.source_material_id = material_id
         entity.confidence = self._blended_confidence(entity.confidence, confidence)
         entity.source_span = self._merge_source_span(entity.source_span, source_span)
@@ -3514,6 +3632,7 @@ class RAGAnythingAdapter:
     ) -> bool:
         if source.id == target.id:
             return False
+        relation_type = normalize_relation_type(relation_type)
         relation = db.query(KnowledgeRelation).filter(
             KnowledgeRelation.class_id == class_id,
             KnowledgeRelation.source_id == source.id,
@@ -3533,7 +3652,11 @@ class RAGAnythingAdapter:
             ))
             return True
 
-        relation.weight = round(min(5.0, float(relation.weight or 1.0) + 0.2), 4)
+        existing_material_ids = set(self._source_material_ids_from_provenance(relation.provenance))
+        incoming_material_ids = set(self._source_material_ids_from_provenance(provenance))
+        gained_new_material = bool(incoming_material_ids - existing_material_ids)
+        if gained_new_material:
+            relation.weight = round(min(5.0, float(relation.weight or 1.0) + 0.2), 4)
         relation.confidence = self._blended_confidence(relation.confidence, confidence)
         relation.source_span = self._merge_source_span(relation.source_span, source_span)
         relation.provenance = self._merge_provenance(
@@ -3604,11 +3727,44 @@ class RAGAnythingAdapter:
             if bbox is None and isinstance(item, dict):
                 bbox = item.get("bbox")
 
+        evidence_items: list[dict[str, Any]] = []
+        for index, item in enumerate(content_items or []):
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            modality = item.get("modality") or item.get("type") or metadata.get("modality") or metadata.get("source_type")
+            item_page = item.get("page") or item.get("page_idx") or metadata.get("page") or metadata.get("page_idx")
+            item_bbox = item.get("bbox") or metadata.get("bbox")
+            evidence = {
+                "material_id": material_id,
+                "item_id": item.get("item_id") or item.get("atomic_id") or metadata.get("item_id") or metadata.get("atomic_id"),
+                "atomic_id": item.get("atomic_id") or metadata.get("atomic_id"),
+                "modality": self._normalize_content_modality(str(modality or "")),
+                "content_index": metadata.get("content_index") or item.get("content_index") or index,
+                "page": item_page,
+                "bbox": item_bbox,
+                "image_path": item.get("image_path") or item.get("img_path") or metadata.get("image_path") or metadata.get("img_path"),
+                "source_path": item.get("source_path") or metadata.get("source_path"),
+                "formula_latex": item.get("formula_latex") or item.get("equation") or metadata.get("formula_latex") or metadata.get("equation"),
+                "table_markdown": item.get("table_markdown") or item.get("table_md") or metadata.get("table_markdown") or metadata.get("table_md"),
+                "ocr_text": item.get("ocr_text") or metadata.get("ocr_text"),
+            }
+            compact = {
+                key: (str(value)[:500] if key in {"table_markdown", "ocr_text"} and value is not None else value)
+                for key, value in evidence.items()
+                if value not in (None, "", [])
+            }
+            if compact:
+                evidence_items.append(compact)
+            if len(evidence_items) >= 8:
+                break
+
         return {
             "material_id": material_id,
             "pages": pages[:8],
             "chunk_ids": chunk_ids[:8],
             "bbox": bbox,
+            "evidence_items": evidence_items,
         }
 
     def _merge_source_span(self, existing: Any, incoming: dict[str, Any]) -> dict[str, Any]:
@@ -3620,6 +3776,28 @@ class RAGAnythingAdapter:
                     current = [current]
                 additions = value if isinstance(value, list) else [value]
                 merged[key] = list(dict.fromkeys([*current, *[item for item in additions if item is not None]]))[:16]
+            elif key == "evidence_items":
+                current_items = merged.get(key) or []
+                if not isinstance(current_items, list):
+                    current_items = [current_items]
+                additions = value if isinstance(value, list) else [value]
+                seen = set()
+                merged_items = []
+                for item in [*current_items, *additions]:
+                    if not isinstance(item, dict):
+                        continue
+                    identity = (
+                        item.get("atomic_id"),
+                        item.get("item_id"),
+                        item.get("modality"),
+                        item.get("page"),
+                        str(item.get("bbox")),
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    merged_items.append(item)
+                merged[key] = merged_items[:12]
             elif key == "bbox":
                 merged[key] = merged.get(key) or value
             else:
@@ -3644,6 +3822,7 @@ class RAGAnythingAdapter:
             if material_id and material_id not in source_material_ids:
                 source_material_ids.append(material_id)
         provenance["source_material_ids"] = source_material_ids
+        provenance["support_count"] = len(source_material_ids)
         provenance["occurrence_count"] = int(provenance.get("occurrence_count", 0) or 0) + 1
         provenance["first_seen_at"] = provenance.get("first_seen_at") or seen_at
         provenance["last_seen_at"] = seen_at
@@ -4071,6 +4250,8 @@ class RAGAnythingAdapter:
         attachments=None,
         role: str = "student",
         progress_callback: ProgressCallback | None = None,
+        query_mode: str | None = None,
+        query_options: dict[str, Any] | None = None,
     ) -> RAGResult:
         query_started = perf_counter()
         outer_stage_timings_ms: dict[str, float] = {}
@@ -4078,7 +4259,8 @@ class RAGAnythingAdapter:
         def mark(stage: str, started: float) -> None:
             outer_stage_timings_ms[stage] = round((perf_counter() - started) * 1000, 2)
 
-        query_mode = settings.RAGANYTHING_QUERY_MODE or "mix"
+        query_mode = query_mode or settings.RAGANYTHING_QUERY_MODE or "mix"
+        query_options = dict(query_options or {})
         routing_snapshot = self._load_runtime_routing_snapshot()
         routing_meta = model_routing_service.flatten_routing_snapshot(routing_snapshot)
         stage_started = perf_counter()
@@ -4157,6 +4339,7 @@ class RAGAnythingAdapter:
             attachments=attachments,
             image_contexts=image_contexts,
             query_mode=query_mode,
+            query_options=query_options,
             role=role,
             progress_callback=progress_callback,
             progress_started=query_started,
@@ -4169,6 +4352,7 @@ class RAGAnythingAdapter:
                 "class_id": class_id,
                 "role": role,
                 "query_mode": query_mode,
+                "query_options": query_options,
                 "original_question_preview": self._trace_preview(question),
                 "effective_query_preview": self._trace_preview(effective_question),
                 "query_rewrite": self._build_query_rewrite_trace(
@@ -4196,6 +4380,7 @@ class RAGAnythingAdapter:
                 **(raganything_result.meta or {}),
                 "engine": "raganything",
                 "query_mode": query_mode,
+                "query_options": query_options,
                 "query_method": query_method,
                 "used_multimodal": query_method == "aquery_with_multimodal",
                 "used_fallback": False,
@@ -4243,6 +4428,7 @@ class RAGAnythingAdapter:
             meta={
                 "engine": "raganything",
                 "query_mode": query_mode,
+                "query_options": query_options,
                 "query_method": query_method,
                 "used_multimodal": bool(image_contexts),
                 "used_fallback": False,
@@ -4301,6 +4487,7 @@ class RAGAnythingAdapter:
         attachments: list[dict] | None,
         image_contexts: list[str],
         query_mode: str,
+        query_options: dict[str, Any] | None = None,
         role: str = "student",
         progress_callback: ProgressCallback | None = None,
         progress_started: float | None = None,
@@ -4313,6 +4500,7 @@ class RAGAnythingAdapter:
             "class_id": class_id,
             "role": role,
             "requested_query_mode": query_mode,
+            "query_options": dict(query_options or {}),
             "llm_calls": [],
         }
         trace_token = _QUERY_TRACE_CONTEXT.set(live_trace) if bool(getattr(settings, "RAG_QUERY_TRACE_ENABLED", True)) else None
@@ -4434,6 +4622,7 @@ class RAGAnythingAdapter:
                     rag=rag,
                     query_text=query_text,
                     query_mode=query_mode,
+                    query_options=query_options,
                     history=aquery_history,
                     attachments=attachments or [],
                     prefer_multimodal=has_image,
@@ -4707,7 +4896,7 @@ class RAGAnythingAdapter:
         retrieval_terms = self._compact_retrieval_terms(
             question=question,
             rewrite_bundle=rewrite_bundle,
-            max_terms=8,
+            max_terms=4,
         )
         if not retrieval_terms:
             return question
@@ -4735,8 +4924,6 @@ class RAGAnythingAdapter:
         ]
         for query in queries[1:]:
             candidates.extend(self._split_retrieval_query_terms(query))
-        for term in rewrite_bundle.get("retrieval_focus_terms", []) or []:
-            candidates.append(str(term or "").strip())
 
         terms: list[str] = []
         seen: set[str] = {original_key} if original_key else set()
@@ -6194,6 +6381,34 @@ class RAGAnythingAdapter:
                 },
             }
 
+        source_rerank_enabled = bool(getattr(settings, "RAG_SOURCE_RERANK_ENABLED", False))
+        if not source_rerank_enabled:
+            candidate_count = len(sources or [])
+            top_k = max(0, int(getattr(settings, "RAG_ANSWER_TOP_K", 0) or 0))
+            selected_sources = list(sources or [])
+            if top_k > 0:
+                selected_sources = selected_sources[:top_k]
+            return selected_sources, {
+                "reranker_provider": "disabled",
+                "reranker_model": None,
+                "reranked_main_chain_sources": False,
+                "source_candidate_count": candidate_count,
+                "source_selected_count": len(selected_sources),
+                "source_top_k": top_k or None,
+                "rerank_trace": {
+                    "provider": "disabled",
+                    "model": None,
+                    "applied": False,
+                    "reason": "source_rerank_disabled",
+                    "candidate_count": candidate_count,
+                    "candidate_with_text_count": len(candidates),
+                    "selected_count": len(selected_sources),
+                    "top_k": top_k or None,
+                    "before": self._source_trace_summary(sources),
+                    "after": self._source_trace_summary(selected_sources),
+                },
+            }
+
         reranker = get_reranker()
         reranked = await reranker.rerank(
             query=question,
@@ -6504,6 +6719,11 @@ class RAGAnythingAdapter:
             "content_index": metadata.get("content_index") or record.get("content_index"),
             "page": record.get("page") or record.get("page_idx") or metadata.get("page") or metadata.get("page_idx"),
             "bbox": record.get("bbox") or metadata.get("bbox"),
+            "image_path": record.get("image_path") or record.get("img_path") or metadata.get("image_path") or metadata.get("img_path"),
+            "source_path": record.get("source_path") or metadata.get("source_path"),
+            "formula_latex": record.get("formula_latex") or record.get("equation") or metadata.get("formula_latex") or metadata.get("equation"),
+            "table_markdown": record.get("table_markdown") or record.get("table_md") or metadata.get("table_markdown") or metadata.get("table_md"),
+            "ocr_text": record.get("ocr_text") or metadata.get("ocr_text"),
         }
 
     async def _invoke_rag_query(
@@ -6512,6 +6732,7 @@ class RAGAnythingAdapter:
         rag: object,
         query_text: str,
         query_mode: str,
+        query_options: dict[str, Any] | None,
         history: list[dict],
         attachments: list[dict],
         prefer_multimodal: bool,
@@ -6523,6 +6744,7 @@ class RAGAnythingAdapter:
                 rag=rag,
                 query_text=query_text,
                 query_mode=query_mode,
+                query_options=query_options,
                 history=history,
                 class_id=class_id,
                 role=role,
@@ -6550,6 +6772,7 @@ class RAGAnythingAdapter:
                 method=method,
                 query_text=query_text,
                 query_mode=query_mode,
+                query_options=query_options,
                 history=history,
                 attachments=attachments,
                 role=role,
@@ -6586,6 +6809,7 @@ class RAGAnythingAdapter:
         rag: object,
         query_text: str,
         query_mode: str,
+        query_options: dict[str, Any] | None,
         history: list[dict],
         class_id: str,
         role: str = "student",
@@ -6606,6 +6830,7 @@ class RAGAnythingAdapter:
                 mode=effective_mode,
                 history=history or [],
                 role=role,
+                query_options=query_options,
             )
             try:
                 raw = await lightrag.aquery_llm(query_text, param=query_param)
@@ -6665,6 +6890,7 @@ class RAGAnythingAdapter:
         mode: str,
         history: list[dict],
         role: str,
+        query_options: dict[str, Any] | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "mode": mode,
@@ -6681,6 +6907,7 @@ class RAGAnythingAdapter:
             supports_user_prompt = False
             supports_enable_rerank = False
             supported_param_names = set()
+        query_options = dict(query_options or {})
         explicit_limits = {
             "top_k": max(1, int(getattr(settings, "RAG_LIGHTRAG_TOP_K", 12) or 12)),
             "chunk_top_k": max(1, int(getattr(settings, "RAG_LIGHTRAG_CHUNK_TOP_K", 6) or 6)),
@@ -6688,6 +6915,10 @@ class RAGAnythingAdapter:
             "max_relation_tokens": max(512, int(getattr(settings, "RAG_LIGHTRAG_MAX_RELATION_TOKENS", 3000) or 3000)),
             "max_total_tokens": max(2048, int(getattr(settings, "RAG_LIGHTRAG_MAX_TOTAL_TOKENS", 8000) or 8000)),
         }
+        for key in tuple(explicit_limits):
+            if key in query_options and query_options[key] is not None:
+                floor = 1 if key in {"top_k", "chunk_top_k"} else (2048 if key == "max_total_tokens" else 512)
+                explicit_limits[key] = max(floor, int(query_options[key]))
         for param_name, value in explicit_limits.items():
             if param_name in supported_param_names:
                 kwargs[param_name] = value
@@ -6766,6 +6997,7 @@ class RAGAnythingAdapter:
         query_mode: str,
         history: list[dict],
         attachments: list[dict],
+        query_options: dict[str, Any] | None = None,
         role: str = "student",
     ) -> dict[str, Any] | None:
         signature = inspect.signature(method)

@@ -41,35 +41,35 @@ ZH_STOPWORDS: set[str] = set()
 COURSE_DOMAIN_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (
         ("链路层", "数据链路层"),
-        ("数据链路层", "链路层", "成帧", "差错控制", "流量控制", "媒体访问控制", "MAC", "CRC", "CSMA/CD"),
+        ("数据链路层", "链路层"),
     ),
     (
         ("协议层", "分层模型", "层次模型", "OSI", "TCP/IP模型", "TCP/IP五层", "协议栈"),
-        ("网络分层", "协议层", "协议栈", "OSI模型", "TCP/IP模型", "五层模型", "应用层", "传输层", "网络层", "数据链路层", "物理层", "封装"),
+        ("OSI模型", "TCP/IP模型", "五层模型", "协议栈"),
     ),
     (
         ("网络层", "IP层"),
-        ("网络层", "IP", "路由选择", "转发", "寻址", "ICMP"),
+        ("网络层", "IP层", "IP"),
     ),
     (
         ("传输层", "TCP", "UDP"),
-        ("传输层", "TCP", "UDP", "可靠传输", "流量控制", "拥塞控制", "端到端"),
+        ("传输层", "TCP", "UDP"),
     ),
     (
         ("TCP/IP", "TCPIP", "TCP-IP", "TCP_IP", "TCP/IP协议族"),
-        ("TCP/IP", "TCP/IP协议族", "应用层", "传输层", "网络层", "链路层", "物理层", "HTTP", "HTTPS", "TCP", "UDP", "IP"),
+        ("TCP/IP", "TCPIP", "TCP-IP", "TCP/IP协议族"),
     ),
     (
         ("三次握手", "四次握手", "四次挥手", "TCP握手", "TCP连接", "连接建立", "连接释放"),
-        ("TCP", "连接建立", "三次握手", "SYN", "ACK", "序列号", "确认号", "连接释放", "四次挥手", "FIN", "TIME_WAIT"),
+        ("TCP", "连接建立", "三次握手", "四次挥手", "四次握手", "连接释放"),
     ),
     (
         ("粘包", "半包", "消息边界", "无边界", "拆包"),
-        ("TCP", "字节流", "无消息边界", "粘包", "半包", "拆包", "定长消息", "分隔符", "长度字段", "应用层协议"),
+        ("TCP", "字节流", "消息边界", "粘包", "半包", "拆包"),
     ),
     (
         ("应用层", "HTTP", "DNS"),
-        ("应用层", "HTTP", "DNS", "SMTP", "FTP", "客户服务器", "进程通信"),
+        ("应用层", "HTTP", "DNS"),
     ),
 )
 
@@ -306,10 +306,11 @@ def _generate_variants(question: str, mode: str, intent: dict[str, Any]) -> list
     filtered_terms = _filtered_terms(question)
     outputs: list[str] = []
 
-    domain_query = " ".join(_domain_expansion_terms(question, limit=20)).strip()
-    intent_query = " ".join(
-        [*filtered_terms[:8], *[str(term) for term in intent.get("retrieval_focus_terms", [])[:6]]]
-    ).strip()
+    domain_query = " ".join(_domain_expansion_terms(question, limit=6)).strip()
+    # Let LightRAG's keyword extractor infer broad intent words. The outer
+    # rewrite layer should only contribute conservative aliases/terms, not
+    # generic prompts such as "steps", "definition", or "key points".
+    intent_query = " ".join(filtered_terms[:8]).strip()
     compact_query = " ".join(filtered_terms[:12]).strip()
     keyword_query = " ".join(_keyword_terms(filtered_terms, limit=6)).strip()
 

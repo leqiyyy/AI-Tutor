@@ -24,6 +24,23 @@ function citationMap(sources?: AiMessageSource[]) {
   return map;
 }
 
+function compactEvidence(value?: string, maxLength = 220) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function citationTitle(source: AiMessageSource | undefined, citationIndex: number) {
+  if (!source) return `引用 ${citationIndex}`;
+  const page = source.page ? ` · 第 ${source.page} 页` : "";
+  const evidence = compactEvidence(
+    source.snippet || source.rawText || source.ocrText || source.tableMarkdown || source.formulaLatex,
+  );
+  return evidence
+    ? `${source.name}${page}\n${evidence}`
+    : `${source.name}${page}`;
+}
+
 function renderInline(
   text: string,
   keyPrefix: string,
@@ -55,7 +72,7 @@ function renderInline(
             key={`${keyPrefix}-r-${match.index}`}
             type="button"
             disabled={!source}
-            title={source ? `${source.name}${source.page ? ` · 第 ${source.page} 页` : ""}` : `引用 ${citationIndex}`}
+            title={citationTitle(source, citationIndex)}
             onClick={() => source && onCitationClick?.(source, citationIndex)}
             className={`mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[11px] font-semibold align-baseline ${
               source

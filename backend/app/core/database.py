@@ -85,6 +85,8 @@ def _ensure_runtime_schema_compatibility() -> None:
             "confidence": "ALTER TABLE knowledge_entities ADD COLUMN confidence FLOAT",
             "source_span": "ALTER TABLE knowledge_entities ADD COLUMN source_span JSON",
             "provenance": "ALTER TABLE knowledge_entities ADD COLUMN provenance JSON",
+            "canonical_name": "ALTER TABLE knowledge_entities ADD COLUMN canonical_name VARCHAR(300)",
+            "aliases": "ALTER TABLE knowledge_entities ADD COLUMN aliases JSON",
             "updated_at": "ALTER TABLE knowledge_entities ADD COLUMN updated_at DATETIME",
         },
         "knowledge_relations": {
@@ -111,6 +113,7 @@ def _ensure_runtime_schema_compatibility() -> None:
         connection.execute(text(
             "UPDATE knowledge_entities "
             "SET confidence = COALESCE(confidence, 0.6), "
+            "canonical_name = COALESCE(canonical_name, name), "
             "updated_at = COALESCE(updated_at, created_at)"
         ))
         connection.execute(text(

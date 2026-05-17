@@ -34,6 +34,14 @@ export interface AiMessageSource {
   citationPath?: string;
   snippet?: string;
   rawText?: string;
+  metadata?: Record<string, unknown>;
+  modality?: string;
+  bbox?: unknown;
+  imagePath?: string;
+  sourcePath?: string;
+  tableMarkdown?: string;
+  formulaLatex?: string;
+  ocrText?: string;
 }
 
 export interface AiProgressEvent {
@@ -99,6 +107,12 @@ export interface AiTeacherQuestion {
   aiAnswer: string;
   confidence: number;
   confidenceLevel: "high" | "medium" | "low";
+  quality?: Record<string, unknown>;
+  reviewContext?: Record<string, unknown>;
+  review_context?: Record<string, unknown>;
+  evidenceSupport?: number;
+  groundingLevel?: string;
+  sourceCount?: number;
   sources: Array<{ name: string; page: number }>;
   time: string;
   status: "pending" | "adopted" | "replied";

@@ -45,6 +45,8 @@ class RAGEngine(ABC):
         attachments: Optional[List[dict]] = None,
         role: str = "student",
         progress_callback: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
+        query_mode: Optional[str] = None,
+        query_options: Optional[dict[str, Any]] = None,
     ) -> RAGResult:
         ...
 

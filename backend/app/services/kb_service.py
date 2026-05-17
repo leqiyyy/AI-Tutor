@@ -312,15 +312,19 @@ async def delete_material_index_artifacts(
             material_id=material_id,
             error=str(exc),
         )
-        return {
+        return _with_index_cleanup_guard({
             "supported": False,
             "deleted": False,
             "reason": "rag_engine_unavailable",
             "error": str(exc),
-        }
+        })
     delete_method = getattr(rag, "delete_material_index", None)
     if not callable(delete_method):
-        return {"supported": False, "deleted": False, "reason": "rag_engine_delete_not_supported"}
+        return _with_index_cleanup_guard({
+            "supported": False,
+            "deleted": False,
+            "reason": "rag_engine_delete_not_supported",
+        })
     result = delete_method(
         class_id=class_id,
         material_id=material_id,
@@ -328,7 +332,27 @@ async def delete_material_index_artifacts(
     )
     if hasattr(result, "__await__"):
         result = await result
-    return result if isinstance(result, dict) else {"supported": True, "deleted": bool(result)}
+    payload = result if isinstance(result, dict) else {"supported": True, "deleted": bool(result)}
+    return _with_index_cleanup_guard(payload)
+
+
+def _with_index_cleanup_guard(result: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(result or {})
+    supported = bool(payload.get("supported"))
+    deleted = bool(payload.get("deleted"))
+    if supported and deleted:
+        payload.setdefault("cleanup_status", "verified_deleted")
+        payload.setdefault("safe_for_reindex", True)
+        payload.setdefault("duplicate_risk", "low")
+    elif supported:
+        payload.setdefault("cleanup_status", "delete_failed")
+        payload.setdefault("safe_for_reindex", False)
+        payload.setdefault("duplicate_risk", "high")
+    else:
+        payload.setdefault("cleanup_status", "delete_unavailable")
+        payload.setdefault("safe_for_reindex", True)
+        payload.setdefault("duplicate_risk", "unknown")
+    return payload
 
 
 def list_course_files(db: Session, course_id: str, user: User) -> list[dict]:
@@ -917,6 +941,13 @@ async def ingest_material_with_retry(
             class_id=cls.id,
             material_id=material_id,
         )
+        if index_cleanup.get("duplicate_risk") == "unknown":
+            log.warning(
+                "force_reindex_index_cleanup_unverified",
+                class_id=cls.id,
+                material_id=material_id,
+                reason=index_cleanup.get("reason"),
+            )
         if existing_task:
             _upsert_ingest_meta(
                 existing_task,

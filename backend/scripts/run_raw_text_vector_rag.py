@@ -15,6 +15,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,24 @@ def _post_json(url: str, payload: dict[str, Any], api_key: str, timeout: int) ->
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _request_json(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None,
+    api_key: str,
+    timeout: int,
+) -> dict[str, Any]:
+    data = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["api-key"] = api_key
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
 
 
 def _with_retry(fn, *, retries: int, label: str) -> Any:
@@ -107,6 +126,94 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if aa <= 0 or bb <= 0:
         return 0.0
     return dot / (math.sqrt(aa) * math.sqrt(bb))
+
+
+def _qdrant_request(args: argparse.Namespace, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    url = f"{_normalize_base(args.qdrant_url)}{path}"
+    return _request_json(method, url, payload, args.qdrant_api_key, args.api_timeout)
+
+
+def _qdrant_collection_exists(args: argparse.Namespace) -> bool:
+    try:
+        _qdrant_request(args, "GET", f"/collections/{args.qdrant_collection}", None)
+        return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+
+
+def _qdrant_prepare_collection(vector_size: int, args: argparse.Namespace) -> None:
+    if args.qdrant_recreate and _qdrant_collection_exists(args):
+        _qdrant_request(args, "DELETE", f"/collections/{args.qdrant_collection}", None)
+    if not _qdrant_collection_exists(args):
+        _qdrant_request(
+            args,
+            "PUT",
+            f"/collections/{args.qdrant_collection}",
+            {"vectors": {"size": vector_size, "distance": "Cosine"}},
+        )
+
+
+def _qdrant_upsert(chunks: list[dict[str, Any]], args: argparse.Namespace) -> None:
+    points: list[dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{args.qdrant_collection}:{chunk['chunk_id']}"))
+        points.append(
+            {
+                "id": point_id,
+                "vector": chunk["embedding"],
+                "payload": {
+                    "chunk_id": chunk["chunk_id"],
+                    "file_name": chunk["file_name"],
+                    "text": chunk["text"],
+                    "baseline": "raw_text_vector_rag",
+                    "dataset": str(args.dataset),
+                },
+            }
+        )
+        chunk["point_id"] = point_id
+        if len(points) >= args.qdrant_batch_size:
+            _qdrant_request(args, "PUT", f"/collections/{args.qdrant_collection}/points?wait=true", {"points": points})
+            print(f"qdrant upserted {idx}/{len(chunks)}", flush=True)
+            points = []
+    if points:
+        _qdrant_request(args, "PUT", f"/collections/{args.qdrant_collection}/points?wait=true", {"points": points})
+        print(f"qdrant upserted {len(chunks)}/{len(chunks)}", flush=True)
+
+
+def _qdrant_search(query_vector: list[float], args: argparse.Namespace, limit: int) -> list[dict[str, Any]]:
+    try:
+        response = _qdrant_request(
+            args,
+            "POST",
+            f"/collections/{args.qdrant_collection}/points/search",
+            {"vector": query_vector, "limit": limit, "with_payload": True, "with_vector": False},
+        )
+    except urllib.error.HTTPError:
+        response = _qdrant_request(
+            args,
+            "POST",
+            f"/collections/{args.qdrant_collection}/points/query",
+            {"query": query_vector, "limit": limit, "with_payload": True, "with_vector": False},
+        )
+    result = response.get("result") or []
+    if isinstance(result, dict):
+        result = result.get("points") or []
+    rows: list[dict[str, Any]] = []
+    for item in result:
+        payload = item.get("payload") or {}
+        rows.append(
+            {
+                "chunk_id": payload.get("chunk_id"),
+                "file_name": payload.get("file_name"),
+                "score": round(float(item.get("score") or 0.0), 6),
+                "snippet": str(payload.get("text") or "")[:500],
+                "text": str(payload.get("text") or ""),
+                "point_id": item.get("id"),
+            }
+        )
+    return rows
 
 
 def _make_prompt(question: str, contexts: list[dict[str, Any]]) -> str:
@@ -186,6 +293,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     args.llm_api_base = args.llm_api_base or os.getenv("LLM_API_BASE")
     args.llm_api_key = args.llm_api_key or os.getenv("LLM_API_KEY")
     args.llm_model = args.llm_model or os.getenv("LLM_MODEL") or "Qwen/Qwen3.5-122B-A10B"
+    args.qdrant_url = args.qdrant_url or os.getenv("VECTOR_DB_URL") or "http://qdrant:6333"
+    args.qdrant_api_key = args.qdrant_api_key or os.getenv("VECTOR_DB_API_KEY") or ""
     if not args.embedding_api_base or not args.embedding_api_key:
         raise SystemExit("Missing embedding API config.")
     if not args.skip_generation and (not args.llm_api_base or not args.llm_api_key):
@@ -201,6 +310,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     chunk_vectors = _embed_texts(chunk_texts, args)
     for chunk, vector in zip(chunks, chunk_vectors):
         chunk["embedding"] = vector
+    vector_size = len(chunk_vectors[0]) if chunk_vectors else 0
+    if args.vector_store == "qdrant":
+        if not vector_size:
+            raise SystemExit("No chunk embeddings created; cannot initialize Qdrant collection.")
+        _qdrant_prepare_collection(vector_size, args)
+        _qdrant_upsert(chunks, args)
 
     query_texts = [str(item.get("question") or item.get("text") or "") for item in questions]
     query_vectors = _embed_texts(query_texts, args)
@@ -214,19 +329,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     for idx, (item, query_vector) in enumerate(zip(questions, query_vectors), start=1):
         query_started = time.perf_counter()
         query = str(item.get("question") or item.get("text") or "")
-        scored_chunks: list[dict[str, Any]] = []
-        for chunk in chunks:
-            score = _cosine(query_vector, chunk["embedding"])
-            scored_chunks.append(
-                {
-                    "chunk_id": chunk["chunk_id"],
-                    "file_name": chunk["file_name"],
-                    "score": round(score, 6),
-                    "snippet": chunk["text"][:500],
-                    "text": chunk["text"],
-                }
-            )
-        scored_chunks.sort(key=lambda row: row["score"], reverse=True)
+        if args.vector_store == "qdrant":
+            scored_chunks = _qdrant_search(query_vector, args, args.candidate_k)
+        else:
+            scored_chunks = []
+            for chunk in chunks:
+                score = _cosine(query_vector, chunk["embedding"])
+                scored_chunks.append(
+                    {
+                        "chunk_id": chunk["chunk_id"],
+                        "file_name": chunk["file_name"],
+                        "score": round(score, 6),
+                        "snippet": chunk["text"][:500],
+                        "text": chunk["text"],
+                    }
+                )
+            scored_chunks.sort(key=lambda row: row["score"], reverse=True)
 
         ranked_files: list[dict[str, Any]] = []
         seen_files: set[str] = set()
@@ -294,6 +412,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "top_k": args.top_k,
         "embedding_model": args.embedding_model,
         "llm_model": args.llm_model,
+        "vector_store": args.vector_store,
+        "qdrant_collection": args.qdrant_collection if args.vector_store == "qdrant" else None,
         "generation_enabled": not args.skip_generation,
         "build": {
             "file_count": len(files),
@@ -328,6 +448,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=900)
     parser.add_argument("--chunk-overlap", type=int, default=120)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--candidate-k", type=int, default=20)
     parser.add_argument("--pdftotext-bin", default="pdftotext")
     parser.add_argument("--pdf-text-dir", type=Path)
     parser.add_argument("--env-file", type=Path)
@@ -343,6 +464,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--skip-generation", action="store_true")
     parser.add_argument("--deduplicate-files", action="store_true", default=True)
+    parser.add_argument("--vector-store", choices=["memory", "qdrant"], default="qdrant")
+    parser.add_argument("--qdrant-url", default="")
+    parser.add_argument("--qdrant-api-key", default="")
+    parser.add_argument("--qdrant-collection", default="baseline_raw_text_vector_rag_bge_m3_1024d")
+    parser.add_argument("--qdrant-recreate", action="store_true", default=True)
+    parser.add_argument("--qdrant-batch-size", type=int, default=64)
     return parser.parse_args()
 
 

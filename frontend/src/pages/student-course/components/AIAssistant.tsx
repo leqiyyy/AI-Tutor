@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { AiMarkdownContent } from '@/components/AiMarkdownContent';
 import { AiProgressTimeline } from '@/components/AiProgressTimeline';
+import { AiSourceEvidenceList } from '@/components/AiSourceEvidenceList';
 import { compactSourceFileName, formatSourceFilePages, summarizeSourcesByFile } from '@/lib/aiSources';
 import { getNameInitial } from '@/lib/display';
 import { useAuth } from '@/hooks/use-auth';
@@ -188,11 +189,18 @@ export default function AIAssistant() {
   }, [classId, messages]);
 
   useEffect(() => {
+    setActiveConvId(0);
+    setMessages([{ ...INIT_WELCOME }]);
+    setCurrentSources([]);
+    setRightTab('quick');
+  }, [classId]);
+
+  useEffect(() => {
     let mounted = true;
 
     const loadAiData = async () => {
       const [loadedConversations, loadedRecommendations] = await Promise.all([
-        aiService.getStudentConversations(),
+        aiService.getStudentConversations(classId),
         recommendationService.getPersonalized(classId, 'ai_panel', { limit: 6 }).catch(() => null),
       ]);
 
@@ -1217,22 +1225,7 @@ export default function AIAssistant() {
                     <div className="text-xs text-center leading-relaxed mt-1">AI回答后会自动展示引用资料和页码</div>
                   </div>
                 ) : (
-                  <div className={isRightPanelWide ? 'grid grid-cols-1 gap-3 xl:grid-cols-2' : 'space-y-2'}>
-                    {summarizeSourcesByFile(currentSources).map(source => (
-                      <div key={source.key} className="flex min-w-0 items-start gap-2.5 rounded-xl border border-gray-100 bg-gray-50 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50 cursor-pointer">
-                        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0">
-                          <i className={`text-xl ${getSourceIconClass(source.type)}`}></i>
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="break-words text-xs font-medium leading-snug text-gray-800">{source.name}</div>
-                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                            {formatSourceFilePages(source.pages) && <span className="text-teal-600">{formatSourceFilePages(source.pages)}</span>}
-                            <span className="text-gray-500">引用 {source.count} 处</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <AiSourceEvidenceList sources={currentSources} wide={isRightPanelWide} courseId={classId} role="student" />
                 )}
               </div>
             )}

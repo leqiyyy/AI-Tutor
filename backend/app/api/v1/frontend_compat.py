@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
 import json
 import math
+import mimetypes
 import os
 import re
 import tempfile
 import uuid
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -21,12 +23,13 @@ from app.core.timezone import date_app_timezone, isoformat_app_timezone
 from app.db.base import get_db
 from app.models.course import Class, ClassMember, Course, Discussion, Material, Submission, Task
 from app.models.chat import ChatMessage, ChatSession, ReviewItem
-from app.models.knowledge import Flashcard, KnowledgeEntity, KnowledgeRelation
+from app.models.knowledge import FileParseTask, Flashcard, KnowledgeEntity, KnowledgeRelation
 from app.models.notification import Notification
 from app.models.personalization import LearningConcept, StudentConceptMastery
 from app.models.analytics import LearningRecord, StudyMistake
 from app.models.user import User
 from app.schemas.course import CreateClassRequest, JoinClassRequest
+from app.integrations.rag.quality import build_evidence_quality, build_review_context
 from app.services import auth_service, course_service, kb_service, personalized_recommendation_service, task_service
 from app import storage
 
@@ -279,6 +282,96 @@ def _material_download_url(course_id: str, file_id: str, file_name: str | None =
     return f"/api/v1/courses/{course_id}/files/{file_id}/download{query}"
 
 
+def _material_view_url(course_id: str, file_id: str) -> str:
+    return f"/api/v1/courses/{course_id}/files/{file_id}/view"
+
+
+def _material_evidence_asset_url(
+    course_id: str,
+    file_id: str,
+    *,
+    item_id: Any = None,
+    atomic_id: Any = None,
+    content_index: Any = None,
+) -> str | None:
+    params: list[str] = []
+    if item_id not in {None, ""}:
+        params.append(f"itemId={quote(str(item_id))}")
+    if atomic_id not in {None, ""}:
+        params.append(f"atomicId={quote(str(atomic_id))}")
+    if content_index not in {None, ""}:
+        params.append(f"contentIndex={quote(str(content_index))}")
+    if not params:
+        return None
+    return f"/api/v1/courses/{course_id}/files/{file_id}/evidence-asset?{'&'.join(params)}"
+
+
+def _content_item_identity(item: dict[str, Any], index: int) -> dict[str, str]:
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    values = {
+        "item_id": item.get("item_id") or item.get("id") or meta.get("item_id") or meta.get("id"),
+        "atomic_id": item.get("atomic_id") or meta.get("atomic_id"),
+        "content_index": item.get("content_index") or meta.get("content_index") or index,
+        "content_index_one_based": index + 1,
+    }
+    return {key: str(value) for key, value in values.items() if value not in {None, ""}}
+
+
+def _match_content_item(
+    item: dict[str, Any],
+    index: int,
+    *,
+    item_id: Any = None,
+    atomic_id: Any = None,
+    content_index: Any = None,
+) -> bool:
+    identity = _content_item_identity(item, index)
+    if item_id not in {None, ""} and str(item_id) in {identity.get("item_id"), identity.get("atomic_id")}:
+        return True
+    if atomic_id not in {None, ""} and str(atomic_id) in {identity.get("atomic_id"), identity.get("item_id")}:
+        return True
+    if content_index not in {None, ""} and str(content_index) in {
+        identity.get("content_index"),
+        identity.get("content_index_one_based"),
+    }:
+        return True
+    return False
+
+
+def _resolve_content_asset_path(raw_path: Any, *, material: Material) -> Path | None:
+    if not raw_path:
+        return None
+    value = str(raw_path).strip()
+    if not value or re.match(r"^(https?:|data:|blob:)", value, flags=re.I):
+        return None
+    candidates = [Path(value)]
+    if not Path(value).is_absolute():
+        candidates.extend([
+            Path(material.file_path).parent / value,
+            Path.cwd() / value,
+        ])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _content_item_asset_path(item: dict[str, Any], *, material: Material) -> Path | None:
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    raw_path = (
+        item.get("image_path")
+        or item.get("source_path")
+        or meta.get("image_path")
+        or meta.get("img_path")
+        or meta.get("keyframe_path")
+    )
+    return _resolve_content_asset_path(raw_path, material=material)
+
+
 def _task_attachment_scope(class_id: str) -> str:
     return f"task-attachments/{class_id}"
 
@@ -402,10 +495,28 @@ def _task_count(db: Session, class_id: str, published_only: bool = False) -> int
 
 
 def _discussion_count(db: Session, class_id: str) -> int:
-    return db.query(Discussion).filter(
+    rows = db.query(Discussion).filter(
         Discussion.class_id == class_id,
+        Discussion.parent_id == None,
         Discussion.is_active == True,
-    ).count()
+    ).all()
+    return sum(1 for row in rows if not _is_question_discussion(row))
+
+
+def _pending_question_count(db: Session, class_id: str) -> int:
+    rows = db.query(Discussion).filter(
+        Discussion.class_id == class_id,
+        Discussion.parent_id == None,
+        Discussion.is_active == True,
+    ).all()
+    count = 0
+    for row in rows:
+        if not _is_question_discussion(row):
+            continue
+        replies = [_discussion_reply_payload(db, item) for item in _discussion_replies(db, row.id)]
+        if not any(reply.get("isTeacher") for reply in replies):
+            count += 1
+    return count
 
 
 def _notifications_for_user(db: Session, user_id: str, limit: int = 20) -> list[dict]:
@@ -1967,7 +2078,7 @@ def teacher_course_bootstrap(
         "inviteCode": cls.invite_code,
         "studentCount": _student_count(db, class_id),
         "materialCount": _material_count(db, class_id),
-        "pendingQuestionCount": _discussion_count(db, class_id),
+        "pendingQuestionCount": _pending_question_count(db, class_id),
     })
 
 
@@ -2060,6 +2171,52 @@ def student_course_material_download(
         "fileName": material.file_name,
         "downloadUrl": _material_download_url(cls.course_id, material.id, material.file_name),
     })
+
+
+@router.get("/student/courses/{class_id}/materials/{file_id}/view", response_class=FileResponse)
+def student_course_material_inline_view(
+    class_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
+    path = Path(material.file_path)
+    if not path.exists() or not path.is_file():
+        raise NotFoundException("Material file is unavailable")
+    response = FileResponse(
+        path=str(path),
+        filename=material.file_name,
+        media_type=material.mime_type or mimetypes.guess_type(material.file_name or "")[0] or "application/octet-stream",
+    )
+    response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(material.file_name or 'material')}"
+    return response
+
+
+@router.get("/student/courses/{class_id}/materials/{file_id}/evidence-asset", response_class=FileResponse)
+def student_course_material_evidence_asset(
+    class_id: str,
+    file_id: str,
+    item_id: Any = Query(default=None, alias="itemId"),
+    atomic_id: Any = Query(default=None, alias="atomicId"),
+    content_index: Any = Query(default=None, alias="contentIndex"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material, _parse_task, content_items = kb_service._material_parse_payload(db, cls.course_id, file_id, current_user)
+    for index, item in enumerate(content_items):
+        if not _match_content_item(item, index, item_id=item_id, atomic_id=atomic_id, content_index=content_index):
+            continue
+        asset_path = _content_item_asset_path(item, material=material)
+        if not asset_path:
+            break
+        media_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+        response = FileResponse(path=str(asset_path), filename=asset_path.name, media_type=media_type)
+        response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(asset_path.name)}"
+        return response
+    raise NotFoundException("Evidence asset not found")
 
 
 @router.get("/student/courses/{class_id}/search", response_model=None)
@@ -2403,6 +2560,116 @@ def teacher_course_material_download(
         "fileName": material.file_name,
         "downloadUrl": _material_download_url(cls.course_id, material.id, material.file_name),
     })
+
+
+@router.get("/teacher/courses/{class_id}/materials/{file_id}/view", response_class=FileResponse)
+def teacher_course_material_inline_view(
+    class_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material = kb_service.get_material_for_user(db, cls.course_id, file_id, current_user)
+    path = Path(material.file_path)
+    if not path.exists() or not path.is_file():
+        raise NotFoundException("Material file is unavailable")
+    response = FileResponse(
+        path=str(path),
+        filename=material.file_name,
+        media_type=material.mime_type or mimetypes.guess_type(material.file_name or "")[0] or "application/octet-stream",
+    )
+    response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(material.file_name or 'material')}"
+    return response
+
+
+@router.get("/teacher/courses/{class_id}/materials/{file_id}/evidence-asset", response_class=FileResponse)
+def teacher_course_material_evidence_asset(
+    class_id: str,
+    file_id: str,
+    item_id: Any = Query(default=None, alias="itemId"),
+    atomic_id: Any = Query(default=None, alias="atomicId"),
+    content_index: Any = Query(default=None, alias="contentIndex"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    material, _parse_task, content_items = kb_service._material_parse_payload(db, cls.course_id, file_id, current_user)
+    for index, item in enumerate(content_items):
+        if not _match_content_item(item, index, item_id=item_id, atomic_id=atomic_id, content_index=content_index):
+            continue
+        asset_path = _content_item_asset_path(item, material=material)
+        if not asset_path:
+            break
+        media_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+        response = FileResponse(path=str(asset_path), filename=asset_path.name, media_type=media_type)
+        response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(asset_path.name)}"
+        return response
+    raise NotFoundException("Evidence asset not found")
+
+
+@router.get("/courses/{course_id}/files/{file_id}/view", response_class=FileResponse)
+def course_material_inline_view(
+    course_id: str,
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    material = kb_service.get_material_for_user(db, course_id, file_id, current_user)
+    path = Path(material.file_path)
+    if not path.exists() or not path.is_file():
+        raise NotFoundException("Material file is unavailable")
+    response = FileResponse(
+        path=str(path),
+        filename=material.file_name,
+        media_type=material.mime_type or "application/octet-stream",
+    )
+    response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(material.file_name or 'material')}"
+    return response
+
+
+@router.get("/courses/{course_id}/files/{file_id}/evidence-asset", response_class=FileResponse)
+def course_material_evidence_asset(
+    course_id: str,
+    file_id: str,
+    item_id: str | None = Query(None, alias="itemId"),
+    atomic_id: str | None = Query(None, alias="atomicId"),
+    content_index: str | None = Query(None, alias="contentIndex"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    material = kb_service.get_material_for_user(db, course_id, file_id, current_user)
+    parse_task = db.query(FileParseTask).filter(FileParseTask.material_id == material.id).first()
+    content_item = _match_evidence_content_item(
+        parse_task,
+        {
+            "item_id": item_id,
+            "atomic_id": atomic_id,
+            "content_index": content_index,
+        },
+    )
+    if not content_item:
+        raise NotFoundException("Evidence asset metadata not found")
+    metadata = content_item.get("metadata") if isinstance(content_item.get("metadata"), dict) else {}
+    asset_path = (
+        content_item.get("image_path")
+        or content_item.get("img_path")
+        or metadata.get("image_path")
+        or metadata.get("img_path")
+        or metadata.get("keyframe_path")
+    )
+    if not asset_path:
+        raise NotFoundException("Evidence asset file not found")
+    path = Path(str(asset_path))
+    if not path.exists() or not path.is_file():
+        raise NotFoundException("Evidence asset file is unavailable")
+    response = FileResponse(
+        path=str(path),
+        filename=path.name,
+        media_type="image/png" if path.suffix.lower() == ".png" else None,
+    )
+    response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(path.name)}"
+    return response
 
 
 @router.get("/student/courses/{class_id}/tasks", response_model=None)
@@ -2970,6 +3237,44 @@ def teacher_course_knowledge_graph(
     return _knowledge_graph_payload(db, cls)
 
 
+@router.get("/student/courses/{class_id}/knowledge-graph/evidence", response_model=None)
+def student_course_knowledge_graph_evidence(
+    class_id: str,
+    record_type: str = Query(..., alias="recordType"),
+    record_id: str = Query(..., alias="recordId"),
+    evidence_index: int = Query(0, ge=0, alias="evidenceIndex"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_student),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    return _knowledge_graph_evidence_payload(
+        db,
+        cls,
+        record_type=record_type,
+        record_id=record_id,
+        evidence_index=evidence_index,
+    )
+
+
+@router.get("/teacher/courses/{class_id}/knowledge-graph/evidence", response_model=None)
+def teacher_course_knowledge_graph_evidence(
+    class_id: str,
+    record_type: str = Query(..., alias="recordType"),
+    record_id: str = Query(..., alias="recordId"),
+    evidence_index: int = Query(0, ge=0, alias="evidenceIndex"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    cls = _class_or_404_with_access(db, class_id, current_user)
+    return _knowledge_graph_evidence_payload(
+        db,
+        cls,
+        record_type=record_type,
+        record_id=record_id,
+        evidence_index=evidence_index,
+    )
+
+
 def _graph_source_kind(value: dict[str, Any] | None) -> str:
     return str((value or {}).get("kind") or "").strip().lower()
 
@@ -3128,6 +3433,194 @@ def _attach_graph_source_summary(record: Any, material_by_id: dict[str, dict[str
     }
 
 
+def _graph_relation_description(relation: KnowledgeRelation) -> str:
+    source_span = relation.source_span if isinstance(relation.source_span, dict) else {}
+    provenance = relation.provenance if isinstance(relation.provenance, dict) else {}
+    for value in (
+        source_span.get("evidence"),
+        (provenance.get("raganything_relation") or {}).get("description")
+        if isinstance(provenance.get("raganything_relation"), dict)
+        else None,
+        (provenance.get("raganything_relation") or {}).get("summary")
+        if isinstance(provenance.get("raganything_relation"), dict)
+        else None,
+        (provenance.get("raganything_relation") or {}).get("evidence")
+        if isinstance(provenance.get("raganything_relation"), dict)
+        else None,
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text[:500]
+    return ""
+
+
+def _knowledge_graph_evidence_payload(
+    db: Session,
+    cls: Class,
+    *,
+    record_type: str,
+    record_id: str,
+    evidence_index: int,
+):
+    normalized_type = str(record_type or "").strip().lower()
+    if normalized_type in {"node", "entity"}:
+        record = (
+            db.query(KnowledgeEntity)
+            .filter(
+                KnowledgeEntity.id == record_id,
+                KnowledgeEntity.class_id == cls.id,
+                KnowledgeEntity.status != "rejected",
+            )
+            .first()
+        )
+    elif normalized_type in {"edge", "relation"}:
+        record = (
+            db.query(KnowledgeRelation)
+            .filter(
+                KnowledgeRelation.id == record_id,
+                KnowledgeRelation.class_id == cls.id,
+            )
+            .first()
+        )
+    else:
+        raise BadRequestException("recordType must be node/entity or edge/relation")
+    if not record:
+        raise NotFoundException("Knowledge graph record not found")
+
+    source_span = record.source_span if isinstance(record.source_span, dict) else {}
+    evidence_items = source_span.get("evidence_items") or []
+    if not isinstance(evidence_items, list):
+        evidence_items = [evidence_items]
+    evidence_item = evidence_items[evidence_index] if evidence_index < len(evidence_items) else {}
+    if not isinstance(evidence_item, dict):
+        evidence_item = {}
+
+    material_id = (
+        evidence_item.get("material_id")
+        or source_span.get("material_id")
+        or getattr(record, "source_material_id", None)
+    )
+    material = None
+    parse_task = None
+    content_item = None
+    if material_id:
+        material = (
+            db.query(Material)
+            .filter(
+                Material.id == str(material_id),
+                Material.class_id == cls.id,
+                Material.is_active == True,
+            )
+            .first()
+        )
+    if material:
+        parse_task = db.query(FileParseTask).filter(FileParseTask.material_id == material.id).first()
+        content_item = _match_evidence_content_item(parse_task, evidence_item)
+
+    merged_item = {**(content_item or {}), **evidence_item}
+    relation_text = _graph_relation_description(record) if isinstance(record, KnowledgeRelation) else None
+    text_excerpt = (
+        merged_item.get("formula_latex")
+        or merged_item.get("table_markdown")
+        or merged_item.get("ocr_text")
+        or merged_item.get("text")
+        or merged_item.get("caption")
+        or source_span.get("evidence")
+        or relation_text
+    )
+
+    download_url = _material_download_url(cls.course_id, material.id, material.file_name) if material else None
+    preview_url = (
+        f"/api/v1/courses/{cls.course_id}/files/{material.id}/preview"
+        if material
+        else None
+    )
+    view_url = _material_view_url(cls.course_id, material.id) if material else None
+    asset_url = (
+        _material_evidence_asset_url(
+            cls.course_id,
+            material.id,
+            item_id=merged_item.get("item_id"),
+            atomic_id=merged_item.get("atomic_id"),
+            content_index=merged_item.get("content_index"),
+        )
+        if material and merged_item.get("image_path")
+        else None
+    )
+    return ok(data={
+        "recordType": normalized_type,
+        "recordId": record_id,
+        "evidenceIndex": evidence_index,
+        "recordLabel": getattr(record, "name", None) or getattr(record, "relation_type", None),
+        "material": {
+            "id": material.id,
+            "title": material.title,
+            "fileName": material.file_name,
+            "fileType": material.file_type,
+            "mimeType": material.mime_type,
+            "downloadUrl": download_url,
+            "previewUrl": preview_url,
+            "viewUrl": view_url,
+        } if material else None,
+        "locator": {
+            "page": merged_item.get("page") or next(iter(source_span.get("pages") or []), None),
+            "bbox": merged_item.get("bbox") or source_span.get("bbox"),
+            "modality": merged_item.get("modality") or merged_item.get("type") or source_span.get("kind"),
+            "contentIndex": merged_item.get("content_index"),
+            "itemId": merged_item.get("item_id"),
+            "atomicId": merged_item.get("atomic_id"),
+            "chunkIds": source_span.get("chunk_ids") or [],
+            "coordinateSpace": merged_item.get("coordinate_space") or "unknown",
+        },
+        "content": {
+            "textExcerpt": str(text_excerpt or "")[:1200],
+            "formulaLatex": merged_item.get("formula_latex"),
+            "tableMarkdown": merged_item.get("table_markdown"),
+            "ocrText": merged_item.get("ocr_text"),
+        },
+        "asset": {
+            "imagePathPreview": os.path.basename(str(merged_item.get("image_path") or "")) or None,
+            "sourcePathPreview": os.path.basename(str(merged_item.get("source_path") or "")) or None,
+            "imageUrl": asset_url,
+            "hasImagePath": bool(merged_item.get("image_path")),
+            "hasSourcePath": bool(merged_item.get("source_path")),
+        },
+        "rawEvidence": evidence_item,
+        "sourceSpan": source_span,
+        "status": {
+            "parseTaskStatus": parse_task.status if parse_task else None,
+            "contentItemMatched": bool(content_item),
+            "viewerReady": bool(view_url or asset_url),
+        },
+    })
+
+
+def _match_evidence_content_item(parse_task: FileParseTask | None, evidence_item: dict[str, Any]) -> dict[str, Any] | None:
+    if not parse_task:
+        return None
+    raw_items = ((parse_task.extra_data or {}).get("content_items") or [])
+    if not isinstance(raw_items, list):
+        return None
+
+    evidence_item_id = str(evidence_item.get("item_id") or "").strip()
+    evidence_atomic_id = str(evidence_item.get("atomic_id") or "").strip()
+    evidence_index = evidence_item.get("content_index")
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_id = str(item.get("item_id") or metadata.get("item_id") or "").strip()
+        atomic_id = str(item.get("atomic_id") or metadata.get("atomic_id") or "").strip()
+        content_index = metadata.get("content_index") or item.get("content_index") or index
+        if evidence_item_id and evidence_item_id == item_id:
+            return item
+        if evidence_atomic_id and evidence_atomic_id == atomic_id:
+            return item
+        if evidence_index is not None and str(evidence_index) == str(content_index):
+            return item
+    return None
+
+
 def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = None):
     course = _get_course(db, cls.course_id)
     root_id = cls.course_id
@@ -3243,6 +3736,8 @@ def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = Non
         nodes.append({
             "id": entity.id,
             "label": entity.name,
+            "canonicalName": entity.canonical_name or entity.name,
+            "aliases": entity.aliases or [],
             "x": x,
             "y": y,
             "color": _graph_node_color(entity_type),
@@ -3277,6 +3772,8 @@ def _knowledge_graph_payload(db: Session, cls: Class, student: User | None = Non
             "source": relation.source_id,
             "target": relation.target_id,
             "label": relation.relation_type or "related_to",
+            "description": _graph_relation_description(relation),
+            "summary": _graph_relation_description(relation),
             "weight": relation.weight or 1.0,
             "confidence": relation.confidence,
             "sourceSpan": relation.source_span or {},
@@ -4278,6 +4775,14 @@ def _review_sources_for_teacher(item: ReviewItem) -> list[dict[str, Any]]:
 def _teacher_ai_question_payload(db: Session, item: ReviewItem) -> dict[str, Any]:
     student = db.query(User).filter(User.id == item.student_id).first()
     confidence = item.message.confidence if item.message else 0.0
+    sources = (item.message.sources if item.message else []) or []
+    quality = build_evidence_quality(sources, confidence)
+    review_context = build_review_context(
+        sources,
+        confidence,
+        trigger=item.trigger,
+        feedback=item.message.feedback if item.message else None,
+    )
     status = "pending"
     if item.status == "resolved":
         status = "adopted" if (item.teacher_answer or "").strip() == (item.ai_answer or "").strip() else "replied"
@@ -4289,6 +4794,12 @@ def _teacher_ai_question_payload(db: Session, item: ReviewItem) -> dict[str, Any
         "aiAnswer": item.ai_answer,
         "confidence": round(float(confidence or 0.0) * 100),
         "confidenceLevel": _confidence_level(confidence),
+        "quality": quality,
+        "reviewContext": review_context,
+        "review_context": review_context,
+        "evidenceSupport": round(float(quality.get("evidence_score") or 0.0) * 100),
+        "groundingLevel": quality.get("grounding_level"),
+        "sourceCount": quality.get("source_count"),
         "sources": _review_sources_for_teacher(item),
         "time": _iso(item.created_at),
         "status": status,

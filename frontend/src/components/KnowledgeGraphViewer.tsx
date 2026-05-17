@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent, WheelEvent } from "react";
 import {
   getKnowledgeGraphNeighborIds,
   getKnowledgeGraphRootIds,
@@ -6,13 +7,18 @@ import {
   normalizeKnowledgeGraph,
 } from "@/lib/knowledge-graph";
 import type {
+  CourseRole,
   KnowledgeGraphData,
   KnowledgeGraphEdge,
+  KnowledgeGraphEvidenceData,
   KnowledgeGraphNode,
 } from "@/types/course";
+import { courseService, fetchAuthenticatedObjectUrl } from "@/services/course";
 
 interface KnowledgeGraphViewerProps {
   title?: string;
+  courseId?: string;
+  role?: CourseRole;
   nodes: KnowledgeGraphNode[];
   edges: KnowledgeGraphEdge[];
   rootIds?: string[];
@@ -76,6 +82,20 @@ function computeViewBox(nodes: KnowledgeGraphNode[]) {
   const width = Math.max(maxX - minX + padding * 2, 420);
   const height = Math.max(maxY - minY + padding * 2, 300);
   return `${minX - padding} ${minY - padding} ${width} ${height}`;
+}
+
+function parseViewBox(value: string) {
+  const [x, y, width, height] = value.split(/\s+/).map((item) => Number(item));
+  return {
+    x: Number.isFinite(x) ? x : -120,
+    y: Number.isFinite(y) ? y : -120,
+    width: Number.isFinite(width) && width > 0 ? width : 240,
+    height: Number.isFinite(height) && height > 0 ? height : 240,
+  };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function stableHash(value: string) {
@@ -235,8 +255,64 @@ function provenanceSummary(value?: Record<string, unknown>) {
   return candidates.length > 0 ? String(candidates[0]) : "已记录结构化溯源";
 }
 
+function formatBBox(value: unknown) {
+  if (!Array.isArray(value) || value.length < 4) return "";
+  const parts = value.slice(0, 4).map((item) => Number(item));
+  if (parts.some((item) => Number.isNaN(item))) return "";
+  return parts.map((item) => Math.round(item * 100) / 100).join(", ");
+}
+
+function normalizedBBoxStyle(value: unknown): CSSProperties | null {
+  if (!Array.isArray(value) || value.length < 4) return null;
+  const parts = value.slice(0, 4).map((item) => Number(item));
+  if (parts.some((item) => Number.isNaN(item))) return null;
+  const max = Math.max(...parts);
+  const min = Math.min(...parts);
+  if (min < 0 || max > 1) return null;
+  const [x1, y1, x2, y2] = parts;
+  const width = Math.max(0.01, x2 - x1);
+  const height = Math.max(0.01, y2 - y1);
+  return {
+    left: `${x1 * 100}%`,
+    top: `${y1 * 100}%`,
+    width: `${width * 100}%`,
+    height: `${height * 100}%`,
+  };
+}
+
+function compactText(value: unknown, maxLength = 120) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function evidenceItemsFrom(sourceSpan?: Record<string, unknown>) {
+  const raw = sourceSpan?.evidence_items;
+  return Array.isArray(raw)
+    ? raw.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 5)
+    : [];
+}
+
+function relationEvidenceText(edge: KnowledgeGraphEdge) {
+  const candidates = [
+    edge.sourceSpan?.evidence,
+    (edge.provenance?.raganything_relation as Record<string, unknown> | undefined)?.description,
+    (edge.provenance?.raganything_relation as Record<string, unknown> | undefined)?.summary,
+    (edge.provenance?.raganything_relation as Record<string, unknown> | undefined)?.evidence,
+    edge.description,
+    edge.summary,
+  ];
+  for (const candidate of candidates) {
+    const text = compactText(candidate, 360);
+    if (text) return text;
+  }
+  return "";
+}
+
 export default function KnowledgeGraphViewer({
   title = "知识图谱可视化",
+  courseId,
+  role,
   nodes,
   edges,
   rootIds,
@@ -246,6 +322,7 @@ export default function KnowledgeGraphViewer({
   onClose,
 }: KnowledgeGraphViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const graphPaneRef = useRef<HTMLDivElement>(null);
   const normalized = useMemo(() => normalizeKnowledgeGraph(buildGraphData(nodes, edges, rootIds)), [edges, nodes, rootIds]);
   const resolvedRootIds = useMemo(() => {
     const explicitRoots = rootIds?.filter((id) => normalized.nodes.some((node) => node.id === id));
@@ -258,12 +335,73 @@ export default function KnowledgeGraphViewer({
   const [typeFilter, setTypeFilter] = useState("all");
   const [minConfidence, setMinConfidence] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [evidencePanel, setEvidencePanel] = useState<KnowledgeGraphEvidenceData | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [evidenceLoadingKey, setEvidenceLoadingKey] = useState<string | null>(null);
+  const [evidenceObject, setEvidenceObject] = useState<{ url: string; contentType: string; source: "asset" | "material" } | null>(null);
+  const [evidenceObjectLoading, setEvidenceObjectLoading] = useState(false);
+  const [evidenceObjectError, setEvidenceObjectError] = useState<string | null>(null);
+  const [viewport, setViewport] = useState({ zoom: 1, offsetX: 0, offsetY: 0 });
+  const [dragStart, setDragStart] = useState<{
+    clientX: number;
+    clientY: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
 
   useEffect(() => {
     setExpandedNodeIds(resolvedRootIds);
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
+    setEvidencePanel(null);
+    setEvidenceError(null);
+    setEvidenceObject(null);
+    setEvidenceObjectError(null);
   }, [resolvedRootIds]);
+
+  useEffect(() => {
+    if (!evidencePanel) {
+      setEvidenceObject(null);
+      setEvidenceObjectError(null);
+      setEvidenceObjectLoading(false);
+      return undefined;
+    }
+    const sourceUrl = evidencePanel.asset?.imageUrl || evidencePanel.material?.viewUrl;
+    const sourceKind = evidencePanel.asset?.imageUrl ? "asset" : "material";
+    if (!sourceUrl) {
+      setEvidenceObject(null);
+      setEvidenceObjectError(null);
+      setEvidenceObjectLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setEvidenceObject(null);
+    setEvidenceObjectError(null);
+    setEvidenceObjectLoading(true);
+    fetchAuthenticatedObjectUrl(sourceUrl)
+      .then((result) => {
+        objectUrl = result.objectUrl;
+        if (!cancelled) {
+          setEvidenceObject({ url: result.objectUrl, contentType: result.contentType, source: sourceKind });
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setEvidenceObjectError(error instanceof Error ? error.message : "证据原文加载失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setEvidenceObjectLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [evidencePanel]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -360,6 +498,30 @@ export default function KnowledgeGraphViewer({
   const typeOptions = useMemo(() => getNodeTypeOptions(normalized.nodes), [normalized.nodes]);
   const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) ?? null : null;
   const selectedEdge = selectedEdgeId ? normalized.edges.find((edge) => edge.id === selectedEdgeId) ?? null : null;
+  const selectedNodeEvidenceItems = evidenceItemsFrom(selectedNode?.sourceSpan);
+  const selectedEdgeEvidenceItems = evidenceItemsFrom(selectedEdge?.sourceSpan);
+  const selectedEdgeEvidenceText = selectedEdge ? relationEvidenceText(selectedEdge) : "";
+  const openEvidencePanel = async (recordType: "node" | "edge", recordId: string, evidenceIndex: number) => {
+    const key = `${recordType}:${recordId}:${evidenceIndex}`;
+    setEvidenceError(null);
+    if (!courseId || !role) {
+      setEvidenceError("当前页面未传入课程上下文，暂只能查看卡片中的定位线索。");
+      return;
+    }
+    setEvidenceLoadingKey(key);
+    try {
+      const payload = await courseService.getKnowledgeGraphEvidence(courseId, role, {
+        recordType,
+        recordId,
+        evidenceIndex,
+      });
+      setEvidencePanel(payload);
+    } catch (error) {
+      setEvidenceError(error instanceof Error ? error.message : "证据解析失败");
+    } finally {
+      setEvidenceLoadingKey(null);
+    }
+  };
   const selectedNodeNeighbors = selectedNode
     ? getKnowledgeGraphNeighborIds(normalized.edges, selectedNode.id, { undirected: true })
       .map((nodeId) => nodeById.get(nodeId))
@@ -383,7 +545,43 @@ export default function KnowledgeGraphViewer({
     });
     return { nodeIds, edgeIds };
   }, [displayVisible.edges, resolvedRootIds, selectedNodeId]);
-  const viewBox = useMemo(() => computeViewBox(displayVisible.nodes), [displayVisible.nodes]);
+  const baseViewBox = useMemo(() => parseViewBox(computeViewBox(displayVisible.nodes)), [displayVisible.nodes]);
+  const viewBox = useMemo(() => {
+    const width = baseViewBox.width / viewport.zoom;
+    const height = baseViewBox.height / viewport.zoom;
+    const x = baseViewBox.x + (baseViewBox.width - width) / 2 + viewport.offsetX;
+    const y = baseViewBox.y + (baseViewBox.height - height) / 2 + viewport.offsetY;
+    return `${x} ${y} ${width} ${height}`;
+  }, [baseViewBox, viewport]);
+
+  const zoomBy = (factor: number) => {
+    setViewport((current) => ({
+      ...current,
+      zoom: clamp(current.zoom * factor, 0.55, 3.5),
+    }));
+  };
+
+  const resetViewport = () => {
+    setViewport({ zoom: 1, offsetX: 0, offsetY: 0 });
+    setDragStart(null);
+  };
+
+  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    zoomBy(event.deltaY > 0 ? 0.9 : 1.1);
+  };
+
+  const handleMouseMove = (event: MouseEvent<HTMLDivElement>) => {
+    if (!dragStart || !graphPaneRef.current) return;
+    const rect = graphPaneRef.current.getBoundingClientRect();
+    const unitX = (baseViewBox.width / viewport.zoom) / Math.max(rect.width, 1);
+    const unitY = (baseViewBox.height / viewport.zoom) / Math.max(rect.height, 1);
+    setViewport((current) => ({
+      ...current,
+      offsetX: dragStart.offsetX - (event.clientX - dragStart.clientX) * unitX,
+      offsetY: dragStart.offsetY - (event.clientY - dragStart.clientY) * unitY,
+    }));
+  };
 
   const toggleNode = (nodeId: string) => {
     if (selectedNodeId === nodeId) {
@@ -410,6 +608,7 @@ export default function KnowledgeGraphViewer({
     setQuery("");
     setTypeFilter("all");
     setMinConfidence(0);
+    resetViewport();
   };
 
   const toggleFullscreen = async () => {
@@ -472,7 +671,7 @@ export default function KnowledgeGraphViewer({
               ))}
             </select>
             <label className="flex h-9 items-center gap-2 rounded-md border border-gray-200 px-3 text-xs text-gray-600">
-              置信度
+              证据强度
               <input
                 type="range"
                 min="0"
@@ -485,7 +684,23 @@ export default function KnowledgeGraphViewer({
             </label>
           </div>
 
-          <div className={`${isFullscreen ? "h-[calc(100vh-138px)]" : heightClassName} relative overflow-hidden bg-gray-50`}>
+          <div
+            ref={graphPaneRef}
+            className={`${isFullscreen ? "h-[calc(100vh-138px)]" : heightClassName} relative overflow-hidden bg-gray-50 ${dragStart ? "cursor-grabbing" : "cursor-grab"}`}
+            onWheel={handleWheel}
+            onMouseMove={handleMouseMove}
+            onMouseUp={() => setDragStart(null)}
+            onMouseLeave={() => setDragStart(null)}
+            onMouseDown={(event) => {
+              if (event.button !== 0) return;
+              setDragStart({
+                clientX: event.clientX,
+                clientY: event.clientY,
+                offsetX: viewport.offsetX,
+                offsetY: viewport.offsetY,
+              });
+            }}
+          >
             {displayVisible.nodes.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center px-6 text-center text-gray-500">
                 <i className="ri-mind-map text-4xl text-gray-300"></i>
@@ -504,7 +719,12 @@ export default function KnowledgeGraphViewer({
                   const isOneHop = selectedOneHop.edgeIds.has(edge.id);
                   const isDimmed = Boolean(selectedNodeId) && !isOneHop;
                   return (
-                    <g key={edge.id} className="cursor-pointer" onClick={() => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}>
+                    <g
+                      key={edge.id}
+                      className="cursor-pointer"
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={() => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
+                    >
                       <line
                         x1={sourceNode.x}
                         y1={sourceNode.y}
@@ -538,7 +758,13 @@ export default function KnowledgeGraphViewer({
                   const masteryMeta = getMasteryMeta(node);
                   const radius = node.type === "course" ? 28 : node.type === "material" ? 23 : 19;
                   return (
-                    <g key={node.id} className="cursor-pointer" opacity={isDimmed ? 0.26 : 1} onClick={() => toggleNode(node.id)}>
+                    <g
+                      key={node.id}
+                      className="cursor-pointer"
+                      opacity={isDimmed ? 0.26 : 1}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={() => toggleNode(node.id)}
+                    >
                       <circle
                         cx={node.x}
                         cy={node.y}
@@ -569,6 +795,36 @@ export default function KnowledgeGraphViewer({
                 })}
               </svg>
             )}
+
+            <div
+              className="absolute right-4 top-4 flex items-center gap-1 rounded-lg border border-gray-200 bg-white/95 p-1 shadow-sm"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => zoomBy(1.18)}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-600 hover:bg-gray-100"
+                title="放大"
+              >
+                <i className="ri-add-line"></i>
+              </button>
+              <button
+                type="button"
+                onClick={() => zoomBy(0.85)}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-600 hover:bg-gray-100"
+                title="缩小"
+              >
+                <i className="ri-subtract-line"></i>
+              </button>
+              <button
+                type="button"
+                onClick={resetViewport}
+                className="rounded-md px-2 text-xs font-medium text-gray-600 hover:bg-gray-100"
+                title="重置视图"
+              >
+                {Math.round(viewport.zoom * 100)}%
+              </button>
+            </div>
 
             <div className="absolute bottom-4 left-4 max-w-[calc(100%-2rem)] rounded-lg border border-gray-200 bg-white/95 p-3 shadow-sm">
               <div className="grid gap-3 md:grid-cols-2">
@@ -630,7 +886,7 @@ export default function KnowledgeGraphViewer({
                   <div className="mt-1 font-medium text-gray-800">{formatType(selectedNode.type)}</div>
                 </div>
                 <div className="rounded-md bg-gray-50 p-2">
-                  <div className="text-gray-400">抽取置信度</div>
+                  <div className="text-gray-400">证据强度</div>
                   <div className="mt-1 font-medium text-gray-800">{formatPercent(selectedNode.confidence)}</div>
                 </div>
                 <div className="rounded-md bg-gray-50 p-2">
@@ -677,6 +933,38 @@ export default function KnowledgeGraphViewer({
                 </div>
               </div>
 
+              {selectedNodeEvidenceItems.length > 0 && (
+                <div className="mt-4 rounded-md border border-teal-100 bg-teal-50/40 p-3">
+                  <div className="text-sm font-semibold text-gray-900">原文定位线索</div>
+                  <div className="mt-2 space-y-2">
+                    {selectedNodeEvidenceItems.map((item, index) => {
+                      const bbox = formatBBox(item.bbox);
+                      const preview = compactText(item.formula_latex || item.table_markdown || item.ocr_text, 110);
+                      const loading = evidenceLoadingKey === `node:${selectedNode.id}:${index}`;
+                      return (
+                        <button
+                          key={`${String(item.item_id || item.atomic_id || index)}-${index}`}
+                          type="button"
+                          onClick={() => void openEvidencePanel("node", selectedNode.id, index)}
+                          className="w-full rounded-md bg-white p-2 text-left text-xs leading-5 text-gray-600 ring-1 ring-transparent hover:ring-teal-200"
+                        >
+                          <div className="font-medium text-gray-800">
+                            {formatType(String(item.modality || "content"))}
+                            {item.page !== undefined ? ` · 第 ${String(item.page)} 页` : ""}
+                            {bbox ? ` · bbox: ${bbox}` : ""}
+                            {loading ? " · 解析中..." : ""}
+                          </div>
+                          {preview && <div className="mt-1 text-gray-500">{preview}</div>}
+                          {(item.image_path || item.source_path) && (
+                            <div className="mt-1 truncate text-teal-700">{String(item.image_path || item.source_path)}</div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <details className="mt-4">
                 <summary className="cursor-pointer text-sm font-medium text-gray-700">结构化来源</summary>
                 <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-gray-900 p-3 text-xs leading-5 text-gray-100">
@@ -704,7 +992,7 @@ export default function KnowledgeGraphViewer({
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                 <div className="rounded-md bg-gray-50 p-2">
-                  <div className="text-gray-400">抽取置信度</div>
+                  <div className="text-gray-400">证据强度</div>
                   <div className="mt-1 font-medium text-gray-800">{formatPercent(selectedEdge.confidence)}</div>
                 </div>
                 <div className="rounded-md bg-gray-50 p-2">
@@ -715,12 +1003,43 @@ export default function KnowledgeGraphViewer({
               <div className="mt-4 rounded-md border border-gray-100 p-3">
                 <div className="text-sm font-semibold text-gray-900">关系解释</div>
                 <div className="mt-1 text-sm leading-6 text-gray-600">
-                  当前关系表示两个知识点在课程资料中存在“{relationLabelText(getEdgeLabel(selectedEdge))}”联系。后续可以由教师审核或由模型补全更细的因果、先修、组成说明。
+                  {selectedEdgeEvidenceText || `当前关系表示两个知识点在课程资料中存在“${relationLabelText(getEdgeLabel(selectedEdge))}”联系。后续可以由教师审核或由模型补全更细的因果、先修、组成说明。`}
                 </div>
                 <div className="mt-2 text-xs text-gray-400">
                   来源：{provenanceSummary({ ...(selectedEdge.provenance || {}), ...(selectedEdge.sourceSpan || {}), ...(selectedEdge.sourceSummary || {}) })}
                 </div>
               </div>
+              {selectedEdgeEvidenceItems.length > 0 && (
+                <div className="mt-4 rounded-md border border-teal-100 bg-teal-50/40 p-3">
+                  <div className="text-sm font-semibold text-gray-900">关系证据定位</div>
+                  <div className="mt-2 space-y-2">
+                    {selectedEdgeEvidenceItems.map((item, index) => {
+                      const bbox = formatBBox(item.bbox);
+                      const preview = compactText(item.formula_latex || item.table_markdown || item.ocr_text, 110);
+                      const loading = evidenceLoadingKey === `edge:${selectedEdge.id}:${index}`;
+                      return (
+                        <button
+                          key={`${String(item.item_id || item.atomic_id || index)}-${index}`}
+                          type="button"
+                          onClick={() => void openEvidencePanel("edge", selectedEdge.id, index)}
+                          className="w-full rounded-md bg-white p-2 text-left text-xs leading-5 text-gray-600 ring-1 ring-transparent hover:ring-teal-200"
+                        >
+                          <div className="font-medium text-gray-800">
+                            {formatType(String(item.modality || "content"))}
+                            {item.page !== undefined ? ` · 第 ${String(item.page)} 页` : ""}
+                            {bbox ? ` · bbox: ${bbox}` : ""}
+                            {loading ? " · 解析中..." : ""}
+                          </div>
+                          {preview && <div className="mt-1 text-gray-500">{preview}</div>}
+                          {(item.image_path || item.source_path) && (
+                            <div className="mt-1 truncate text-teal-700">{String(item.image_path || item.source_path)}</div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <details className="mt-4">
                 <summary className="cursor-pointer text-sm font-medium text-gray-700">关系来源</summary>
                 <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-gray-900 p-3 text-xs leading-5 text-gray-100">
@@ -738,7 +1057,100 @@ export default function KnowledgeGraphViewer({
             <div className="flex h-full min-h-[220px] flex-col justify-center text-sm text-gray-500">
               <i className="ri-cursor-line mb-3 text-3xl text-gray-300"></i>
               <div className="font-medium text-gray-700">选择一个节点或关系</div>
-              <div className="mt-2 leading-6">点击节点可查看描述、置信度与来源；带加号的节点可继续展开邻居。</div>
+              <div className="mt-2 leading-6">点击节点可查看描述、证据强度与来源；滚轮缩放，拖动画布平移。</div>
+            </div>
+          )}
+
+          {(evidencePanel || evidenceError) && (
+            <div className="mt-4 rounded-md border border-teal-100 bg-white p-3 text-xs leading-5 text-gray-600 shadow-sm">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-gray-900">证据解析</div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEvidencePanel(null);
+                    setEvidenceError(null);
+                  }}
+                  className="text-gray-400 hover:text-gray-700"
+                >
+                  关闭
+                </button>
+              </div>
+              {evidenceError ? (
+                <div className="mt-2 rounded-md bg-amber-50 p-2 text-amber-700">{evidenceError}</div>
+              ) : evidencePanel ? (
+                <div className="mt-2 space-y-2">
+                  {evidencePanel.material && (
+                    <div className="rounded-md bg-gray-50 p-2">
+                      <div className="font-medium text-gray-800">{evidencePanel.material.title || evidencePanel.material.fileName}</div>
+                      <div className="mt-1 text-gray-500">
+                        {evidencePanel.material.fileName}
+                        {evidencePanel.locator?.page !== undefined && evidencePanel.locator?.page !== null
+                          ? ` · 第 ${String(evidencePanel.locator.page)} 页`
+                          : ""}
+                        {evidencePanel.locator?.bbox ? ` · bbox: ${formatBBox(evidencePanel.locator.bbox)}` : ""}
+                      </div>
+                    </div>
+                  )}
+                  {evidencePanel.content?.textExcerpt && (
+                    <div className="rounded-md bg-teal-50/60 p-2 text-gray-700">{evidencePanel.content.textExcerpt}</div>
+                  )}
+                  {(evidencePanel.asset?.imagePathPreview || evidencePanel.asset?.sourcePathPreview) && (
+                    <div className="rounded-md bg-gray-50 p-2 text-gray-500">
+                      {evidencePanel.asset.imagePathPreview && <div>图片：{evidencePanel.asset.imagePathPreview}</div>}
+                      {evidencePanel.asset.sourcePathPreview && <div>来源：{evidencePanel.asset.sourcePathPreview}</div>}
+                    </div>
+                  )}
+                  {(evidenceObjectLoading || evidenceObjectError || evidenceObject) && (
+                    <div className="rounded-md border border-gray-100 bg-gray-50 p-2">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="font-medium text-gray-800">原文定位预览</div>
+                        {evidencePanel.status?.viewerReady && (
+                          <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] text-teal-700">已接入证据源</span>
+                        )}
+                      </div>
+                      {evidenceObjectLoading && <div className="text-gray-500">正在加载原文...</div>}
+                      {evidenceObjectError && <div className="rounded bg-amber-50 p-2 text-amber-700">{evidenceObjectError}</div>}
+                      {evidenceObject && (
+                        evidenceObject.source === "asset" || evidenceObject.contentType.startsWith("image/") ? (
+                          <div className="relative overflow-hidden rounded border border-gray-200 bg-white">
+                            <img src={evidenceObject.url} alt="证据图片" className="max-h-72 w-full object-contain" />
+                            {normalizedBBoxStyle(evidencePanel.locator?.bbox) && (
+                              <div
+                                className="pointer-events-none absolute border-2 border-rose-500 bg-rose-500/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.08)]"
+                                style={normalizedBBoxStyle(evidencePanel.locator?.bbox) || undefined}
+                              />
+                            )}
+                          </div>
+                        ) : evidenceObject.contentType.includes("pdf") || evidencePanel.material?.fileType === "pdf" ? (
+                          <iframe
+                            title="证据原文"
+                            src={evidenceObject.url}
+                            className="h-72 w-full rounded border border-gray-200 bg-white"
+                          />
+                        ) : (
+                          <a href={evidenceObject.url} target="_blank" rel="noreferrer" className="text-teal-700 hover:text-teal-800">
+                            在新窗口打开原文
+                          </a>
+                        )
+                      )}
+                      {evidencePanel.locator?.bbox && !normalizedBBoxStyle(evidencePanel.locator.bbox) && (
+                        <div className="mt-2 text-[11px] text-gray-400">
+                          当前 bbox 不是归一化坐标，已展示坐标值，暂不叠加高亮框。
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {evidencePanel.material?.previewUrl && (
+                    <a
+                      href={evidencePanel.material.previewUrl}
+                      className="inline-flex items-center text-teal-700 hover:text-teal-800"
+                    >
+                      打开资料预览
+                    </a>
+                  )}
+                </div>
+              ) : null}
             </div>
           )}
         </aside>

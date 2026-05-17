@@ -37,6 +37,7 @@ import type {
   JoinCourseRequest,
   JoinCourseResult,
   KnowledgeGraphData,
+  KnowledgeGraphEvidenceData,
   StudentCourseBootstrapData,
   StudentCourseHomeData,
   StudentCourseMaterialsData,
@@ -109,6 +110,26 @@ export async function downloadCourseFileFromUrl(downloadUrl: string, fileName: s
   URL.revokeObjectURL(objectUrl);
 }
 
+export async function fetchAuthenticatedObjectUrl(url: string) {
+  const session = getAuthSession();
+  const headers = new Headers();
+  if (session?.accessToken && shouldAttachAuthToDownload(url)) {
+    headers.set("Authorization", `Bearer ${session.accessToken}`);
+  }
+  const response = await fetch(resolveDownloadUrl(url), {
+    headers,
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error("证据原文加载失败");
+  }
+  const blob = await response.blob();
+  return {
+    objectUrl: URL.createObjectURL(blob),
+    contentType: blob.type,
+  };
+}
+
 function buildFormData(files: File[], extra?: CoursePayload) {
   const formData = new FormData();
 
@@ -146,6 +167,21 @@ export const courseService = {
     return shouldUseMockApi
       ? getMockCourseKnowledgeGraph(courseId)
       : http<KnowledgeGraphData>(`/${role}/courses/${courseId}/knowledge-graph`);
+  },
+
+  async getKnowledgeGraphEvidence(
+    courseId: string,
+    role: CourseRole,
+    params: { recordType: "node" | "edge"; recordId: string; evidenceIndex: number },
+  ): Promise<KnowledgeGraphEvidenceData> {
+    const search = new URLSearchParams({
+      recordType: params.recordType,
+      recordId: params.recordId,
+      evidenceIndex: String(params.evidenceIndex),
+    });
+    return http<KnowledgeGraphEvidenceData>(
+      `/${role}/courses/${courseId}/knowledge-graph/evidence?${search.toString()}`,
+    );
   },
 
   async getStudentCourseMaterials(
@@ -265,6 +301,27 @@ export const courseService = {
       : http<TeacherCourseMaterialDownloadData>(
           `/teacher/courses/${courseId}/materials/${fileId}/download`,
         );
+  },
+
+  getCourseMaterialEvidenceAssetUrl(
+    role: CourseRole,
+    courseId: string,
+    fileId: string | number,
+    params: { itemId?: string; atomicId?: string; contentIndex?: string },
+  ): string {
+    return buildUrl(`/${role}/courses/${courseId}/materials/${fileId}/evidence-asset`, {
+      itemId: params.itemId,
+      atomicId: params.atomicId,
+      contentIndex: params.contentIndex,
+    });
+  },
+
+  getCourseMaterialViewUrl(
+    role: CourseRole,
+    courseId: string,
+    fileId: string | number,
+  ): string {
+    return buildUrl(`/${role}/courses/${courseId}/materials/${fileId}/view`);
   },
 
   async getTeacherCourseHome(courseId: string): Promise<TeacherCourseHomeData> {

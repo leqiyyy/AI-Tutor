@@ -13,6 +13,7 @@
 | D5 | 429 核心链路测试资料 | `backend/runtime_tmp/429_core_chain_reports/*.json` | 2 次完整链路运行 | Markdown 表格/公式 + 图片上传、解析、检索、图谱、AI 答疑、教师审核回流 | 端到端功能验证 | 2/2 次 passed |
 | D6 | 实际知识库导出产物 | `backend/runtime_tmp/final_chunks.csv` 等 | 1932 chunks、708 entities、1616 relations | 多模态描述、实体、关系、source span/provenance | 展示知识库构建与图谱投影结果 | 已有可展示表 |
 | D7 | 后端功能回归测试 | `backend/tests/` | 多个 API/服务测试文件 | 登录注册、课程、KB、RAG、推荐、通知、指标等 | 功能正确性回归 | 认证子集当前 4 passed；完整套件本次未纳入结果 |
+| D8 | Text-only dense vector RAG baseline | `backend/runtime_tmp/experiment_reports/raw_text_vector_rag_85/` | 85 题、22 个原始文件、114 个 raw-text chunks | 普通文本抽取、分块、BGE-M3 向量嵌入、独立 Qdrant collection、同一生成模型回答 | 普通向量 RAG 对照 | 已完成 |
 
 ## 2. 数据集结构
 
@@ -29,6 +30,7 @@
 
 | 模式 | 数据集 | 问题数 | 可评分题数 | API 成功 | Recall@5 | MRR | nDCG@5 | 引用有效率 | 平均时延(s) | P95 时延(s) | 平均来源数 | 平均置信度 | 待审核数 | zero-hit 数 | 结论 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Text-only dense vector RAG | D1 | 85 | 77 | 85/85 | 0.6580 | 0.7024 | 0.6135 | 1.0000 | 8.81 | 11.13 | 4.98 | - | - | 14 | 普通向量 RAG 强于图谱 local/global/hybrid 的文件级召回，但低于系统 naive；长尾时延较低 |
 | naive | D1 | 85 | 77 | 85/85 | 0.7662 | 0.8424 | 0.7100 | 1.0000 | 9.73 | 27.26 | 4.09 | 0.7374 | 25 | 1 | v1 中检索指标最高且速度较快，但置信度偏低、待审核较多 |
 | mix | D1 | 85 | 77 | 85/85 | 0.6840 | 0.8251 | 0.6562 | 1.0000 | 100.48 | 152.28 | 4.11 | 0.7565 | 20 | 3 | 召回明显优于 local/hybrid/global，但延迟最高 |
 | local | D1 | 85 | 77 | 85/85 | 0.4372 | 0.4608 | 0.3955 | 1.0000 | 11.68 | 67.83 | 4.42 | 0.8642 | 6 | 33 | 置信度高、待审核少，但检索召回低于 naive/mix |
@@ -138,4 +140,3 @@
 | 拒答能力 | unanswerable refusal_accuracy 仅 0.125 或 0.1667 | slice analysis | 需要加强证据不足时的拒答策略 |
 | 延迟 | mix 召回较好但平均 100.48s，显著慢于 naive/local/hybrid/global | corrected summary | 需要优化 mix 模式或按意图路由选择模式 |
 | 图谱展示质量 | 关系和实体已可导出，但存在 table/artifact 类节点 | final_entities/final_relations | 前端展示应继续过滤材料/表格结构类 artifact 节点 |
-

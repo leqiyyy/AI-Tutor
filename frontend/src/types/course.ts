@@ -27,6 +27,8 @@ export type CourseRole = "student" | "teacher";
 export interface KnowledgeGraphNode {
   id: string;
   label: string;
+  canonicalName?: string | null;
+  aliases?: string[];
   x: number;
   y: number;
   parent?: string | null;
@@ -52,6 +54,8 @@ export interface KnowledgeGraphEdge {
   target: string;
   relationType?: string;
   label?: string;
+  description?: string;
+  summary?: string;
   color?: string;
   dashed?: boolean;
   confidence?: number | null;
@@ -64,6 +68,51 @@ export interface KnowledgeGraphEdge {
 export interface KnowledgeGraphMeta {
   rootNodeId?: string | null;
   layout?: "preset" | "force";
+}
+
+export interface KnowledgeGraphEvidenceData {
+  recordType: string;
+  recordId: string;
+  evidenceIndex: number;
+  recordLabel?: string | null;
+  material?: {
+    id: string;
+    title?: string | null;
+    fileName?: string | null;
+    fileType?: string | null;
+    mimeType?: string | null;
+    downloadUrl?: string | null;
+    previewUrl?: string | null;
+    viewUrl?: string | null;
+  } | null;
+  locator?: {
+    page?: number | string | null;
+    bbox?: unknown;
+    modality?: string | null;
+    contentIndex?: number | string | null;
+    itemId?: string | null;
+    atomicId?: string | null;
+    chunkIds?: string[];
+    coordinateSpace?: string | null;
+  };
+  content?: {
+    textExcerpt?: string | null;
+    formulaLatex?: string | null;
+    tableMarkdown?: string | null;
+    ocrText?: string | null;
+  };
+  asset?: {
+    imagePathPreview?: string | null;
+    sourcePathPreview?: string | null;
+    imageUrl?: string | null;
+    hasImagePath?: boolean;
+    hasSourcePath?: boolean;
+  };
+  status?: {
+    parseTaskStatus?: string | null;
+    contentItemMatched?: boolean;
+    viewerReady?: boolean;
+  };
 }
 
 export interface KnowledgeGraphData {

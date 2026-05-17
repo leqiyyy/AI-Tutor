@@ -16,6 +16,8 @@ class KnowledgeEntity(Base):
     id = Column(String(36), primary_key=True, default=_uuid)
     class_id = Column(String(36), ForeignKey("classes.id"), nullable=False)
     name = Column(String(300), nullable=False)
+    canonical_name = Column(String(300), nullable=True)
+    aliases = Column(JSON, nullable=True)
     entity_type = Column(String(100), nullable=True)  # concept, person, formula, etc.
     description = Column(Text, nullable=True)
     source_material_id = Column(String(36), ForeignKey("materials.id"), nullable=True)

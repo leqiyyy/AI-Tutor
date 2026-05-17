@@ -23,6 +23,7 @@ from app.integrations.rag import get_rag_engine
 from app.integrations.parser.simple import SimpleParserProvider
 from app.integrations.preprocessors import preprocess_for_raganything
 from app.integrations.rag.quality import build_evidence_quality, build_review_context
+from app.integrations.rag.rag_mode_router import build_router_prompt, route_rag_mode
 from app.models.course import Class, ClassMember, Material, Submission, Task
 from app.models.chat import ChatCitation, ChatMessage, ChatSession, ReviewItem, ReviewSyncRecord
 from app.models.knowledge import FileParseTask, KBSpace
@@ -455,6 +456,42 @@ async def send_message(
             "embedding_backend": routing_meta.get("embedding_backend"),
         },
     )
+    await _emit_progress(
+        progress_callback,
+        stage="rag_mode_route",
+        status="running",
+        label="正在选择检索策略",
+        started_at=progress_started,
+    )
+    kb_stats = _build_rag_kb_stats(db, class_id)
+    rag_mode_decision = await route_rag_mode(
+        question=retrieval_question,
+        answer_mode=answer_mode,
+        role=role,
+        attachments=prepared_attachments,
+        kb_stats=kb_stats,
+        llm_classifier=lambda payload: _classify_rag_mode_with_llm(db=db, payload=payload),
+    )
+    rag_mode_meta = rag_mode_decision.to_meta()
+    log.info(
+        "rag_mode_router_decision",
+        class_id=class_id,
+        answer_mode=answer_mode,
+        mode=rag_mode_decision.mode,
+        selected_by=rag_mode_decision.selected_by,
+        confidence=rag_mode_decision.confidence,
+        reason=rag_mode_decision.reason,
+        top_k=rag_mode_decision.top_k,
+        chunk_top_k=rag_mode_decision.chunk_top_k,
+    )
+    await _emit_progress(
+        progress_callback,
+        stage="rag_mode_route",
+        status="done",
+        label=f"检索策略已选择：{rag_mode_decision.mode}",
+        started_at=progress_started,
+        details=rag_mode_meta,
+    )
     rag_started = perf_counter()
     rag_latency_ms = None
     try:
@@ -472,6 +509,8 @@ async def send_message(
             attachments=prepared_attachments,
             role=role,
             progress_callback=progress_callback,
+            query_mode=rag_mode_decision.mode,
+            query_options=rag_mode_decision.to_query_options(),
         )
         rag_latency_ms = round((perf_counter() - rag_started) * 1000, 2)
         await _emit_progress(
@@ -482,6 +521,10 @@ async def send_message(
             started_at=progress_started,
             details={"latency_ms": rag_latency_ms},
         )
+        result.meta = {
+            **(getattr(result, "meta", {}) or {}),
+            "rag_mode_router": rag_mode_meta,
+        }
         result_meta = getattr(result, "meta", {}) or {}
         evidence_quality = build_evidence_quality(result.sources or [], result.confidence)
         review_context = build_review_context(
@@ -532,6 +575,7 @@ async def send_message(
                 "retrieval_focus_terms": result_meta.get("retrieval_focus_terms"),
                 "conversation_context": conversation_context.to_rag_meta(),
                 "question_route": question_route.to_meta(),
+                "rag_mode_router": result_meta.get("rag_mode_router") or rag_mode_meta,
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -557,7 +601,7 @@ async def send_message(
             user_id=user_id,
             role=role,
             engine=settings.RAG_ENGINE or "unknown",
-            query_mode=settings.RAGANYTHING_QUERY_MODE,
+            query_mode=rag_mode_decision.mode,
             query_method=None,
             used_multimodal=any((item or {}).get("file_type") == "image" for item in (prepared_attachments or [])),
             used_fallback=True,
@@ -587,6 +631,7 @@ async def send_message(
                 "query_variant_count": 1,
                 "conversation_context": conversation_context.to_rag_meta(),
                 "question_route": question_route.to_meta(),
+                "rag_mode_router": rag_mode_meta,
                 "llm_backend": routing_meta.get("llm_backend"),
                 "embedding_backend": routing_meta.get("embedding_backend"),
                 "vlm_backend": routing_meta.get("vlm_backend"),
@@ -600,6 +645,8 @@ async def send_message(
             "suggestions": [],
             "meta": {
                 "engine": settings.RAG_ENGINE,
+                "query_mode": rag_mode_decision.mode,
+                "rag_mode_router": rag_mode_meta,
                 "used_fallback": True,
                 "fallback_reason": "chat_service_exception",
             },
@@ -691,6 +738,7 @@ async def send_message(
             "engine": result_meta.get("engine"),
             "query_mode": result_meta.get("query_mode"),
             "query_method": result_meta.get("query_method"),
+            "rag_mode_router": result_meta.get("rag_mode_router") or rag_mode_meta,
             "used_fallback": used_fallback,
             "fallback_reason": result_meta.get("fallback_reason"),
             "latency_ms": round((perf_counter() - progress_started) * 1000, 2),
@@ -710,8 +758,63 @@ async def send_message(
         "session_id": session.id,
         "user_message": _msg_to_dict(user_msg),
         "ai_message": _msg_to_dict(ai_msg),
-        "route_meta": _build_response_route_meta(question_route, retrieval_used=True),
+        "route_meta": {
+            **_build_response_route_meta(question_route, retrieval_used=True),
+            "rag_mode_router": result_meta.get("rag_mode_router") or rag_mode_meta,
+        },
     }
+
+
+def _build_rag_kb_stats(db: Session, class_id: str) -> dict[str, Any]:
+    try:
+        kb_space = (
+            db.query(KBSpace)
+            .filter(KBSpace.class_id == class_id)
+            .order_by(KBSpace.updated_at.desc())
+            .first()
+        )
+        completed_tasks = db.query(FileParseTask).filter(
+            FileParseTask.class_id == class_id,
+            FileParseTask.status == "completed",
+        ).all()
+        indexed_material_count = db.query(Material).filter(
+            Material.class_id == class_id,
+            Material.kb_status == "indexed",
+        ).count()
+        chunk_count = int(getattr(kb_space, "chunk_count", 0) or 0)
+        if not chunk_count:
+            chunk_count = sum(len(task.chunks or []) for task in completed_tasks)
+        return {
+            "class_id": class_id,
+            "status": getattr(kb_space, "status", None),
+            "document_count": int(getattr(kb_space, "document_count", 0) or len({task.material_id for task in completed_tasks})),
+            "indexed_material_count": int(indexed_material_count or 0),
+            "completed_task_count": len(completed_tasks),
+            "chunk_count": chunk_count,
+        }
+    except Exception as exc:
+        log.warning("rag_kb_stats_build_failed", class_id=class_id, error=str(exc))
+        return {"class_id": class_id, "chunk_count": 0, "error": str(exc)[:300]}
+
+
+async def _classify_rag_mode_with_llm(*, db: Session, payload: dict[str, Any]) -> dict[str, Any] | str | None:
+    system_prompt, user_prompt = build_router_prompt(payload)
+    messages = [
+        LLMMessage(role="system", content=system_prompt),
+        LLMMessage(role="user", content=user_prompt),
+    ]
+    return await _call_generation_llm(
+        db=db,
+        messages=messages,
+        attachments=[],
+        generation_overrides={
+            "temperature": settings.RAG_MODE_ROUTER_LLM_TEMPERATURE,
+            "top_p": settings.RAG_MODE_ROUTER_LLM_TOP_P,
+            "max_tokens": settings.RAG_MODE_ROUTER_LLM_MAX_TOKENS,
+            "enable_thinking": settings.RAG_MODE_ROUTER_LLM_ENABLE_THINKING,
+            "thinking_budget": settings.RAG_MODE_ROUTER_LLM_THINKING_BUDGET,
+        },
+    )
 
 
 def _persist_direct_ai_answer(
@@ -973,10 +1076,13 @@ async def _call_generation_llm(
     db: Session,
     messages: list[LLMMessage],
     attachments: list[dict] | None = None,
+    generation_overrides: dict[str, Any] | None = None,
 ) -> str:
     persisted_model_config = admin_service.get_model_config(db)
     routing_snapshot = model_routing_service.build_model_routing_snapshot(persisted_model_config)
     generation = routing_snapshot.get("generation") or {}
+    if generation_overrides:
+        generation = {**generation, **generation_overrides}
     if generation.get("effective_backend") == "mock":
         return await MockLLMProvider().chat(messages)
 
